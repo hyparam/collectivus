@@ -1,0 +1,22 @@
+{
+  "name": "collectivus",
+  "version": "1.0.0",
+  "description": "Zero-dependency OTLP/HTTP JSON collector that writes to JSONL files",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "collectivus": "bin/cli.js"
+  },
+  "scripts": {
+    "start": "node bin/cli.js"
+  },
+  "keywords": [
+    "opentelemetry",
+    "otlp",
+    "collector",
+    "traces",
+    "metrics",
+    "logs"
+  ],
+  "license": "MIT"
+}

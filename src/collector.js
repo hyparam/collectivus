@@ -4,7 +4,7 @@ import { createServer } from './server.js'
 
 class Collector {
   constructor(options = {}) {
-    this.port = options.port || 4318
+    this.port = options.port ?? 4318
     this.outputDir = options.outputDir || './otel-data'
     this.server = null
   }

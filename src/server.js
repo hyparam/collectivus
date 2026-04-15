@@ -1,4 +1,5 @@
 import http from 'node:http'
+import zlib from 'node:zlib'
 
 function createServer(handler) {
   const server = http.createServer(function(req, res) {
@@ -18,12 +19,25 @@ function createServer(handler) {
       return
     }
 
-    let body = ''
-    req.on('data', function(chunk) {
-      body += chunk.toString()
+    const encoding = (req.headers['content-encoding'] || '').toLowerCase()
+    let stream = req
+    if (encoding === 'gzip') {
+      stream = req.pipe(zlib.createGunzip())
+    } else if (encoding === 'deflate') {
+      stream = req.pipe(zlib.createInflate())
+    } else if (encoding && encoding !== 'identity') {
+      res.writeHead(415, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: `Unsupported Content-Encoding: ${encoding}` }))
+      return
+    }
+
+    const chunks = []
+    stream.on('data', function(chunk) {
+      chunks.push(chunk)
     })
 
-    req.on('end', function() {
+    stream.on('end', function() {
+      const body = Buffer.concat(chunks).toString('utf8')
       let data
       try {
         data = body ? JSON.parse(body) : {}
@@ -40,8 +54,8 @@ function createServer(handler) {
       res.end(JSON.stringify({}))
     })
 
-    req.on('error', function(err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' })
+    stream.on('error', function(err) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: err.message }))
     })
   })

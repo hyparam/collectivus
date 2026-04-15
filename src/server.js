@@ -9,9 +9,13 @@ const emptyResponse = {
   logs: { partialSuccess: { rejectedLogRecords: 0 } },
 }
 
+/**
+ * @param {(signal: string, data: unknown) => void} handler
+ * @returns {import('node:http').Server}
+ */
 function createServer(handler) {
   const server = http.createServer(function(req, res) {
-    const url = new URL(req.url, `http://${req.headers.host}`)
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
     const path = url.pathname
 
     if (req.method !== 'POST') {
@@ -35,6 +39,7 @@ function createServer(handler) {
     }
 
     const encoding = (req.headers['content-encoding'] || '').toLowerCase()
+    /** @type {NodeJS.ReadableStream} */
     let stream = req
     if (encoding === 'gzip') {
       stream = req.pipe(zlib.createGunzip())
@@ -46,6 +51,7 @@ function createServer(handler) {
       return
     }
 
+    /** @type {Buffer[]} */
     const chunks = []
     stream.on('data', function(chunk) {
       chunks.push(chunk)
@@ -63,11 +69,14 @@ function createServer(handler) {
         return
       }
 
-      const signal = path.split('/').pop()
+      const signal = path.slice('/v1/'.length)
       handler(signal, data)
 
       res.writeHead(200, JSON_CT)
-      res.end(JSON.stringify(emptyResponse[signal]))
+      const response = signal === 'traces' ? emptyResponse.traces
+        : signal === 'metrics' ? emptyResponse.metrics
+          : emptyResponse.logs
+      res.end(JSON.stringify(response))
     })
 
     stream.on('error', function(err) {

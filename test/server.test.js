@@ -5,15 +5,20 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import { Collector } from '../src/index.js'
 
+/** @type {Collector} */
 let collector
+/** @type {string} */
 let outputDir
+/** @type {string} */
 let baseUrl
 
 beforeEach(async () => {
   outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-'))
   collector = new Collector({ port: 0, outputDir })
   await collector.start()
-  baseUrl = `http://127.0.0.1:${collector.server.address().port}`
+  const addr = collector.server?.address()
+  if (!addr || typeof addr === 'string') throw new Error('no address')
+  baseUrl = `http://127.0.0.1:${addr.port}`
 })
 
 afterEach(async () => {
@@ -21,10 +26,14 @@ afterEach(async () => {
   fs.rmSync(outputDir, { recursive: true, force: true })
 })
 
+/**
+ * @param {string} signal
+ * @returns {unknown[]}
+ */
 function readLines(signal) {
   const file = path.join(outputDir, `${signal}.jsonl`)
   if (!fs.existsSync(file)) return []
-  return fs.readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse)
+  return fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
 }
 
 describe('OTLP endpoints', () => {

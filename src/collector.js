@@ -3,9 +3,11 @@ import path from 'node:path'
 import { createServer } from './server.js'
 
 class Collector {
+  /** @param {{ port?: number, outputDir?: string }} [options] */
   constructor(options = {}) {
     this.port = options.port ?? 4318
     this.outputDir = options.outputDir || './otel-data'
+    /** @type {import('node:http').Server | null} */
     this.server = null
   }
 
@@ -14,36 +16,33 @@ class Collector {
       fs.mkdirSync(this.outputDir, { recursive: true })
     }
 
-    this.server = createServer(this.handleData.bind(this))
+    const server = createServer(this.handleData.bind(this))
+    this.server = server
 
     return new Promise((resolve) => {
-      this.server.listen(this.port, function() {
-        resolve()
-      })
+      server.listen(this.port, () => resolve(undefined))
     })
   }
 
   stop() {
     return new Promise((resolve, reject) => {
-      if (!this.server) {
-        resolve()
+      const { server } = this
+      if (!server) {
+        resolve(undefined)
         return
       }
 
-      this.server.close(function(err) {
-        if (err) {
-          reject(err)
-        } else {
-          resolve()
-        }
-      })
+      server.close((err) => err ? reject(err) : resolve(undefined))
     })
   }
 
+  /**
+   * @param {string} signal
+   * @param {unknown} data
+   */
   handleData(signal, data) {
     const filePath = path.join(this.outputDir, `${signal}.jsonl`)
-    const line = JSON.stringify(data) + '\n'
-    fs.appendFileSync(filePath, line)
+    fs.appendFileSync(filePath, JSON.stringify(data) + '\n')
   }
 }
 

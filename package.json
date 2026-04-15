@@ -11,12 +11,15 @@
     "start": "node bin/cli.js",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc"
   },
   "devDependencies": {
+    "@types/node": "25.6.0",
     "eslint": "9.39.2",
     "eslint-plugin-jsdoc": "62.9.0",
     "globals": "16.2.0",
+    "typescript": "6.0.2",
     "vitest": "2.1.0"
   },
   "keywords": [

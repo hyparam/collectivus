@@ -42,6 +42,7 @@ function createServer(handler) {
       try {
         data = body ? JSON.parse(body) : {}
       } catch (err) {
+        console.error('Invalid JSON:', err)
         res.writeHead(400, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ error: 'Invalid JSON' }))
         return

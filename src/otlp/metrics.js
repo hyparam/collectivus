@@ -1,15 +1,11 @@
 /**
- * Decoders for OTLP metric messages — subset covering Gauge, Sum, and
- * NumberDataPoint. Histogram / ExponentialHistogram / Summary / Exemplar
- * land on `skipField` for now; extend when needed.
+ * Decoders for OTLP metric messages. Data-point shapes live in
+ * ./datapoints.js; this file handles the Metric oneof dispatch and the
+ * Resource/Scope/Export wrappers.
  */
 
 import {
   readBytes,
-  readDouble,
-  readFixed32,
-  readFixed64,
-  readSFixed64,
   readTag,
   readVarint,
   skipField,
@@ -21,33 +17,12 @@ import {
   decodeString,
   makeReader,
 } from './common.js'
-
-/**
- * @param {Uint8Array} bytes
- * @returns {object}
- */
-function decodeNumberDataPoint(bytes) {
-  const r = makeReader(bytes)
-  const end = bytes.byteLength
-  /** @type {Record<string, unknown>} */
-  const out = {}
-  /** @type {object[]} */
-  const attributes = []
-  while (r.offset < end) {
-    const { fieldNumber, wireType } = readTag(r)
-    switch (fieldNumber) {
-    case 2: out.startTimeUnixNano = readFixed64(r).toString(); break
-    case 3: out.timeUnixNano = readFixed64(r).toString(); break
-    case 4: out.asDouble = readDouble(r); break
-    case 6: out.asInt = readSFixed64(r).toString(); break
-    case 7: attributes.push(decodeKeyValue(readBytes(r))); break
-    case 8: out.flags = readFixed32(r); break
-    default: skipField(r, wireType)
-    }
-  }
-  if (attributes.length) out.attributes = attributes
-  return out
-}
+import {
+  decodeExponentialHistogramDataPoint,
+  decodeHistogramDataPoint,
+  decodeNumberDataPoint,
+  decodeSummaryDataPoint,
+} from './datapoints.js'
 
 /**
  * @param {Uint8Array} bytes
@@ -97,11 +72,79 @@ function decodeSum(bytes) {
  * @param {Uint8Array} bytes
  * @returns {object}
  */
+function decodeHistogram(bytes) {
+  const r = makeReader(bytes)
+  const end = bytes.byteLength
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  /** @type {object[]} */
+  const dataPoints = []
+  while (r.offset < end) {
+    const { fieldNumber, wireType } = readTag(r)
+    switch (fieldNumber) {
+    case 1: dataPoints.push(decodeHistogramDataPoint(readBytes(r))); break
+    case 2: out.aggregationTemporality = readVarint(r); break
+    default: skipField(r, wireType)
+    }
+  }
+  out.dataPoints = dataPoints
+  return out
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {object}
+ */
+function decodeExponentialHistogram(bytes) {
+  const r = makeReader(bytes)
+  const end = bytes.byteLength
+  /** @type {Record<string, unknown>} */
+  const out = {}
+  /** @type {object[]} */
+  const dataPoints = []
+  while (r.offset < end) {
+    const { fieldNumber, wireType } = readTag(r)
+    switch (fieldNumber) {
+    case 1: dataPoints.push(decodeExponentialHistogramDataPoint(readBytes(r))); break
+    case 2: out.aggregationTemporality = readVarint(r); break
+    default: skipField(r, wireType)
+    }
+  }
+  out.dataPoints = dataPoints
+  return out
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {object}
+ */
+function decodeSummary(bytes) {
+  const r = makeReader(bytes)
+  const end = bytes.byteLength
+  /** @type {object[]} */
+  const dataPoints = []
+  while (r.offset < end) {
+    const { fieldNumber, wireType } = readTag(r)
+    if (fieldNumber === 1) {
+      dataPoints.push(decodeSummaryDataPoint(readBytes(r)))
+    } else {
+      skipField(r, wireType)
+    }
+  }
+  return { dataPoints }
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {object}
+ */
 function decodeMetric(bytes) {
   const r = makeReader(bytes)
   const end = bytes.byteLength
   /** @type {Record<string, unknown>} */
   const out = {}
+  /** @type {object[]} */
+  const metadata = []
   while (r.offset < end) {
     const { fieldNumber, wireType } = readTag(r)
     switch (fieldNumber) {
@@ -110,9 +153,14 @@ function decodeMetric(bytes) {
     case 3: out.unit = decodeString(readBytes(r)); break
     case 5: out.gauge = decodeGauge(readBytes(r)); break
     case 7: out.sum = decodeSum(readBytes(r)); break
+    case 9: out.histogram = decodeHistogram(readBytes(r)); break
+    case 10: out.exponentialHistogram = decodeExponentialHistogram(readBytes(r)); break
+    case 11: out.summary = decodeSummary(readBytes(r)); break
+    case 12: metadata.push(decodeKeyValue(readBytes(r))); break
     default: skipField(r, wireType)
     }
   }
+  if (metadata.length) out.metadata = metadata
   return out
 }
 
@@ -166,8 +214,6 @@ function decodeResourceMetrics(bytes) {
 
 /**
  * Decode an ExportMetricsServiceRequest (the top-level OTLP/HTTP metrics body).
- * Only Gauge and Sum metric types are decoded; Histogram / ExponentialHistogram
- * / Summary fields are skipped.
  *
  * @param {Uint8Array} bytes
  * @returns {{ resourceMetrics: object[] }}

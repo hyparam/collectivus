@@ -108,6 +108,79 @@ export function bytesField(field, bytes) {
 }
 
 /**
+ * Packed repeated fixed64 field (all values in a single LEN blob).
+ *
+ * @param {number} field
+ * @param {(bigint | number)[]} values
+ * @returns {number[]}
+ */
+export function packedFixed64Field(field, values) {
+  const buf = Buffer.alloc(values.length * 8)
+  for (let i = 0; i < values.length; i++) {
+    buf.writeBigUInt64LE(BigInt(values[i]), i * 8)
+  }
+  return lenDelim(field, [...buf])
+}
+
+/**
+ * Packed repeated double field.
+ *
+ * @param {number} field
+ * @param {number[]} values
+ * @returns {number[]}
+ */
+export function packedDoubleField(field, values) {
+  const buf = Buffer.alloc(values.length * 8)
+  for (let i = 0; i < values.length; i++) {
+    buf.writeDoubleLE(values[i], i * 8)
+  }
+  return lenDelim(field, [...buf])
+}
+
+/**
+ * Varint encoder for bigints (uint64).
+ *
+ * @param {bigint} n
+ * @returns {number[]}
+ */
+export function varBigInt(n) {
+  /** @type {number[]} */
+  const out = []
+  while (n > 0x7fn) {
+    out.push(Number(n & 0x7fn) | 0x80)
+    n >>= 7n
+  }
+  out.push(Number(n))
+  return out
+}
+
+/**
+ * Packed repeated uint64 field (bigint varints).
+ *
+ * @param {number} field
+ * @param {(bigint | number)[]} values
+ * @returns {number[]}
+ */
+export function packedVarBigIntField(field, values) {
+  /** @type {number[]} */
+  const payload = []
+  for (const v of values) payload.push(...varBigInt(BigInt(v)))
+  return lenDelim(field, payload)
+}
+
+/**
+ * Zigzag-encoded sint32 varint field.
+ *
+ * @param {number} field
+ * @param {number} value
+ * @returns {number[]}
+ */
+export function sint32Field(field, value) {
+  const zz = value << 1 ^ value >> 31
+  return [...tag(field, 0), ...varint(zz >>> 0)]
+}
+
+/**
  * @param {number[]} arr
  * @returns {Uint8Array}
  */

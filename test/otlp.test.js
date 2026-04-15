@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   decodeAnyValue,
+  decodeInstrumentationScope,
   decodeKeyValue,
+  decodeKeyValueList,
   decodeResource,
 } from '../src/otlp/common.js'
 import { decodeExportLogsServiceRequest } from '../src/otlp/logs.js'
@@ -13,7 +15,11 @@ import {
   fixed32Field,
   fixed64Field,
   lenDelim,
+  packedDoubleField,
+  packedFixed64Field,
+  packedVarBigIntField,
   sfixed64Field,
+  sint32Field,
   stringField,
   u8,
   varintField,
@@ -199,4 +205,227 @@ describe('decodeExportMetricsServiceRequest', () => {
       }],
     })
   })
+
+  it('decodes a Sum with a negative sfixed64', () => {
+    const dp = lenDelim(1, [...fixed64Field(3, 10n), ...sfixed64Field(6, -5n)])
+    const sum = lenDelim(7, dp)
+    const metric = [...stringField(1, 'delta'), ...sum]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0].sum.dataPoints[0]).toEqual({
+      timeUnixNano: '10',
+      asInt: '-5',
+    })
+  })
+
+  it('decodes a Gauge datapoint with an exemplar', () => {
+    const traceId = new Array(16).fill(0x11)
+    const spanId = new Array(8).fill(0x22)
+    const exemplar = [
+      ...fixed64Field(2, 999n),
+      ...doubleField(3, 2.5),
+      ...bytesField(4, spanId),
+      ...bytesField(5, traceId),
+    ]
+    const dp = [...fixed64Field(3, 200n), ...doubleField(4, 1.0), ...lenDelim(5, exemplar)]
+    const metric = [...stringField(1, 'm'), ...lenDelim(5, lenDelim(1, dp))]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0].gauge.dataPoints[0].exemplars).toEqual([{
+      timeUnixNano: '999',
+      asDouble: 2.5,
+      spanId: '2222222222222222',
+      traceId: '11111111111111111111111111111111',
+    }])
+  })
+
+  it('decodes a Histogram with packed bucket_counts and explicit_bounds', () => {
+    const dp = [
+      ...fixed64Field(3, 1000n),
+      ...fixed64Field(4, 5n),
+      ...doubleField(5, 12.5),
+      ...packedFixed64Field(6, [1n, 2n, 2n]),
+      ...packedDoubleField(7, [1.0, 5.0]),
+      ...doubleField(11, 0.5),
+      ...doubleField(12, 9.0),
+    ]
+    const histogram = [...lenDelim(1, dp), ...varintField(2, 1)]
+    const metric = [...stringField(1, 'latency'), ...lenDelim(9, histogram)]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0]).toEqual({
+      name: 'latency',
+      histogram: {
+        aggregationTemporality: 1,
+        dataPoints: [{
+          timeUnixNano: '1000',
+          count: '5',
+          sum: 12.5,
+          bucketCounts: ['1', '2', '2'],
+          explicitBounds: [1.0, 5.0],
+          min: 0.5,
+          max: 9.0,
+        }],
+      },
+    })
+  })
+
+  it('decodes an ExponentialHistogram with negative scale and Buckets', () => {
+    const positive = [...sint32Field(1, 3), ...packedVarBigIntField(2, [0n, 1n, 4n])]
+    const dp = [
+      ...fixed64Field(3, 2000n),
+      ...fixed64Field(4, 5n),
+      ...doubleField(5, 10.0),
+      ...sint32Field(6, -2),
+      ...fixed64Field(7, 1n),
+      ...lenDelim(8, positive),
+      ...doubleField(14, 1e-9),
+    ]
+    const expHist = [...lenDelim(1, dp), ...varintField(2, 2)]
+    const metric = [...stringField(1, 'exp'), ...lenDelim(10, expHist)]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0].exponentialHistogram).toEqual({
+      aggregationTemporality: 2,
+      dataPoints: [{
+        timeUnixNano: '2000',
+        count: '5',
+        sum: 10.0,
+        scale: -2,
+        zeroCount: '1',
+        positive: { offset: 3, bucketCounts: ['0', '1', '4'] },
+        zeroThreshold: 1e-9,
+      }],
+    })
+  })
+
+  it('decodes a Summary with two quantile_values', () => {
+    const q1 = lenDelim(6, [...doubleField(1, 0.5), ...doubleField(2, 1.5)])
+    const q2 = lenDelim(6, [...doubleField(1, 0.99), ...doubleField(2, 9.9)])
+    const dp = [...fixed64Field(3, 100n), ...fixed64Field(4, 20n), ...doubleField(5, 50.0), ...q1, ...q2]
+    const summary = lenDelim(11, lenDelim(1, dp))
+    const metric = [...stringField(1, 'lat'), ...summary]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0].summary).toEqual({
+      dataPoints: [{
+        timeUnixNano: '100',
+        count: '20',
+        sum: 50.0,
+        quantileValues: [
+          { quantile: 0.5, value: 1.5 },
+          { quantile: 0.99, value: 9.9 },
+        ],
+      }],
+    })
+  })
+
+  it('decodes Metric.metadata', () => {
+    const kv = lenDelim(12, [...stringField(1, 'k'), ...lenDelim(2, stringField(1, 'v'))])
+    const dp = lenDelim(1, [...fixed64Field(3, 1n), ...doubleField(4, 1)])
+    const metric = [...stringField(1, 'm'), ...lenDelim(5, dp), ...kv]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, metric)))
+
+    /** @type {any} */
+    const result = decodeExportMetricsServiceRequest(u8(req))
+    expect(result.resourceMetrics[0].scopeMetrics[0].metrics[0].metadata).toEqual([
+      { key: 'k', value: { stringValue: 'v' } },
+    ])
+  })
 })
+
+describe('common gap-fills', () => {
+  it('decodeKeyValueList wraps KeyValue entries', () => {
+    const kv1 = lenDelim(1, [...stringField(1, 'a'), ...lenDelim(2, stringField(1, '1'))])
+    const kv2 = lenDelim(1, [...stringField(1, 'b'), ...lenDelim(2, varintField(2, 1))])
+    expect(decodeKeyValueList(u8([...kv1, ...kv2]))).toEqual({
+      values: [
+        { key: 'a', value: { stringValue: '1' } },
+        { key: 'b', value: { boolValue: true } },
+      ],
+    })
+  })
+
+  it('decodeInstrumentationScope decodes name, version, attributes, droppedAttributesCount', () => {
+    const attr = lenDelim(3, [...stringField(1, 'k'), ...lenDelim(2, stringField(1, 'v'))])
+    const bytes = [
+      ...stringField(1, 'my-lib'),
+      ...stringField(2, '1.2.3'),
+      ...attr,
+      ...varintField(4, 2),
+    ]
+    expect(decodeInstrumentationScope(u8(bytes))).toEqual({
+      name: 'my-lib',
+      version: '1.2.3',
+      attributes: [{ key: 'k', value: { stringValue: 'v' } }],
+      droppedAttributesCount: 2,
+    })
+  })
+})
+
+describe('traces gap-fills', () => {
+  it('decodes a Span with event, link, and Status.message', () => {
+    const event = lenDelim(11, [
+      ...fixed64Field(1, 500n),
+      ...stringField(2, 'hit'),
+    ])
+    const linkTrace = new Array(16).fill(0xaa)
+    const linkSpan = new Array(8).fill(0xbb)
+    const link = lenDelim(13, [
+      ...bytesField(1, linkTrace),
+      ...bytesField(2, linkSpan),
+      ...fixed32Field(6, 3),
+    ])
+    const status = lenDelim(15, [...stringField(2, 'oops'), ...varintField(3, 2)])
+    const span = [
+      ...bytesField(1, new Array(16).fill(0x01)),
+      ...bytesField(2, new Array(8).fill(0x02)),
+      ...stringField(5, 's'),
+      ...fixed64Field(7, 1n),
+      ...fixed64Field(8, 2n),
+      ...event,
+      ...link,
+      ...status,
+    ]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, span)))
+
+    /** @type {any} */
+    const result = decodeExportTraceServiceRequest(u8(req))
+    const decoded = result.resourceSpans[0].scopeSpans[0].spans[0]
+    expect(decoded.events).toEqual([{ timeUnixNano: '500', name: 'hit' }])
+    expect(decoded.links).toEqual([{
+      traceId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      spanId: 'bbbbbbbbbbbbbbbb',
+      flags: 3,
+    }])
+    expect(decoded.status).toEqual({ message: 'oops', code: 2 })
+  })
+})
+
+describe('logs gap-fills', () => {
+  it('decodes a log body that is a kvlist', () => {
+    const kv = lenDelim(1, [...stringField(1, 'user'), ...lenDelim(2, stringField(1, 'alice'))])
+    const body = lenDelim(5, lenDelim(6, kv))
+    const logRecord = [...fixed64Field(1, 1n), ...body]
+    const req = lenDelim(1, lenDelim(2, lenDelim(2, logRecord)))
+
+    /** @type {any} */
+    const result = decodeExportLogsServiceRequest(u8(req))
+    expect(result.resourceLogs[0].scopeLogs[0].logRecords[0].body).toEqual({
+      kvlistValue: {
+        values: [{ key: 'user', value: { stringValue: 'alice' } }],
+      },
+    })
+  })
+})
+

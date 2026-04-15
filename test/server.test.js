@@ -58,13 +58,56 @@ describe('OTLP endpoints', () => {
   })
 
   it('appends multiple payloads as separate lines', async () => {
+    const headers = { 'Content-Type': 'application/json' }
     await fetch(`${baseUrl}/v1/logs`, {
-      method: 'POST', body: JSON.stringify({ n: 1 }),
+      method: 'POST', headers, body: JSON.stringify({ n: 1 }),
     })
     await fetch(`${baseUrl}/v1/logs`, {
-      method: 'POST', body: JSON.stringify({ n: 2 }),
+      method: 'POST', headers, body: JSON.stringify({ n: 2 }),
     })
     expect(readLines('logs')).toEqual([{ n: 1 }, { n: 2 }])
+  })
+
+  it('returns OTLP ExportPartialSuccess responses', async () => {
+    const headers = { 'Content-Type': 'application/json' }
+    const body = JSON.stringify({})
+
+    const traces = await fetch(`${baseUrl}/v1/traces`, { method: 'POST', headers, body })
+    expect(traces.headers.get('content-type')).toBe('application/json')
+    expect(await traces.json()).toEqual({ partialSuccess: { rejectedSpans: 0 } })
+
+    const metrics = await fetch(`${baseUrl}/v1/metrics`, { method: 'POST', headers, body })
+    expect(await metrics.json()).toEqual({ partialSuccess: { rejectedDataPoints: 0 } })
+
+    const logs = await fetch(`${baseUrl}/v1/logs`, { method: 'POST', headers, body })
+    expect(await logs.json()).toEqual({ partialSuccess: { rejectedLogRecords: 0 } })
+  })
+
+  it('accepts Content-Type with charset parameter', async () => {
+    const res = await fetch(`${baseUrl}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ ok: true }),
+    })
+    expect(res.status).toBe(200)
+  })
+
+  it('rejects missing Content-Type with 415', async () => {
+    const res = await fetch(`${baseUrl}/v1/traces`, {
+      method: 'POST',
+      body: JSON.stringify({ ok: true }),
+    })
+    expect(res.status).toBe(415)
+    expect(await res.json()).toMatchObject({ code: 3 })
+  })
+
+  it('rejects non-JSON Content-Type with 415', async () => {
+    const res = await fetch(`${baseUrl}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf' },
+      body: 'binary',
+    })
+    expect(res.status).toBe(415)
   })
 })
 

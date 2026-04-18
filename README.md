@@ -20,6 +20,17 @@ npx collectivus
 npx collectivus --port 8080 --output /var/log/otel
 ```
 
+Configuration can also be supplied via environment variables, which is
+convenient when wrapping the CLI in a process manager (launchd, systemd,
+etc.) that passes config via `EnvironmentVariables`:
+
+- `COLLECTIVUS_PORT` — listen port (default `4318`)
+- `COLLECTIVUS_OUTPUT_DIR` — JSONL output directory (default `./otel-data`)
+
+Argv takes precedence over environment variables when both are set.
+
+The CLI handles `SIGINT` and `SIGTERM` for graceful shutdown.
+
 ### Programmatic
 
 ```javascript

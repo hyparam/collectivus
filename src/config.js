@@ -23,15 +23,17 @@ export function resolveOptions(argv, env) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--port' && argv[i + 1]) {
-      options.port = parseInt(argv[i + 1], 10)
+      const port = parseInt(argv[i + 1], 10)
+      if (!Number.isNaN(port)) options.port = port
       i++
     } else if (arg.startsWith('--port=')) {
-      options.port = parseInt(arg.split('=')[1], 10)
+      const port = parseInt(arg.slice('--port='.length), 10)
+      if (!Number.isNaN(port)) options.port = port
     } else if (arg === '--output' && argv[i + 1]) {
       options.outputDir = argv[i + 1]
       i++
     } else if (arg.startsWith('--output=')) {
-      options.outputDir = arg.split('=')[1]
+      options.outputDir = arg.slice('--output='.length)
     }
   }
 

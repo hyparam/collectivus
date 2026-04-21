@@ -37,4 +37,36 @@ describe('resolveOptions', () => {
     expect(resolveOptions([], { COLLECTIVUS_PORT: '9001' })).toEqual({ port: 9001 })
     expect(resolveOptions(['--output', '/tmp/only'], {})).toEqual({ outputDir: '/tmp/only' })
   })
+
+  it('ignores non-numeric --port=VALUE', () => {
+    expect(resolveOptions(['--port=abc'], {})).toEqual({})
+  })
+
+  it('ignores non-numeric --port VALUE (space form)', () => {
+    expect(resolveOptions(['--port', 'abc'], {})).toEqual({})
+  })
+
+  it('ignores empty --port value after =', () => {
+    expect(resolveOptions(['--port='], {})).toEqual({})
+  })
+
+  it("ignores empty --port '' space form", () => {
+    expect(resolveOptions(['--port', ''], {})).toEqual({})
+  })
+
+  it('preserves = characters in --output=VALUE', () => {
+    expect(resolveOptions(['--output=/tmp/a=b'], {})).toEqual({
+      outputDir: '/tmp/a=b',
+    })
+  })
+
+  it('still parses --port=4319 correctly', () => {
+    expect(resolveOptions(['--port=4319'], {})).toEqual({ port: 4319 })
+  })
+
+  it('still parses --output /tmp/x space form', () => {
+    expect(resolveOptions(['--output', '/tmp/x'], {})).toEqual({
+      outputDir: '/tmp/x',
+    })
+  })
 })

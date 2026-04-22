@@ -154,6 +154,7 @@ describe('OTLP endpoints', () => {
   })
 
   it('uses _unknown when service.name is missing', async () => {
+    /** @type {unknown} */
     const payload = {
       resourceLogs: [
         {

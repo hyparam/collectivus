@@ -50,7 +50,7 @@ describe('resolveOptions', () => {
     expect(resolveOptions(['--port='], {})).toEqual({})
   })
 
-  it("ignores empty --port '' space form", () => {
+  it('ignores empty --port \'\' space form', () => {
     expect(resolveOptions(['--port', ''], {})).toEqual({})
   })
 

@@ -5,3 +5,9 @@ coverage
 .DS_Store
 *.jsonl
 .codex
+
+# Beads / Dolt files (added by bd init)
+.beads/
+.dolt/
+*.db
+.beads-credential-key

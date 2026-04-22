@@ -31,7 +31,17 @@ afterEach(async () => {
  * @returns {unknown[]}
  */
 function readLines(signal) {
-  const file = path.join(outputDir, `${signal}.jsonl`)
+  const file = path.join(outputDir, signal, `${new Date().toISOString().slice(0, 10)}.jsonl`)
+  if (!fs.existsSync(file)) return []
+  return fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+}
+
+/**
+ * @param {string} serviceName
+ * @returns {unknown[]}
+ */
+function readNormalizedLogLines(serviceName) {
+  const file = path.join(outputDir, 'logs-by-service', serviceName, `${new Date().toISOString().slice(0, 10)}.jsonl`)
   if (!fs.existsSync(file)) return []
   return fs.readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
 }
@@ -75,6 +85,101 @@ describe('OTLP endpoints', () => {
       method: 'POST', headers, body: JSON.stringify({ n: 2 }),
     })
     expect(readLines('logs')).toEqual([{ n: 1 }, { n: 2 }])
+  })
+
+  it('writes normalized one-row-per-log-record files partitioned by service.name', async () => {
+    const payload = {
+      resourceLogs: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'svc-a' } },
+            ],
+          },
+          scopeLogs: [
+            {
+              scope: { name: 'test.scope', version: '1.2.3' },
+              logRecords: [
+                {
+                  timeUnixNano: '1776886719688000000',
+                  severityNumber: 9,
+                  severityText: 'INFO',
+                  body: { stringValue: 'hello 1' },
+                  attributes: [{ key: 'k', value: { stringValue: 'v1' } }],
+                },
+                {
+                  timeUnixNano: '1776886719689000000',
+                  severityNumber: 13,
+                  severityText: 'WARN',
+                  body: { stringValue: 'hello 2' },
+                  attributes: [{ key: 'k', value: { stringValue: 'v2' } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const res = await fetch(`${baseUrl}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(res.status).toBe(200)
+
+    expect(readLines('logs')).toEqual([payload])
+    expect(readNormalizedLogLines('svc-a')).toEqual([
+      expect.objectContaining({
+        serviceName: 'svc-a',
+        timestamp: '2026-04-22T19:38:39.688Z',
+        severityNumber: 9,
+        severityText: 'INFO',
+        body: 'hello 1',
+        resource: { 'service.name': 'svc-a' },
+        scope: { name: 'test.scope', version: '1.2.3', attributes: {} },
+        attributes: { k: 'v1' },
+      }),
+      expect.objectContaining({
+        serviceName: 'svc-a',
+        timestamp: '2026-04-22T19:38:39.689Z',
+        severityNumber: 13,
+        severityText: 'WARN',
+        body: 'hello 2',
+        resource: { 'service.name': 'svc-a' },
+        scope: { name: 'test.scope', version: '1.2.3', attributes: {} },
+        attributes: { k: 'v2' },
+      }),
+    ])
+  })
+
+  it('uses _unknown when service.name is missing', async () => {
+    const payload = {
+      resourceLogs: [
+        {
+          resource: { attributes: [] },
+          scopeLogs: [
+            {
+              logRecords: [
+                { body: { stringValue: 'missing service name' } },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+    const res = await fetch(`${baseUrl}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(res.status).toBe(200)
+    expect(readNormalizedLogLines('_unknown')).toEqual([
+      expect.objectContaining({
+        serviceName: '_unknown',
+        body: 'missing service name',
+      }),
+    ])
   })
 
   it('returns OTLP ExportPartialSuccess responses', async () => {

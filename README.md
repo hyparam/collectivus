@@ -49,9 +49,12 @@ Data is written to JSONL files in the output directory:
 
 ```
 otel-data/
-├── traces.jsonl
-├── metrics.jsonl
-└── logs.jsonl
+├── traces/
+│   └── YYYY-MM-DD.jsonl
+├── metrics/
+│   └── YYYY-MM-DD.jsonl
+└── logs/
+    └── YYYY-MM-DD.jsonl
 ```
 
 Each line is a JSON object representing the received payload.
@@ -66,7 +69,7 @@ node bin/cli.js
 curl -X POST localhost:4318/v1/traces -H 'Content-Type: application/json' -d '{"test": true}'
 
 # Check output
-cat otel-data/traces.jsonl
+cat otel-data/traces/$(date -u +%F).jsonl
 ```
 
 ## License

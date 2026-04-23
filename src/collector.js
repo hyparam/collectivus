@@ -174,6 +174,8 @@ function appendLegacyNormalizedLogRow(outputDir, serviceName, row) {
 function migrateLegacyServiceFiles(outputDir) {
   const servicesDir = path.join(outputDir, 'services')
   if (!fs.existsSync(servicesDir)) return
+  /** @type {{ filePath: string, fileName: string, serviceDirName: string, rawText: string, rows: NormalizedServiceRow[] }[]} */
+  const legacyFiles = []
 
   for (const serviceDirName of fs.readdirSync(servicesDir)) {
     const serviceDir = path.join(servicesDir, serviceDirName)
@@ -191,9 +193,31 @@ function migrateLegacyServiceFiles(outputDir) {
       if (!fileContainsLegacyRawEnvelope(filePath, collectionKey)) continue
 
       const rawText = fs.readFileSync(filePath, 'utf8')
-      preserveLegacyServiceRawFile(outputDir, serviceDirName, fileName, rawText)
-      writeRowsFile(filePath, flattenSignalText(signal, rawText))
+      legacyFiles.push({
+        filePath,
+        fileName,
+        serviceDirName,
+        rawText,
+        rows: flattenSignalText(signal, rawText),
+      })
     }
+  }
+
+  /** @type {Map<string, NormalizedServiceRow[]>} */
+  const migratedRowsByFilePath = new Map()
+  for (const legacyFile of legacyFiles) {
+    preserveLegacyServiceRawFile(outputDir, legacyFile.serviceDirName, legacyFile.fileName, legacyFile.rawText)
+    groupMigratedRowsByTargetFile(servicesDir, legacyFile.fileName, legacyFile.rows, migratedRowsByFilePath)
+  }
+
+  const legacyFilePaths = new Set(legacyFiles.map((legacyFile) => legacyFile.filePath))
+  for (const legacyFile of legacyFiles) {
+    writeRowsFile(legacyFile.filePath, migratedRowsByFilePath.get(legacyFile.filePath) ?? [])
+  }
+
+  for (const [filePath, rows] of migratedRowsByFilePath) {
+    if (legacyFilePaths.has(filePath)) continue
+    appendRowsFile(filePath, rows)
   }
 }
 
@@ -216,13 +240,49 @@ function preserveLegacyServiceRawFile(outputDir, serviceDirName, fileName, rawTe
 }
 
 /**
+ * Legacy raw service files can contain rows for multiple actual services, so
+ * repartition them by each normalized row's serviceName before rewriting.
+ *
+ * @param {string} servicesDir
+ * @param {string} fileName
+ * @param {NormalizedServiceRow[]} rows
+ * @param {Map<string, NormalizedServiceRow[]>} rowsByFilePath
+ * @returns {void}
+ */
+function groupMigratedRowsByTargetFile(servicesDir, fileName, rows, rowsByFilePath) {
+  for (const row of rows) {
+    const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
+    const filePath = path.join(servicesDir, serviceName, fileName)
+    const existingRows = rowsByFilePath.get(filePath)
+    if (existingRows) {
+      existingRows.push(row)
+    } else {
+      rowsByFilePath.set(filePath, [row])
+    }
+  }
+}
+
+/**
  * @param {string} filePath
  * @param {NormalizedServiceRow[]} rows
  * @returns {void}
  */
 function writeRowsFile(filePath, rows) {
+  ensureDir(path.dirname(filePath))
   const text = rows.map((row) => JSON.stringify(row)).join('\n')
   fs.writeFileSync(filePath, text ? `${text}\n` : '')
+}
+
+/**
+ * @param {string} filePath
+ * @param {NormalizedServiceRow[]} rows
+ * @returns {void}
+ */
+function appendRowsFile(filePath, rows) {
+  if (!rows.length) return
+  ensureDir(path.dirname(filePath))
+  const text = rows.map((row) => JSON.stringify(row)).join('\n')
+  fs.appendFileSync(filePath, `${text}\n`)
 }
 
 /**

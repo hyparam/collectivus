@@ -383,6 +383,84 @@ describe('OTLP endpoints', () => {
     expect(readPreservedServiceRawLines('svc-legacy', 'traces')).toEqual([legacyPayload])
   })
 
+  it('repartitions migrated legacy rows by each row service name', async () => {
+    await collector.stop()
+
+    const legacyPayload = {
+      resourceSpans: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'svc-a' } },
+            ],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                { name: 'span-a' },
+              ],
+            },
+          ],
+        },
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'svc-b' } },
+            ],
+          },
+          scopeSpans: [
+            {
+              spans: [
+                { name: 'span-b' },
+              ],
+            },
+          ],
+        },
+        {
+          resource: { attributes: [] },
+          scopeSpans: [
+            {
+              spans: [
+                { name: 'span-unknown' },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const file = path.join(outputDir, 'services', 'svc-source', `traces-${new Date().toISOString().slice(0, 10)}.jsonl`)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(legacyPayload) + '\n')
+
+    collector = new Collector({ port: 0, outputDir })
+    await collector.start()
+
+    expect(readServiceLines('svc-a', 'traces')).toEqual([
+      expect.objectContaining({
+        serviceName: 'svc-a',
+        name: 'span-a',
+        resource: { 'service.name': 'svc-a' },
+      }),
+    ])
+    expect(readServiceLines('svc-b', 'traces')).toEqual([
+      expect.objectContaining({
+        serviceName: 'svc-b',
+        name: 'span-b',
+        resource: { 'service.name': 'svc-b' },
+      }),
+    ])
+    expect(readServiceLines('_unknown', 'traces')).toEqual([
+      expect.objectContaining({
+        serviceName: '_unknown',
+        name: 'span-unknown',
+        resource: {},
+      }),
+    ])
+    expect(readServiceLines('svc-source', 'traces')).toEqual([])
+    expect(readPreservedServiceRawLines('svc-source', 'traces')).toEqual([legacyPayload])
+  })
+
   it('writes normalized one-row-per-log-record files partitioned by service.name', async () => {
     const payload = {
       resourceLogs: [

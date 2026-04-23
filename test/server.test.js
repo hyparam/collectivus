@@ -183,6 +183,131 @@ describe('OTLP endpoints', () => {
     ])
   })
 
+  it('ignores malformed OTLP timestamps instead of failing the request', async () => {
+    const payload = {
+      resourceLogs: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'svc-a' } },
+            ],
+          },
+          scopeLogs: [
+            {
+              logRecords: [
+                {
+                  timeUnixNano: 'not-a-number',
+                  observedTimeUnixNano: '999999999999999999999999999999999999',
+                  body: { stringValue: 'bad timestamps' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const res = await fetch(`${baseUrl}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(res.status).toBe(200)
+    expect(readNormalizedLogLines('svc-a')).toEqual([
+      expect.not.objectContaining({
+        timestamp: expect.anything(),
+      }),
+    ])
+    expect(readNormalizedLogLines('svc-a')).toEqual([
+      expect.not.objectContaining({
+        observedTimestamp: expect.anything(),
+      }),
+    ])
+    expect(readNormalizedLogLines('svc-a')).toEqual([
+      expect.objectContaining({
+        serviceName: 'svc-a',
+        body: 'bad timestamps',
+      }),
+    ])
+  })
+
+  it('preserves empty-string AnyValue strings in normalized logs', async () => {
+    const payload = {
+      resourceLogs: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: 'svc-a' } },
+            ],
+          },
+          scopeLogs: [
+            {
+              logRecords: [
+                {
+                  body: { stringValue: '' },
+                  attributes: [
+                    { key: 'empty', value: { stringValue: '' } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const res = await fetch(`${baseUrl}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(res.status).toBe(200)
+    expect(readNormalizedLogLines('svc-a')).toEqual([
+      expect.objectContaining({
+        serviceName: 'svc-a',
+        body: '',
+        attributes: { empty: '' },
+      }),
+    ])
+  })
+
+  it('neutralizes dot segments in service-based log paths', async () => {
+    const payload = {
+      resourceLogs: [
+        {
+          resource: {
+            attributes: [
+              { key: 'service.name', value: { stringValue: '..' } },
+            ],
+          },
+          scopeLogs: [
+            {
+              logRecords: [
+                {
+                  body: { stringValue: 'dot segment service' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }
+
+    const res = await fetch(`${baseUrl}/v1/logs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    expect(res.status).toBe(200)
+    expect(readNormalizedLogLines('_dotdot')).toEqual([
+      expect.objectContaining({
+        serviceName: '..',
+        body: 'dot segment service',
+      }),
+    ])
+    expect(fs.existsSync(path.join(outputDir, `${new Date().toISOString().slice(0, 10)}.jsonl`))).toBe(false)
+  })
+
   it('returns OTLP ExportPartialSuccess responses', async () => {
     const headers = { 'Content-Type': 'application/json' }
     const body = JSON.stringify({})

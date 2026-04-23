@@ -24,6 +24,10 @@ import { createServer } from './server.js'
  * }} NormalizedLogRow
  */
 
+const OTLP_NS_PER_MS = 1000000n
+const MIN_DATE_MS = -8640000000000000n
+const MAX_DATE_MS = 8640000000000000n
+
 class Collector {
   /** @param {{ port?: number, outputDir?: string }} [options] */
   constructor(options = {}) {
@@ -123,46 +127,40 @@ function ensureDir(dir) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function objectRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return { ...value }
+}
+
+/**
  * Flatten OTLP log export envelopes into one normalized row per log record.
  *
  * @param {unknown} data
  * @returns {NormalizedLogRow[]}
  */
 function flattenOtlpLogs(data) {
-  if (!data || typeof data !== 'object') return []
-  const payload = /** @type {{ resourceLogs?: unknown[] }} */ (data)
-  const resourceLogs = Array.isArray(payload.resourceLogs) ? payload.resourceLogs : []
+  const payload = objectRecord(data)
+  const resourceLogs = Array.isArray(payload?.resourceLogs) ? payload.resourceLogs : []
   /** @type {NormalizedLogRow[]} */
   const rows = []
 
   for (const resourceLog of resourceLogs) {
-    const resourceLogObj = /** @type {{ resource?: { attributes?: unknown }, scopeLogs?: unknown[] }} */ (
-      resourceLog && typeof resourceLog === 'object' ? resourceLog : {}
-    )
-    const resourceAttrs = attrsToObject(resourceLogObj.resource?.attributes)
+    const resourceLogObj = objectRecord(resourceLog) ?? {}
+    const resource = objectRecord(resourceLogObj.resource)
+    const resourceAttrs = attrsToObject(resource?.attributes)
     const serviceName = stringValue(resourceAttrs['service.name']) || '_unknown'
     const scopeLogs = Array.isArray(resourceLogObj.scopeLogs) ? resourceLogObj.scopeLogs : []
 
     for (const scopeLog of scopeLogs) {
-      const scopeLogObj = /** @type {{ scope?: { name?: unknown, version?: unknown, attributes?: unknown }, logRecords?: unknown[] }} */ (
-        scopeLog && typeof scopeLog === 'object' ? scopeLog : {}
-      )
-      const scope = scopeLogObj.scope && typeof scopeLogObj.scope === 'object' ? scopeLogObj.scope : {}
+      const scopeLogObj = objectRecord(scopeLog) ?? {}
+      const scope = objectRecord(scopeLogObj.scope) ?? {}
       const logRecords = Array.isArray(scopeLogObj.logRecords) ? scopeLogObj.logRecords : []
 
       for (const logRecord of logRecords) {
-        const logRecordObj = /** @type {{
-         *   attributes?: unknown,
-         *   timeUnixNano?: unknown,
-         *   observedTimeUnixNano?: unknown,
-         *   severityNumber?: unknown,
-         *   severityText?: unknown,
-         *   body?: unknown,
-         *   traceId?: unknown,
-         *   spanId?: unknown,
-         *   flags?: unknown,
-         *   droppedAttributesCount?: unknown
-         * }} */ (logRecord && typeof logRecord === 'object' ? logRecord : {})
+        const logRecordObj = objectRecord(logRecord) ?? {}
         const attributes = attrsToObject(logRecordObj.attributes)
         rows.push({
           serviceName,
@@ -201,8 +199,8 @@ function attrsToObject(attrs) {
   /** @type {Record<string, unknown>} */
   const result = {}
   for (const attr of attrs) {
-    if (!attr || typeof attr !== 'object') continue
-    const pair = /** @type {{ key?: unknown, value?: unknown }} */ (attr)
+    const pair = objectRecord(attr)
+    if (!pair) continue
     const key = stringValue(pair.key)
     if (!key) continue
     result[key] = anyValue(pair.value)
@@ -217,29 +215,30 @@ function attrsToObject(attrs) {
  * @returns {unknown}
  */
 function anyValue(value) {
-  if (!value || typeof value !== 'object') return value ?? null
-  const anyVal = /** @type {{
-   *   stringValue?: unknown,
-   *   boolValue?: unknown,
-   *   intValue?: unknown,
-   *   doubleValue?: unknown,
-   *   bytesValue?: unknown,
-   *   arrayValue?: { values?: unknown[] },
-   *   kvlistValue?: { values?: unknown }
-   * }} */ (value)
-  if ('stringValue' in anyVal) return stringValue(anyVal.stringValue)
+  const anyVal = objectRecord(value)
+  if (!anyVal) return value ?? null
+  if ('stringValue' in anyVal) return anyStringValue(anyVal.stringValue)
   if ('boolValue' in anyVal) return Boolean(anyVal.boolValue)
   if ('intValue' in anyVal) return numberLike(anyVal.intValue)
   if ('doubleValue' in anyVal) return numberValue(anyVal.doubleValue)
-  if ('bytesValue' in anyVal) return stringValue(anyVal.bytesValue)
+  if ('bytesValue' in anyVal) return anyStringValue(anyVal.bytesValue)
   if ('arrayValue' in anyVal) {
-    const values = Array.isArray(anyVal.arrayValue?.values) ? anyVal.arrayValue.values : []
+    const arrayValue = objectRecord(anyVal.arrayValue)
+    const values = Array.isArray(arrayValue?.values) ? arrayValue.values : []
     return values.map(anyValue)
   }
   if ('kvlistValue' in anyVal) {
-    return attrsToObject(anyVal.kvlistValue?.values)
+    return attrsToObject(objectRecord(anyVal.kvlistValue)?.values)
   }
   return null
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function anyStringValue(value) {
+  return typeof value === 'string' ? value : undefined
 }
 
 /**
@@ -275,10 +274,16 @@ function numberLike(value) {
  */
 function otlpTimestampToIso(value) {
   if (typeof value !== 'string' && typeof value !== 'number') return undefined
-  const asBigInt = BigInt(value)
-  const ms = Number(asBigInt / 1000000n)
-  if (!Number.isFinite(ms)) return undefined
-  return new Date(ms).toISOString()
+  if (typeof value === 'number' && (!Number.isFinite(value) || !Number.isInteger(value))) return undefined
+  let asBigInt
+  try {
+    asBigInt = BigInt(value)
+  } catch {
+    return undefined
+  }
+  const ms = asBigInt / OTLP_NS_PER_MS
+  if (ms < MIN_DATE_MS || ms > MAX_DATE_MS) return undefined
+  return new Date(Number(ms)).toISOString()
 }
 
 /**
@@ -288,5 +293,9 @@ function otlpTimestampToIso(value) {
  * @returns {string}
  */
 function sanitizePathSegment(value) {
-  return value.replace(/[\\/]/g, '_').trim() || '_unknown'
+  const sanitized = value.replace(/[\\/]/g, '_').trim()
+  if (!sanitized) return '_unknown'
+  if (sanitized === '.') return '_dot'
+  if (sanitized === '..') return '_dotdot'
+  return sanitized
 }

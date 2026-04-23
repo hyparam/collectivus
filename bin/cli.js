@@ -5,6 +5,16 @@ import { Collector } from '../src/index.js'
 function parseArgs(args) {
   const options = {}
 
+  if (process.env.COLLECTIVUS_PORT) {
+    const port = parseInt(process.env.COLLECTIVUS_PORT, 10)
+    if (!Number.isNaN(port)) {
+      options.port = port
+    }
+  }
+  if (process.env.COLLECTIVUS_OUTPUT_DIR) {
+    options.outputDir = process.env.COLLECTIVUS_OUTPUT_DIR
+  }
+
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
 

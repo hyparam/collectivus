@@ -1,7 +1,15 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
+import {
+  EMPTY_EXPORT_RESPONSE,
+  PROTOBUF_CONTENT_TYPE,
+  decodeExportLogsRequest,
+  decodeExportMetricsServiceRequest,
+  decodeExportTraceServiceRequest,
+} from './otlp-log-protobuf.js'
 
 const JSON_CT = { 'Content-Type': 'application/json' }
+const PROTOBUF_CT = { 'Content-Type': PROTOBUF_CONTENT_TYPE }
 
 const emptyResponse = {
   traces: { partialSuccess: { rejectedSpans: 0 } },
@@ -31,10 +39,16 @@ function createServer(handler) {
       return
     }
 
+    const signal = path.slice('/v1/'.length)
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
-    if (contentType !== 'application/json') {
+    const acceptJson = contentType === 'application/json'
+    const acceptProtobuf = contentType === PROTOBUF_CONTENT_TYPE
+    if (!acceptJson && !acceptProtobuf) {
       res.writeHead(415, JSON_CT)
-      res.end(JSON.stringify({ code: 3, message: 'Unsupported Content-Type: expected application/json' }))
+      res.end(JSON.stringify({
+        code: 3,
+        message: 'Unsupported Content-Type: expected application/json or application/x-protobuf',
+      }))
       return
     }
 
@@ -63,19 +77,32 @@ function createServer(handler) {
       return
     }
 
-    const body = Buffer.concat(chunks).toString('utf8')
     let data
     try {
-      data = body ? JSON.parse(body) : {}
-    } catch (err) {
-      console.error('Invalid JSON:', err)
+      const body = Buffer.concat(chunks)
+      if (acceptJson) {
+        data = body.length > 0 ? JSON.parse(body.toString('utf8')) : {}
+      } else if (signal === 'logs') {
+        data = decodeExportLogsRequest(body)
+      } else if (signal === 'traces') {
+        data = decodeExportTraceServiceRequest(body)
+      } else {
+        data = decodeExportMetricsServiceRequest(body)
+      }
+    } catch {
       res.writeHead(400, JSON_CT)
-      res.end(JSON.stringify({ code: 3, message: 'Invalid JSON' }))
+      const message = acceptJson ? 'Invalid JSON' : 'Invalid protobuf'
+      res.end(JSON.stringify({ code: 3, message }))
       return
     }
 
-    const signal = path.slice('/v1/'.length)
     handler(signal, data)
+
+    if (acceptProtobuf) {
+      res.writeHead(200, PROTOBUF_CT)
+      res.end(EMPTY_EXPORT_RESPONSE)
+      return
+    }
 
     res.writeHead(200, JSON_CT)
     const response = signal === 'traces' ? emptyResponse.traces

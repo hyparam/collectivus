@@ -24,6 +24,26 @@ import { createServer } from './server.js'
  * }} NormalizedLogRow
  */
 
+/**
+ * @typedef {Record<string, unknown> & { serviceName: string }} NormalizedServiceRow
+ */
+
+/**
+ * @typedef {{
+ *   serviceName: string,
+ *   metricName?: string,
+ *   description?: string,
+ *   unit?: string,
+ *   resource: Record<string, unknown>,
+ *   scope: {
+ *     name?: string,
+ *     version?: string,
+ *     attributes: Record<string, unknown>,
+ *   },
+ *   metadata: Record<string, unknown>,
+ * }} MetricRowBase
+ */
+
 const OTLP_NS_PER_MS = 1000000n
 const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
@@ -38,9 +58,8 @@ class Collector {
   }
 
   start() {
-    if (!fs.existsSync(this.outputDir)) {
-      fs.mkdirSync(this.outputDir, { recursive: true })
-    }
+    ensureDir(this.outputDir)
+    migrateLegacyServiceFiles(this.outputDir)
 
     const server = createServer(this.handleData.bind(this))
     this.server = server
@@ -68,9 +87,7 @@ class Collector {
    */
   handleData(signal, data) {
     writeSignalPayload(this.outputDir, signal, data)
-    if (signal === 'logs') {
-      writeNormalizedLogs(this.outputDir, data)
-    }
+    writeNormalizedServiceRows(this.outputDir, signal, data)
   }
 }
 
@@ -99,40 +116,174 @@ function writeSignalPayload(outputDir, signal, data) {
 }
 
 /**
- * Flatten OTLP logs into one JSON row per log record, partitioned by service.
+ * Write normalized per-entry rows grouped by service under services/<service>/.
  *
  * @param {string} outputDir
+ * @param {string} signal
  * @param {unknown} data
  * @returns {void}
  */
-function writeNormalizedLogs(outputDir, data) {
-  const rows = flattenOtlpLogs(data)
+function writeNormalizedServiceRows(outputDir, signal, data) {
+  const rows = flattenSignalRows(signal, data)
   for (const row of rows) {
     const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
-    const serviceDir = path.join(outputDir, 'logs-by-service', serviceName)
-    ensureDir(serviceDir)
-    const filePath = path.join(serviceDir, `${todayUtc()}.jsonl`)
-    fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
+    appendServiceRow(path.join(outputDir, 'services', serviceName), signal, row)
+    if (signal === 'logs') {
+      appendLegacyNormalizedLogRow(outputDir, serviceName, row)
+    }
   }
 }
 
 /**
- * @param {string} dir
+ * @param {string} serviceDir
+ * @param {string} signal
+ * @param {NormalizedServiceRow} row
  * @returns {void}
  */
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
+function appendServiceRow(serviceDir, signal, row) {
+  ensureDir(serviceDir)
+  const filePath = path.join(serviceDir, `${signal}-${todayUtc()}.jsonl`)
+  fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
+}
+
+/**
+ * Preserve the legacy logs-by-service tree for compatibility.
+ *
+ * @param {string} outputDir
+ * @param {string} serviceName
+ * @param {NormalizedServiceRow} row
+ * @returns {void}
+ */
+function appendLegacyNormalizedLogRow(outputDir, serviceName, row) {
+  const serviceDir = path.join(outputDir, 'logs-by-service', serviceName)
+  ensureDir(serviceDir)
+  const filePath = path.join(serviceDir, `${todayUtc()}.jsonl`)
+  fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
+}
+
+/**
+ * Convert previously written raw service envelope files into normalized rows.
+ *
+ * Older builds accidentally wrote raw OTLP envelopes to services/<service>/.
+ * The services tree is now the normalized browse view, so migrate those files
+ * in place and preserve the originals under services-raw/.
+ *
+ * @param {string} outputDir
+ * @returns {void}
+ */
+function migrateLegacyServiceFiles(outputDir) {
+  const servicesDir = path.join(outputDir, 'services')
+  if (!fs.existsSync(servicesDir)) return
+
+  for (const serviceDirName of fs.readdirSync(servicesDir)) {
+    const serviceDir = path.join(servicesDir, serviceDirName)
+    if (!safeStat(serviceDir)?.isDirectory()) continue
+
+    for (const fileName of fs.readdirSync(serviceDir)) {
+      const match = fileName.match(/^(logs|traces|metrics)-\d{4}-\d{2}-\d{2}\.jsonl$/)
+      if (!match) continue
+
+      const signal = match[1]
+      const collectionKey = signalCollectionKey(signal)
+      if (!collectionKey) continue
+
+      const filePath = path.join(serviceDir, fileName)
+      if (!fileContainsLegacyRawEnvelope(filePath, collectionKey)) continue
+
+      const rawText = fs.readFileSync(filePath, 'utf8')
+      preserveLegacyServiceRawFile(outputDir, serviceDirName, fileName, rawText)
+      writeRowsFile(filePath, flattenSignalText(signal, rawText))
+    }
   }
 }
 
 /**
- * @param {unknown} value
- * @returns {Record<string, unknown> | undefined}
+ * @param {string} outputDir
+ * @param {string} serviceDirName
+ * @param {string} fileName
+ * @param {string} rawText
+ * @returns {void}
  */
-function objectRecord(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  return { ...value }
+function preserveLegacyServiceRawFile(outputDir, serviceDirName, fileName, rawText) {
+  const rawDir = path.join(outputDir, 'services-raw', serviceDirName)
+  ensureDir(rawDir)
+  const rawPath = path.join(rawDir, fileName)
+  if (fs.existsSync(rawPath)) {
+    fs.appendFileSync(rawPath, rawText)
+    return
+  }
+  fs.writeFileSync(rawPath, rawText)
+}
+
+/**
+ * @param {string} filePath
+ * @param {NormalizedServiceRow[]} rows
+ * @returns {void}
+ */
+function writeRowsFile(filePath, rows) {
+  const text = rows.map((row) => JSON.stringify(row)).join('\n')
+  fs.writeFileSync(filePath, text ? `${text}\n` : '')
+}
+
+/**
+ * @param {string} filePath
+ * @param {'resourceLogs' | 'resourceSpans' | 'resourceMetrics'} collectionKey
+ * @returns {boolean}
+ */
+function fileContainsLegacyRawEnvelope(filePath, collectionKey) {
+  const text = fs.readFileSync(filePath, 'utf8')
+  const firstLine = text.split('\n').find(line => line.trim().length > 0)
+  if (!firstLine) return false
+
+  try {
+    const parsed = JSON.parse(firstLine)
+    return Array.isArray(objectRecord(parsed)?.[collectionKey])
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {string} signal
+ * @param {string} text
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenSignalText(signal, text) {
+  /** @type {NormalizedServiceRow[]} */
+  const rows = []
+
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      rows.push(...flattenSignalRows(signal, JSON.parse(line)))
+    } catch {
+      // skip malformed lines during migration
+    }
+  }
+
+  return rows
+}
+
+/**
+ * @param {string} signal
+ * @param {unknown} data
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenSignalRows(signal, data) {
+  if (signal === 'logs') return flattenOtlpLogs(data)
+  if (signal === 'traces') return flattenOtlpTraces(data)
+  if (signal === 'metrics') return flattenOtlpMetrics(data)
+  return []
+}
+
+/**
+ * @param {string} signal
+ * @returns {'resourceLogs' | 'resourceSpans' | 'resourceMetrics' | undefined}
+ */
+function signalCollectionKey(signal) {
+  if (signal === 'logs') return 'resourceLogs'
+  if (signal === 'traces') return 'resourceSpans'
+  if (signal === 'metrics') return 'resourceMetrics'
 }
 
 /**
@@ -174,11 +325,7 @@ function flattenOtlpLogs(data) {
           flags: numberValue(logRecordObj.flags),
           droppedAttributesCount: numberValue(logRecordObj.droppedAttributesCount),
           resource: resourceAttrs,
-          scope: {
-            name: stringValue(scope?.name),
-            version: stringValue(scope?.version),
-            attributes: attrsToObject(scope?.attributes),
-          },
+          scope: normalizeScope(scope),
           attributes,
         })
       }
@@ -186,6 +333,385 @@ function flattenOtlpLogs(data) {
   }
 
   return rows
+}
+
+/**
+ * Flatten OTLP trace export envelopes into one normalized row per span.
+ *
+ * @param {unknown} data
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenOtlpTraces(data) {
+  const payload = objectRecord(data)
+  const resourceSpans = Array.isArray(payload?.resourceSpans) ? payload.resourceSpans : []
+  /** @type {NormalizedServiceRow[]} */
+  const rows = []
+
+  for (const resourceSpan of resourceSpans) {
+    const resourceSpanObj = objectRecord(resourceSpan) ?? {}
+    const resource = objectRecord(resourceSpanObj.resource)
+    const resourceAttrs = attrsToObject(resource?.attributes)
+    const serviceName = stringValue(resourceAttrs['service.name']) || '_unknown'
+    const scopeSpans = Array.isArray(resourceSpanObj.scopeSpans) ? resourceSpanObj.scopeSpans : []
+
+    for (const scopeSpan of scopeSpans) {
+      const scopeSpanObj = objectRecord(scopeSpan) ?? {}
+      const scope = objectRecord(scopeSpanObj.scope) ?? {}
+      const spans = Array.isArray(scopeSpanObj.spans) ? scopeSpanObj.spans : []
+
+      for (const span of spans) {
+        const spanObj = objectRecord(span) ?? {}
+        rows.push({
+          serviceName,
+          traceId: stringValue(spanObj.traceId),
+          spanId: stringValue(spanObj.spanId),
+          parentSpanId: stringValue(spanObj.parentSpanId),
+          name: stringValue(spanObj.name),
+          kind: numberValue(spanObj.kind),
+          traceState: stringValue(spanObj.traceState),
+          startTimestamp: otlpTimestampToIso(spanObj.startTimeUnixNano),
+          endTimestamp: otlpTimestampToIso(spanObj.endTimeUnixNano),
+          durationMs: otlpDurationMs(spanObj.startTimeUnixNano, spanObj.endTimeUnixNano),
+          flags: numberValue(spanObj.flags),
+          droppedAttributesCount: numberValue(spanObj.droppedAttributesCount),
+          droppedEventsCount: numberValue(spanObj.droppedEventsCount),
+          droppedLinksCount: numberValue(spanObj.droppedLinksCount),
+          status: normalizeSpanStatus(spanObj.status),
+          resource: resourceAttrs,
+          scope: normalizeScope(scope),
+          attributes: attrsToObject(spanObj.attributes),
+          events: normalizeSpanEvents(spanObj.events),
+          links: normalizeSpanLinks(spanObj.links),
+        })
+      }
+    }
+  }
+
+  return rows
+}
+
+/**
+ * Flatten OTLP metric export envelopes into one normalized row per data point.
+ *
+ * @param {unknown} data
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenOtlpMetrics(data) {
+  const payload = objectRecord(data)
+  const resourceMetrics = Array.isArray(payload?.resourceMetrics) ? payload.resourceMetrics : []
+  /** @type {NormalizedServiceRow[]} */
+  const rows = []
+
+  for (const resourceMetric of resourceMetrics) {
+    const resourceMetricObj = objectRecord(resourceMetric) ?? {}
+    const resource = objectRecord(resourceMetricObj.resource)
+    const resourceAttrs = attrsToObject(resource?.attributes)
+    const serviceName = stringValue(resourceAttrs['service.name']) || '_unknown'
+    const scopeMetrics = Array.isArray(resourceMetricObj.scopeMetrics) ? resourceMetricObj.scopeMetrics : []
+
+    for (const scopeMetric of scopeMetrics) {
+      const scopeMetricObj = objectRecord(scopeMetric) ?? {}
+      const scope = objectRecord(scopeMetricObj.scope) ?? {}
+      const metrics = Array.isArray(scopeMetricObj.metrics) ? scopeMetricObj.metrics : []
+
+      for (const metric of metrics) {
+        rows.push(...flattenMetricRows(serviceName, resourceAttrs, scope, metric))
+      }
+    }
+  }
+
+  return rows
+}
+
+/**
+ * @param {string} serviceName
+ * @param {Record<string, unknown>} resource
+ * @param {Record<string, unknown>} scope
+ * @param {unknown} metric
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenMetricRows(serviceName, resource, scope, metric) {
+  const metricObj = objectRecord(metric) ?? {}
+  const scopeInfo = normalizeScope(scope)
+  const metadata = attrsToObject(metricObj.metadata)
+  /** @type {MetricRowBase} */
+  const base = {
+    serviceName,
+    metricName: stringValue(metricObj.name),
+    description: stringValue(metricObj.description),
+    unit: stringValue(metricObj.unit),
+    resource,
+    scope: scopeInfo,
+    metadata,
+  }
+  /** @type {NormalizedServiceRow[]} */
+  const rows = []
+
+  const gauge = objectRecord(metricObj.gauge)
+  if (gauge) rows.push(...flattenNumberMetricRows(base, 'gauge', gauge))
+
+  const sum = objectRecord(metricObj.sum)
+  if (sum) rows.push(...flattenNumberMetricRows(base, 'sum', sum))
+
+  const histogram = objectRecord(metricObj.histogram)
+  if (histogram) rows.push(...flattenHistogramRows(base, histogram))
+
+  const exponentialHistogram = objectRecord(metricObj.exponentialHistogram)
+  if (exponentialHistogram) rows.push(...flattenExponentialHistogramRows(base, exponentialHistogram))
+
+  const summary = objectRecord(metricObj.summary)
+  if (summary) rows.push(...flattenSummaryRows(base, summary))
+
+  return rows
+}
+
+/**
+ * @param {MetricRowBase} base
+ * @param {'gauge' | 'sum'} metricType
+ * @param {Record<string, unknown>} container
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenNumberMetricRows(base, metricType, container) {
+  const dataPoints = Array.isArray(container.dataPoints) ? container.dataPoints : []
+  return dataPoints.map((point) => {
+    const pointObj = objectRecord(point) ?? {}
+    return {
+      ...base,
+      metricType,
+      aggregationTemporality: numberValue(container.aggregationTemporality),
+      isMonotonic: booleanValue(container.isMonotonic),
+      startTimestamp: otlpTimestampToIso(pointObj.startTimeUnixNano),
+      timestamp: otlpTimestampToIso(pointObj.timeUnixNano),
+      flags: numberValue(pointObj.flags),
+      value: metricPointValue(pointObj),
+      valueType: metricPointValueType(pointObj),
+      resource: base.resource,
+      scope: base.scope,
+      metadata: base.metadata,
+      attributes: attrsToObject(pointObj.attributes),
+      exemplars: normalizeMetricExemplars(pointObj.exemplars),
+    }
+  })
+}
+
+/**
+ * @param {MetricRowBase} base
+ * @param {Record<string, unknown>} histogram
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenHistogramRows(base, histogram) {
+  const dataPoints = Array.isArray(histogram.dataPoints) ? histogram.dataPoints : []
+  return dataPoints.map((point) => {
+    const pointObj = objectRecord(point) ?? {}
+    return {
+      ...base,
+      metricType: 'histogram',
+      aggregationTemporality: numberValue(histogram.aggregationTemporality),
+      startTimestamp: otlpTimestampToIso(pointObj.startTimeUnixNano),
+      timestamp: otlpTimestampToIso(pointObj.timeUnixNano),
+      flags: numberValue(pointObj.flags),
+      count: numberLike(pointObj.count),
+      sum: numberValue(pointObj.sum),
+      bucketCounts: arrayValue(pointObj.bucketCounts),
+      explicitBounds: arrayValue(pointObj.explicitBounds),
+      min: numberValue(pointObj.min),
+      max: numberValue(pointObj.max),
+      resource: base.resource,
+      scope: base.scope,
+      metadata: base.metadata,
+      attributes: attrsToObject(pointObj.attributes),
+      exemplars: normalizeMetricExemplars(pointObj.exemplars),
+    }
+  })
+}
+
+/**
+ * @param {MetricRowBase} base
+ * @param {Record<string, unknown>} histogram
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenExponentialHistogramRows(base, histogram) {
+  const dataPoints = Array.isArray(histogram.dataPoints) ? histogram.dataPoints : []
+  return dataPoints.map((point) => {
+    const pointObj = objectRecord(point) ?? {}
+    return {
+      ...base,
+      metricType: 'exponentialHistogram',
+      aggregationTemporality: numberValue(histogram.aggregationTemporality),
+      startTimestamp: otlpTimestampToIso(pointObj.startTimeUnixNano),
+      timestamp: otlpTimestampToIso(pointObj.timeUnixNano),
+      flags: numberValue(pointObj.flags),
+      count: numberLike(pointObj.count),
+      sum: numberValue(pointObj.sum),
+      scale: numberValue(pointObj.scale),
+      zeroCount: numberLike(pointObj.zeroCount),
+      zeroThreshold: numberValue(pointObj.zeroThreshold),
+      min: numberValue(pointObj.min),
+      max: numberValue(pointObj.max),
+      positive: normalizeExponentialHistogramBuckets(pointObj.positive),
+      negative: normalizeExponentialHistogramBuckets(pointObj.negative),
+      resource: base.resource,
+      scope: base.scope,
+      metadata: base.metadata,
+      attributes: attrsToObject(pointObj.attributes),
+      exemplars: normalizeMetricExemplars(pointObj.exemplars),
+    }
+  })
+}
+
+/**
+ * @param {MetricRowBase} base
+ * @param {Record<string, unknown>} summary
+ * @returns {NormalizedServiceRow[]}
+ */
+function flattenSummaryRows(base, summary) {
+  const dataPoints = Array.isArray(summary.dataPoints) ? summary.dataPoints : []
+  return dataPoints.map((point) => {
+    const pointObj = objectRecord(point) ?? {}
+    return {
+      ...base,
+      metricType: 'summary',
+      startTimestamp: otlpTimestampToIso(pointObj.startTimeUnixNano),
+      timestamp: otlpTimestampToIso(pointObj.timeUnixNano),
+      flags: numberValue(pointObj.flags),
+      count: numberLike(pointObj.count),
+      sum: numberValue(pointObj.sum),
+      quantileValues: normalizeQuantileValues(pointObj.quantileValues),
+      resource: base.resource,
+      scope: base.scope,
+      metadata: base.metadata,
+      attributes: attrsToObject(pointObj.attributes),
+    }
+  })
+}
+
+/**
+ * @param {unknown} scope
+ * @returns {{ name?: string, version?: string, attributes: Record<string, unknown> }}
+ */
+function normalizeScope(scope) {
+  const scopeObj = objectRecord(scope) ?? {}
+  return {
+    name: stringValue(scopeObj.name),
+    version: stringValue(scopeObj.version),
+    attributes: attrsToObject(scopeObj.attributes),
+  }
+}
+
+/**
+ * @param {unknown} status
+ * @returns {Record<string, unknown> | undefined}
+ */
+function normalizeSpanStatus(status) {
+  const statusObj = objectRecord(status)
+  if (!statusObj) return undefined
+  return {
+    code: numberValue(statusObj.code),
+    message: stringValue(statusObj.message),
+  }
+}
+
+/**
+ * @param {unknown} events
+ * @returns {Record<string, unknown>[]}
+ */
+function normalizeSpanEvents(events) {
+  if (!Array.isArray(events)) return []
+  return events.map((event) => {
+    const eventObj = objectRecord(event) ?? {}
+    return {
+      timestamp: otlpTimestampToIso(eventObj.timeUnixNano),
+      name: stringValue(eventObj.name),
+      droppedAttributesCount: numberValue(eventObj.droppedAttributesCount),
+      attributes: attrsToObject(eventObj.attributes),
+    }
+  })
+}
+
+/**
+ * @param {unknown} links
+ * @returns {Record<string, unknown>[]}
+ */
+function normalizeSpanLinks(links) {
+  if (!Array.isArray(links)) return []
+  return links.map((link) => {
+    const linkObj = objectRecord(link) ?? {}
+    return {
+      traceId: stringValue(linkObj.traceId),
+      spanId: stringValue(linkObj.spanId),
+      traceState: stringValue(linkObj.traceState),
+      flags: numberValue(linkObj.flags),
+      droppedAttributesCount: numberValue(linkObj.droppedAttributesCount),
+      attributes: attrsToObject(linkObj.attributes),
+    }
+  })
+}
+
+/**
+ * @param {unknown} exemplars
+ * @returns {Record<string, unknown>[]}
+ */
+function normalizeMetricExemplars(exemplars) {
+  if (!Array.isArray(exemplars)) return []
+  return exemplars.map((exemplar) => {
+    const exemplarObj = objectRecord(exemplar) ?? {}
+    return {
+      timestamp: otlpTimestampToIso(exemplarObj.timeUnixNano),
+      value: numberValue(exemplarObj.asDouble) ?? numberLike(exemplarObj.asInt),
+      valueType: exemplarObj.asDouble !== undefined ? 'double'
+        : exemplarObj.asInt !== undefined ? 'int'
+          : undefined,
+      traceId: stringValue(exemplarObj.traceId),
+      spanId: stringValue(exemplarObj.spanId),
+      filteredAttributes: attrsToObject(exemplarObj.filteredAttributes),
+    }
+  })
+}
+
+/**
+ * @param {unknown} buckets
+ * @returns {Record<string, unknown> | undefined}
+ */
+function normalizeExponentialHistogramBuckets(buckets) {
+  const bucketObj = objectRecord(buckets)
+  if (!bucketObj) return undefined
+  return {
+    offset: numberValue(bucketObj.offset),
+    bucketCounts: arrayValue(bucketObj.bucketCounts),
+  }
+}
+
+/**
+ * @param {unknown} quantileValues
+ * @returns {Record<string, unknown>[]}
+ */
+function normalizeQuantileValues(quantileValues) {
+  if (!Array.isArray(quantileValues)) return []
+  return quantileValues.map((quantileValue) => {
+    const quantileValueObj = objectRecord(quantileValue) ?? {}
+    return {
+      quantile: numberValue(quantileValueObj.quantile),
+      value: numberValue(quantileValueObj.value),
+    }
+  })
+}
+
+/**
+ * @param {Record<string, unknown>} pointObj
+ * @returns {number | string | undefined}
+ */
+function metricPointValue(pointObj) {
+  if (pointObj.asDouble !== undefined) return numberValue(pointObj.asDouble)
+  return numberLike(pointObj.asInt)
+}
+
+/**
+ * @param {Record<string, unknown>} pointObj
+ * @returns {'double' | 'int' | undefined}
+ */
+function metricPointValueType(pointObj) {
+  if (pointObj.asDouble !== undefined) return 'double'
+  if (pointObj.asInt !== undefined) return 'int'
 }
 
 /**
@@ -267,6 +793,22 @@ function numberLike(value) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {boolean | undefined}
+ */
+function booleanValue(value) {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown[] | undefined}
+ */
+function arrayValue(value) {
+  return Array.isArray(value) ? value : undefined
+}
+
+/**
  * Convert OTLP nanoseconds-since-epoch into ISO 8601.
  *
  * @param {unknown} value
@@ -284,6 +826,61 @@ function otlpTimestampToIso(value) {
   const ms = asBigInt / OTLP_NS_PER_MS
   if (ms < MIN_DATE_MS || ms > MAX_DATE_MS) return undefined
   return new Date(Number(ms)).toISOString()
+}
+
+/**
+ * @param {unknown} start
+ * @param {unknown} end
+ * @returns {number | undefined}
+ */
+function otlpDurationMs(start, end) {
+  if (!otlpTimeValue(start) || !otlpTimeValue(end)) return undefined
+  try {
+    const diff = BigInt(end) - BigInt(start)
+    if (diff < 0n) return undefined
+    return Number(diff) / Number(OTLP_NS_PER_MS)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is string | number | bigint}
+ */
+function otlpTimeValue(value) {
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint'
+}
+
+/**
+ * @param {string} dir
+ * @returns {void}
+ */
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+/**
+ * @param {string} filePath
+ * @returns {fs.Stats | undefined}
+ */
+function safeStat(filePath) {
+  try {
+    return fs.statSync(filePath)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, unknown> | undefined}
+ */
+function objectRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return { ...value }
 }
 
 /**

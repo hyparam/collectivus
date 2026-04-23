@@ -1,6 +1,6 @@
 # Collectivus
 
-Zero-dependency OTLP/HTTP JSON collector that writes to JSONL files.
+Zero-dependency OTLP/HTTP collector that writes to JSONL files.
 
 ## Installation
 
@@ -39,9 +39,9 @@ await collector.stop()
 
 ## Endpoints
 
-- `POST /v1/traces` - Receive trace data
-- `POST /v1/metrics` - Receive metrics data
-- `POST /v1/logs` - Receive log data
+- `POST /v1/traces` - Receive trace data (`application/json` and `application/x-protobuf`)
+- `POST /v1/metrics` - Receive metrics data (`application/json` and `application/x-protobuf`)
+- `POST /v1/logs` - Receive log data (`application/json` and `application/x-protobuf`)
 
 ## Output
 
@@ -53,11 +53,19 @@ otel-data/
 │   └── YYYY-MM-DD.jsonl
 ├── metrics/
 │   └── YYYY-MM-DD.jsonl
-└── logs/
-    └── YYYY-MM-DD.jsonl
+├── logs/
+│   └── YYYY-MM-DD.jsonl
+├── services/
+│   └── <service.name>/
+│       ├── traces-YYYY-MM-DD.jsonl
+│       ├── metrics-YYYY-MM-DD.jsonl
+│       └── logs-YYYY-MM-DD.jsonl
+└── logs-by-service/
+    └── <service.name>/
+        └── YYYY-MM-DD.jsonl
 ```
 
-Each line is a JSON object representing the received payload.
+Each line in `traces/`, `metrics/`, and `logs/` is the raw received payload. The `services/` tree is the normalized browse view: one JSON row per log record, span, or metric data point, partitioned by `service.name`. `logs-by-service/` is retained as a legacy compatibility mirror for normalized logs.
 
 ## Verification
 

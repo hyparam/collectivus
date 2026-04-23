@@ -1,7 +1,11 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
+import { decodeExportLogsServiceRequest } from './otlp/logs.js'
+import { decodeExportMetricsServiceRequest } from './otlp/metrics.js'
+import { decodeExportTraceServiceRequest } from './otlp/traces.js'
 
 const JSON_CT = { 'Content-Type': 'application/json' }
+const PROTO_CT = { 'Content-Type': 'application/x-protobuf' }
 
 const emptyResponse = {
   traces: { partialSuccess: { rejectedSpans: 0 } },
@@ -32,9 +36,9 @@ function createServer(handler) {
     }
 
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
-    if (contentType !== 'application/json') {
+    if (contentType !== 'application/json' && contentType !== 'application/x-protobuf') {
       res.writeHead(415, JSON_CT)
-      res.end(JSON.stringify({ code: 3, message: 'Unsupported Content-Type: expected application/json' }))
+      res.end(JSON.stringify({ code: 3, message: 'Unsupported Content-Type: expected application/json or application/x-protobuf' }))
       return
     }
 
@@ -63,10 +67,31 @@ function createServer(handler) {
       return
     }
 
-    const body = Buffer.concat(chunks).toString('utf8')
+    const body = Buffer.concat(chunks)
+    const signal = path.slice('/v1/'.length)
     let data
+    if (contentType === 'application/x-protobuf') {
+      try {
+        const decode = signal === 'traces' ? decodeExportTraceServiceRequest
+          : signal === 'metrics' ? decodeExportMetricsServiceRequest
+            : decodeExportLogsServiceRequest
+        data = body.byteLength
+          ? decode(new Uint8Array(body.buffer, body.byteOffset, body.byteLength))
+          : {}
+      } catch (err) {
+        console.error('Invalid protobuf:', err)
+        res.writeHead(400, PROTO_CT)
+        res.end()
+        return
+      }
+      handler(signal, data)
+      res.writeHead(200, PROTO_CT)
+      res.end()
+      return
+    }
+
     try {
-      data = body ? JSON.parse(body) : {}
+      data = body.byteLength ? JSON.parse(body.toString('utf8')) : {}
     } catch (err) {
       console.error('Invalid JSON:', err)
       res.writeHead(400, JSON_CT)
@@ -74,7 +99,6 @@ function createServer(handler) {
       return
     }
 
-    const signal = path.slice('/v1/'.length)
     handler(signal, data)
 
     res.writeHead(200, JSON_CT)

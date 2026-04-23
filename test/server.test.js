@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import { Collector } from '../src/index.js'
+import { bytesField, fixed64Field, lenDelim, stringField, u8 } from './helpers.js'
 
 /** @type {Collector} */
 let collector
@@ -341,10 +342,10 @@ describe('OTLP endpoints', () => {
     expect(await res.json()).toMatchObject({ code: 3 })
   })
 
-  it('rejects non-JSON Content-Type with 415', async () => {
+  it('rejects unsupported Content-Type with 415', async () => {
     const res = await fetch(`${baseUrl}/v1/traces`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-protobuf' },
+      headers: { 'Content-Type': 'text/plain' },
       body: 'binary',
     })
     expect(res.status).toBe(415)
@@ -391,6 +392,57 @@ describe('Content-Encoding', () => {
       body: 'whatever',
     })
     expect(res.status).toBe(415)
+  })
+
+  it('decodes protobuf trace bodies', async () => {
+    const span = [
+      ...bytesField(1, new Array(16).fill(0x01)),
+      ...bytesField(2, new Array(8).fill(0x02)),
+      ...stringField(5, 'GET /'),
+      ...fixed64Field(7, 1n),
+      ...fixed64Field(8, 2n),
+    ]
+    const body = Buffer.from(u8(lenDelim(1, lenDelim(2, lenDelim(2, span)))))
+
+    const res = await fetch(`${baseUrl}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf' },
+      body,
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toBe('application/x-protobuf')
+    expect(await res.arrayBuffer()).toEqual(new ArrayBuffer(0))
+    const lines = readLines('traces')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      resourceSpans: [{ scopeSpans: [{ spans: [{ name: 'GET /' }] }] }],
+    })
+  })
+
+  it('decodes gzipped protobuf metric bodies', async () => {
+    const metric = [...stringField(1, 'm'), ...lenDelim(5, lenDelim(1, fixed64Field(3, 100n)))]
+    const proto = u8(lenDelim(1, lenDelim(2, lenDelim(2, metric))))
+    const body = Buffer.from(zlib.gzipSync(proto))
+
+    const res = await fetch(`${baseUrl}/v1/metrics`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf', 'Content-Encoding': 'gzip' },
+      body,
+    })
+    expect(res.status).toBe(200)
+    const lines = readLines('metrics')
+    expect(lines[0]).toMatchObject({
+      resourceMetrics: [{ scopeMetrics: [{ metrics: [{ name: 'm' }] }] }],
+    })
+  })
+
+  it('returns 400 on malformed protobuf', async () => {
+    const res = await fetch(`${baseUrl}/v1/traces`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-protobuf' },
+      body: Buffer.from([0xff, 0xff, 0xff]),
+    })
+    expect(res.status).toBe(400)
   })
 
   it('returns 400 on malformed gzip', async () => {

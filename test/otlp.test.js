@@ -40,7 +40,6 @@ describe('decodeAnyValue', () => {
   it('decodes negative intValue as signed int64', () => {
     expect(decodeAnyValue(u8(int64Field(3, -5n)))).toEqual({ intValue: '-5' })
   })
-
   it('decodes bytesValue as base64', () => {
     expect(decodeAnyValue(u8(bytesField(7, [0xde, 0xad])))).toEqual({ bytesValue: '3q0=' })
   })

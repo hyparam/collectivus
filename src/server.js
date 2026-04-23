@@ -1,20 +1,30 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
-import {
-  EMPTY_EXPORT_RESPONSE,
-  PROTOBUF_CONTENT_TYPE,
-  decodeExportLogsRequest,
-  decodeExportMetricsServiceRequest,
-  decodeExportTraceServiceRequest,
-} from './otlp-log-protobuf.js'
+import { decodeExportLogsServiceRequest } from './otlp/logs.js'
+import { decodeExportMetricsServiceRequest } from './otlp/metrics.js'
+import { decodeExportTraceServiceRequest } from './otlp/traces.js'
 
 const JSON_CT = { 'Content-Type': 'application/json' }
+const PROTOBUF_CONTENT_TYPE = 'application/x-protobuf'
 const PROTOBUF_CT = { 'Content-Type': PROTOBUF_CONTENT_TYPE }
+const EMPTY_EXPORT_RESPONSE = new Uint8Array(0)
 
 const emptyResponse = {
   traces: { partialSuccess: { rejectedSpans: 0 } },
   metrics: { partialSuccess: { rejectedDataPoints: 0 } },
   logs: { partialSuccess: { rejectedLogRecords: 0 } },
+}
+
+/**
+ * @param {string} signal
+ * @param {Buffer} body
+ * @returns {unknown}
+ */
+function decodeProtobufRequest(signal, body) {
+  if (body.length === 0) return {}
+  if (signal === 'logs') return decodeExportLogsServiceRequest(body)
+  if (signal === 'traces') return decodeExportTraceServiceRequest(body)
+  return decodeExportMetricsServiceRequest(body)
 }
 
 /**
@@ -82,12 +92,8 @@ function createServer(handler) {
       const body = Buffer.concat(chunks)
       if (acceptJson) {
         data = body.length > 0 ? JSON.parse(body.toString('utf8')) : {}
-      } else if (signal === 'logs') {
-        data = decodeExportLogsRequest(body)
-      } else if (signal === 'traces') {
-        data = decodeExportTraceServiceRequest(body)
       } else {
-        data = decodeExportMetricsServiceRequest(body)
+        data = decodeProtobufRequest(signal, body)
       }
     } catch {
       res.writeHead(400, JSON_CT)

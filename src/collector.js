@@ -59,7 +59,6 @@ class Collector {
 
   start() {
     ensureDir(this.outputDir)
-    migrateLegacyServiceFiles(this.outputDir)
 
     const server = createServer(this.handleData.bind(this))
     this.server = server
@@ -162,169 +161,6 @@ function appendLegacyNormalizedLogRow(outputDir, serviceName, row) {
 }
 
 /**
- * Convert previously written raw service envelope files into normalized rows.
- *
- * Older builds accidentally wrote raw OTLP envelopes to services/<service>/.
- * The services tree is now the normalized browse view, so migrate those files
- * in place and preserve the originals under services-raw/.
- *
- * @param {string} outputDir
- * @returns {void}
- */
-function migrateLegacyServiceFiles(outputDir) {
-  const servicesDir = path.join(outputDir, 'services')
-  if (!fs.existsSync(servicesDir)) return
-  /** @type {{ filePath: string, fileName: string, serviceDirName: string, rawText: string, rows: NormalizedServiceRow[] }[]} */
-  const legacyFiles = []
-
-  for (const serviceDirName of fs.readdirSync(servicesDir)) {
-    const serviceDir = path.join(servicesDir, serviceDirName)
-    if (!safeStat(serviceDir)?.isDirectory()) continue
-
-    for (const fileName of fs.readdirSync(serviceDir)) {
-      const match = fileName.match(/^(logs|traces|metrics)-\d{4}-\d{2}-\d{2}\.jsonl$/)
-      if (!match) continue
-
-      const signal = match[1]
-      const collectionKey = signalCollectionKey(signal)
-      if (!collectionKey) continue
-
-      const filePath = path.join(serviceDir, fileName)
-      if (!fileContainsLegacyRawEnvelope(filePath, collectionKey)) continue
-
-      const rawText = fs.readFileSync(filePath, 'utf8')
-      legacyFiles.push({
-        filePath,
-        fileName,
-        serviceDirName,
-        rawText,
-        rows: flattenSignalText(signal, rawText),
-      })
-    }
-  }
-
-  /** @type {Map<string, NormalizedServiceRow[]>} */
-  const migratedRowsByFilePath = new Map()
-  for (const legacyFile of legacyFiles) {
-    preserveLegacyServiceRawFile(outputDir, legacyFile.serviceDirName, legacyFile.fileName, legacyFile.rawText)
-    groupMigratedRowsByTargetFile(servicesDir, legacyFile.fileName, legacyFile.rows, migratedRowsByFilePath)
-  }
-
-  const legacyFilePaths = new Set(legacyFiles.map((legacyFile) => legacyFile.filePath))
-  for (const legacyFile of legacyFiles) {
-    writeRowsFile(legacyFile.filePath, migratedRowsByFilePath.get(legacyFile.filePath) ?? [])
-  }
-
-  for (const [filePath, rows] of migratedRowsByFilePath) {
-    if (legacyFilePaths.has(filePath)) continue
-    appendRowsFile(filePath, rows)
-  }
-}
-
-/**
- * @param {string} outputDir
- * @param {string} serviceDirName
- * @param {string} fileName
- * @param {string} rawText
- * @returns {void}
- */
-function preserveLegacyServiceRawFile(outputDir, serviceDirName, fileName, rawText) {
-  const rawDir = path.join(outputDir, 'services-raw', serviceDirName)
-  ensureDir(rawDir)
-  const rawPath = path.join(rawDir, fileName)
-  if (fs.existsSync(rawPath)) {
-    fs.appendFileSync(rawPath, rawText)
-    return
-  }
-  fs.writeFileSync(rawPath, rawText)
-}
-
-/**
- * Legacy raw service files can contain rows for multiple actual services, so
- * repartition them by each normalized row's serviceName before rewriting.
- *
- * @param {string} servicesDir
- * @param {string} fileName
- * @param {NormalizedServiceRow[]} rows
- * @param {Map<string, NormalizedServiceRow[]>} rowsByFilePath
- * @returns {void}
- */
-function groupMigratedRowsByTargetFile(servicesDir, fileName, rows, rowsByFilePath) {
-  for (const row of rows) {
-    const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
-    const filePath = path.join(servicesDir, serviceName, fileName)
-    const existingRows = rowsByFilePath.get(filePath)
-    if (existingRows) {
-      existingRows.push(row)
-    } else {
-      rowsByFilePath.set(filePath, [row])
-    }
-  }
-}
-
-/**
- * @param {string} filePath
- * @param {NormalizedServiceRow[]} rows
- * @returns {void}
- */
-function writeRowsFile(filePath, rows) {
-  ensureDir(path.dirname(filePath))
-  const text = rows.map((row) => JSON.stringify(row)).join('\n')
-  fs.writeFileSync(filePath, text ? `${text}\n` : '')
-}
-
-/**
- * @param {string} filePath
- * @param {NormalizedServiceRow[]} rows
- * @returns {void}
- */
-function appendRowsFile(filePath, rows) {
-  if (!rows.length) return
-  ensureDir(path.dirname(filePath))
-  const text = rows.map((row) => JSON.stringify(row)).join('\n')
-  fs.appendFileSync(filePath, `${text}\n`)
-}
-
-/**
- * @param {string} filePath
- * @param {'resourceLogs' | 'resourceSpans' | 'resourceMetrics'} collectionKey
- * @returns {boolean}
- */
-function fileContainsLegacyRawEnvelope(filePath, collectionKey) {
-  const text = fs.readFileSync(filePath, 'utf8')
-  const firstLine = text.split('\n').find(line => line.trim().length > 0)
-  if (!firstLine) return false
-
-  try {
-    const parsed = JSON.parse(firstLine)
-    return Array.isArray(objectRecord(parsed)?.[collectionKey])
-  } catch {
-    return false
-  }
-}
-
-/**
- * @param {string} signal
- * @param {string} text
- * @returns {NormalizedServiceRow[]}
- */
-function flattenSignalText(signal, text) {
-  /** @type {NormalizedServiceRow[]} */
-  const rows = []
-
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      rows.push(...flattenSignalRows(signal, JSON.parse(line)))
-    } catch {
-      // skip malformed lines during migration
-    }
-  }
-
-  return rows
-}
-
-/**
  * @param {string} signal
  * @param {unknown} data
  * @returns {NormalizedServiceRow[]}
@@ -334,16 +170,6 @@ function flattenSignalRows(signal, data) {
   if (signal === 'traces') return flattenOtlpTraces(data)
   if (signal === 'metrics') return flattenOtlpMetrics(data)
   return []
-}
-
-/**
- * @param {string} signal
- * @returns {'resourceLogs' | 'resourceSpans' | 'resourceMetrics' | undefined}
- */
-function signalCollectionKey(signal) {
-  if (signal === 'logs') return 'resourceLogs'
-  if (signal === 'traces') return 'resourceSpans'
-  if (signal === 'metrics') return 'resourceMetrics'
 }
 
 /**
@@ -919,18 +745,6 @@ function otlpTimeValue(value) {
 function ensureDir(dir) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true })
-  }
-}
-
-/**
- * @param {string} filePath
- * @returns {fs.Stats | undefined}
- */
-function safeStat(filePath) {
-  try {
-    return fs.statSync(filePath)
-  } catch {
-    return undefined
   }
 }
 

@@ -155,6 +155,16 @@ export function varBigInt(n) {
 }
 
 /**
+ * Varint encoder for int64 using two's-complement encoding.
+ *
+ * @param {bigint | number} n
+ * @returns {number[]}
+ */
+export function varInt64(n) {
+  return varBigInt(BigInt.asUintN(64, BigInt(n)))
+}
+
+/**
  * Packed repeated uint64 field (bigint varints).
  *
  * @param {number} field
@@ -166,6 +176,17 @@ export function packedVarBigIntField(field, values) {
   const payload = []
   for (const v of values) payload.push(...varBigInt(BigInt(v)))
   return lenDelim(field, payload)
+}
+
+/**
+ * int64 varint field encoded with two's-complement semantics.
+ *
+ * @param {number} field
+ * @param {bigint | number} value
+ * @returns {number[]}
+ */
+export function int64Field(field, value) {
+  return [...tag(field, 0), ...varInt64(value)]
 }
 
 /**

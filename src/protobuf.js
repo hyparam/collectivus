@@ -38,7 +38,8 @@ export function readVarint(reader) {
 }
 
 /**
- * Read a varint as a bigint. Use for int64/uint64/sint64 fields.
+ * Read a varint as a bigint. Use for raw varint payloads or the full uint64
+ * range before applying signed or zigzag decoding.
  *
  * @param {DataReader} reader
  * @returns {bigint}
@@ -52,6 +53,17 @@ export function readVarBigInt(reader) {
     if (!(byte & 0x80)) return result
     shift += 7n
   }
+}
+
+/**
+ * Read an int64 varint as a signed bigint using two's-complement decoding.
+ *
+ * @param {DataReader} reader
+ * @returns {bigint}
+ */
+export function readVarInt64(reader) {
+  const value = readVarBigInt(reader)
+  return value >= 0x8000000000000000n ? value - 0x10000000000000000n : value
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   doubleField,
   fixed32Field,
   fixed64Field,
+  int64Field,
   lenDelim,
   packedDoubleField,
   packedFixed64Field,
@@ -36,6 +37,9 @@ describe('decodeAnyValue', () => {
     expect(decodeAnyValue(u8(doubleField(4, 1.5)))).toEqual({ doubleValue: 1.5 })
   })
 
+  it('decodes negative intValue as signed int64', () => {
+    expect(decodeAnyValue(u8(int64Field(3, -5n)))).toEqual({ intValue: '-5' })
+  })
   it('decodes bytesValue as base64', () => {
     expect(decodeAnyValue(u8(bytesField(7, [0xde, 0xad])))).toEqual({ bytesValue: '3q0=' })
   })
@@ -428,4 +432,3 @@ describe('logs gap-fills', () => {
     })
   })
 })
-

@@ -10,7 +10,7 @@ import {
   readBytes,
   readDouble,
   readTag,
-  readVarBigInt,
+  readVarInt64,
   readVarint,
   skipField,
 } from '../protobuf.js'
@@ -72,7 +72,7 @@ export function decodeAnyValue(bytes) {
     switch (fieldNumber) {
     case 1: out.stringValue = decodeString(readBytes(r)); break
     case 2: out.boolValue = readVarint(r) !== 0; break
-    case 3: out.intValue = readVarBigInt(r).toString(); break
+    case 3: out.intValue = readVarInt64(r).toString(); break
     case 4: out.doubleValue = readDouble(r); break
     case 5: out.arrayValue = decodeArrayValue(readBytes(r)); break
     case 6: out.kvlistValue = decodeKeyValueList(readBytes(r)); break

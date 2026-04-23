@@ -1,6 +1,6 @@
 {
   "name": "collectivus",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Zero-dependency OTLP/HTTP collector that writes to JSONL files",
   "type": "module",
   "main": "src/index.js",

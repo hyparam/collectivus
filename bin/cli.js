@@ -1,22 +1,12 @@
 #!/usr/bin/env node
 
-import { Collector } from '../src/index.js'
-import { resolveOptions } from '../src/config.js'
+import process from 'node:process'
+import { run } from '../src/cli.js'
 
-const options = resolveOptions(process.argv.slice(2), process.env)
-const collector = new Collector(options)
-
-collector.start().then(function() {
-  console.log(`Collectivus listening on port ${collector.port}`)
-  console.log(`Writing to ${collector.outputDir}`)
-})
-
-function shutdown() {
-  console.log('\nShutting down...')
-  collector.stop().then(function() {
-    process.exit(0)
-  })
-}
-
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+run(process.argv.slice(2), process.env).then(
+  function(code) { process.exit(code) },
+  function(err) {
+    process.stderr.write(`fatal: ${err instanceof Error ? err.message : String(err)}\n`)
+    process.exit(1)
+  }
+)

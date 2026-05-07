@@ -69,4 +69,24 @@ describe('resolveOptions', () => {
       outputDir: '/tmp/x',
     })
   })
+
+  it('throws on unrecognized upload signals to fail loudly on typos', () => {
+    expect(() => resolveOptions([], {
+      COLLECTIVUS_UPLOAD_BUCKET: 'b',
+      COLLECTIVUS_UPLOAD_SIGNALS: 'Logs',
+    })).toThrow(/invalid upload signal "Logs"/)
+    expect(() => resolveOptions(['--upload-signals=loggs'], {})).toThrow(/invalid upload signal "loggs"/)
+  })
+
+  it('throws when upload signals list resolves to empty', () => {
+    expect(() => resolveOptions(['--upload-signals='], {})).toThrow(/upload signals list is empty/)
+    expect(() => resolveOptions(['--upload-signals', ', ,'], {})).toThrow(/upload signals list is empty/)
+  })
+
+  it('parses a valid comma-separated upload-signals list', () => {
+    const opts = resolveOptions(['--upload-signals=logs,traces'], {
+      COLLECTIVUS_UPLOAD_BUCKET: 'b',
+    })
+    expect(opts.upload?.signals).toEqual(['logs', 'traces'])
+  })
 })

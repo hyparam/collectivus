@@ -228,7 +228,7 @@ describe('run() — --config <path>', () => {
     expect(stdout.value()).toMatch(/127\.0\.0\.1:\d+/)
   })
 
-  it('warns when proxy is in config (not yet implemented)', async () => {
+  it('starts both otel and proxy listeners when both are configured', async () => {
     const cfg = {
       otel: { listen: '127.0.0.1:0' },
       proxy: {
@@ -246,10 +246,12 @@ describe('run() — --config <path>', () => {
       stdout, stderr,
       onShutdownRequested: (handler) => { trigger = handler },
     })
-    await waitFor(() => stdout.value().includes('OTLP listener bound'))
+    await waitFor(() => /OTLP listener bound/.test(stdout.value()) && /Proxy listener bound/.test(stdout.value()))
     trigger('SIGTERM')
     expect(await result).toBe(0)
-    expect(stderr.value()).toMatch(/proxy listener is not yet implemented/)
+    expect(stdout.value()).toMatch(/Proxy listener bound on 127\.0\.0\.1:\d+/)
+    expect(stdout.value()).toMatch(/recording to .*proxy\.jsonl/)
+    expect(stderr.value()).not.toMatch(/not yet implemented/)
   })
 
   it('returns 1 when config has no enabled listeners', async () => {

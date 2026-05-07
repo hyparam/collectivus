@@ -1,6 +1,9 @@
 import process from 'node:process'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
+import { Proxy } from './proxy.js'
+import { Recorder } from './recorder.js'
+import { FileSink } from './sinks/file.js'
 
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
@@ -167,7 +170,7 @@ export async function run(argv, env, hooks = {}) {
       return 0
     }
 
-    return runLifecycle(buildConfigListeners(config, stderr), stdout, stderr, onShutdownRequested)
+    return runLifecycle(buildConfigListeners(config), stdout, stderr, onShutdownRequested)
   }
 
   if (parsed.bare) {
@@ -209,10 +212,9 @@ function envPort(env) {
 
 /**
  * @param {import('./config.js').CollectivusConfig} config
- * @param {{ write: (s: string) => void }} stderr
  * @returns {ListenerFactory[]}
  */
-function buildConfigListeners(config, stderr) {
+function buildConfigListeners(config) {
   /** @type {ListenerFactory[]} */
   const factories = []
 
@@ -232,7 +234,27 @@ function buildConfigListeners(config, stderr) {
   }
 
   if (config.proxy) {
-    stderr.write(`Warning: proxy listener is not yet implemented in this build (config requested ${config.proxy.listen}); skipping.\n`)
+    if (!config.sink) {
+      throw new Error('proxy is configured but sink is missing')
+    }
+    const proxyConfig = config.proxy
+    const sinkDir = config.sink.dir
+    factories.push(async () => {
+      const sink = new FileSink(sinkDir)
+      const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
+      const proxy = new Proxy(proxyConfig, { recorder })
+      await proxy.start()
+      const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
+      return {
+        description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/proxy.jsonl`,
+        // Stop accepting new connections, then flush+close the sink so the
+        // final exchange row of any in-flight request lands before exit.
+        stop: async () => {
+          await proxy.stop()
+          await sink.close()
+        },
+      }
+    })
   }
 
   return factories

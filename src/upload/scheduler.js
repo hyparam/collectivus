@@ -2,9 +2,19 @@
  * Daily UTC timer. Calls `tick` once at startup (for catch-up), then
  * once per UTC day at the configured HH:MM. The timer chain (not
  * setInterval) prevents drift, and clamps to setTimeout's 32-bit ceiling.
+ *
+ * If a tick reports `{ retry: true }` (or throws), the next firing is
+ * brought forward to `retryDelayMs` from now instead of waiting for the
+ * next daily slot — so a transient outage at 00:10 doesn't lose a day.
  */
 
 const MAX_TIMEOUT = 2147483647 // ~24.8 days; setTimeout caps at int32 ms
+const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000
+
+/**
+ * @typedef {object} TickResult
+ * @property {boolean} [retry] schedule a fast retry instead of waiting until the next daily fire
+ */
 
 /**
  * @typedef {object} SchedulerDeps
@@ -16,8 +26,9 @@ const MAX_TIMEOUT = 2147483647 // ~24.8 days; setTimeout caps at int32 ms
 /**
  * @param {object} options
  * @param {string} options.time "HH:MM" UTC
- * @param {() => Promise<void>} options.tick
+ * @param {() => Promise<void | TickResult>} options.tick
  * @param {(err: unknown) => void} [options.onError] called when tick rejects
+ * @param {number} [options.retryDelayMs] fast-retry delay after a failed tick (default 15min)
  * @param {SchedulerDeps} [deps]
  * @returns {{ start: () => Promise<void>, stop: () => Promise<void> }}
  */
@@ -26,20 +37,37 @@ export function createScheduler(options, deps = {}) {
   const setT = deps.setTimeoutFn ?? setTimeout
   const clearT = deps.clearTimeoutFn ?? clearTimeout
   const onError = options.onError ?? defaultOnError
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
 
   const [hh, mm] = parseTime(options.time)
 
   /** @type {NodeJS.Timeout | number | null} */
   let handle = null
   let stopped = false
+  let lastRetry = false
   /** @type {Promise<void>} */
   let chain = Promise.resolve()
 
+  function runTick() {
+    chain = chain.then(async () => {
+      if (stopped) return
+      try {
+        const result = await options.tick()
+        lastRetry = !!(result && /** @type {TickResult} */ (result).retry)
+      } catch (err) {
+        onError(err)
+        lastRetry = true
+      }
+    })
+    return chain
+  }
+
   function schedule() {
     if (stopped) return
-    const next = nextFireAt(now(), hh, mm)
-    let delay = next.getTime() - now().getTime()
+    const dailyAt = nextFireAt(now(), hh, mm)
+    let delay = dailyAt.getTime() - now().getTime()
     if (delay < 0) delay = 0
+    if (lastRetry && retryDelayMs < delay) delay = retryDelayMs
     const capped = Math.min(delay, MAX_TIMEOUT)
     handle = setT(() => {
       handle = null
@@ -49,16 +77,7 @@ export function createScheduler(options, deps = {}) {
         schedule()
         return
       }
-      chain = chain.then(async () => {
-        if (stopped) return
-        try {
-          await options.tick()
-        } catch (err) {
-          onError(err)
-        }
-      }).then(() => {
-        schedule()
-      })
+      runTick().then(() => schedule())
     }, capped)
   }
 
@@ -66,14 +85,7 @@ export function createScheduler(options, deps = {}) {
     async start() {
       stopped = false
       // Run catch-up immediately, then schedule the next firing.
-      chain = chain.then(async () => {
-        try {
-          await options.tick()
-        } catch (err) {
-          onError(err)
-        }
-      })
-      await chain
+      await runTick()
       schedule()
     },
     async stop() {

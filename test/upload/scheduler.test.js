@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createScheduler, nextFireAt, parseTime } from '../../src/upload/scheduler.js'
 
 describe('parseTime', () => {
@@ -67,6 +67,80 @@ describe('createScheduler', () => {
     expect(timers).toHaveLength(2)
     // Next firing is the following day at 12:00 → 24h.
     expect(timers[1].delay).toBe(24 * 60 * 60 * 1000)
+
+    await scheduler.stop()
+  })
+
+  it('schedules a fast retry when the previous tick reports retry: true', async () => {
+    let now = new Date('2026-05-07T08:00:00Z')
+    /** @type {Array<{ delay: number, handler: () => void }>} */
+    const timers = []
+
+    let tickCount = 0
+    const scheduler = createScheduler({
+      time: '12:00',
+      retryDelayMs: 15 * 60 * 1000,
+      tick: async () => {
+        tickCount++
+        return { retry: tickCount === 1 }
+      },
+    }, {
+      now: () => now,
+      setTimeoutFn: (handler, delay) => {
+        const handle = timers.length + 1
+        timers.push({ delay, handler })
+        return handle
+      },
+      clearTimeoutFn: () => {},
+    })
+
+    await scheduler.start()
+    expect(tickCount).toBe(1)
+    // First tick reported retry → next fire is 15min from 08:00, not 4h to 12:00.
+    expect(timers).toHaveLength(1)
+    expect(timers[0].delay).toBe(15 * 60 * 1000)
+
+    now = new Date('2026-05-07T08:15:00Z')
+    timers[0].handler()
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+    expect(tickCount).toBe(2)
+    // Second tick succeeded → back to normal daily cadence (12:00 - 08:15 = 3h45m).
+    expect(timers).toHaveLength(2)
+    expect(timers[1].delay).toBe((3 * 60 + 45) * 60 * 1000)
+
+    await scheduler.stop()
+  })
+
+  it('schedules a fast retry when the tick throws', async () => {
+    const now = new Date('2026-05-07T08:00:00Z')
+    /** @type {Array<{ delay: number, handler: () => void }>} */
+    const timers = []
+
+    let tickCount = 0
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const scheduler = createScheduler({
+      time: '12:00',
+      retryDelayMs: 15 * 60 * 1000,
+      tick: async () => {
+        tickCount++
+        throw new Error('boom')
+      },
+    }, {
+      now: () => now,
+      setTimeoutFn: (handler, delay) => {
+        const handle = timers.length + 1
+        timers.push({ delay, handler })
+        return handle
+      },
+      clearTimeoutFn: () => {},
+    })
+
+    await scheduler.start()
+    errSpy.mockRestore()
+    expect(tickCount).toBe(1)
+    expect(timers).toHaveLength(1)
+    expect(timers[0].delay).toBe(15 * 60 * 1000)
 
     await scheduler.stop()
   })

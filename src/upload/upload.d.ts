@@ -48,6 +48,16 @@ export interface UploadJob {
   jsonlPath: string
 }
 
+export interface UploadResult {
+  job: UploadJob
+  uploaded: boolean
+  key: string
+  rows: number
+  size: number
+  error?: Error
+  retryable?: boolean
+}
+
 export interface UploadDeps {
   /** Max attempts per connector call (HEAD/PUT). Default 3. */
   maxAttempts?: number

@@ -5,7 +5,7 @@ import { rowsToParquet } from './parquet.js'
 import { readJsonlRows } from './reader.js'
 
 /**
- * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadDeps, UploadJob } from './upload.d.ts'
+ * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
  */
 
 const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
@@ -141,12 +141,12 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
  * @param {UploadDeps} [deps]
- * @returns {Promise<Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>>}
+ * @returns {Promise<UploadResult[]>}
  */
 export async function uploadPending(options, connector, outputDir, today, deps = {}) {
   const committed = readLedger(outputDir)
   const jobs = discoverJobs(outputDir, today, options)
-  /** @type {Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>} */
+  /** @type {UploadResult[]} */
   const results = []
   for (const job of jobs) {
     try {
@@ -155,7 +155,7 @@ export async function uploadPending(options, connector, outputDir, today, deps =
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
       console.error(`[collectivus] upload failed for ${job.service}/${job.signal}/${job.date}: ${error.message}`)
-      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error })
+      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error, retryable: isTransient(error) })
     }
   }
   return results

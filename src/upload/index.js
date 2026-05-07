@@ -33,7 +33,7 @@ export function createUploader(args) {
     tick: async () => {
       const today = todayUtc(new Date())
       const results = await uploadPending(options, connector, args.outputDir, today)
-      return { retry: results.some((r) => r.error !== undefined) }
+      return { retry: results.some((r) => r.retryable === true) }
     },
   })
 

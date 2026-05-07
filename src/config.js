@@ -91,6 +91,10 @@ export function resolveOptions(argv, env) {
 }
 
 /**
+ * Parse a comma-separated signal list. Throws on any unrecognized
+ * token (including bad case like "Logs") or an empty result, so a
+ * typo fails loudly instead of silently disabling all uploads.
+ *
  * @param {string} value comma-separated signal list
  * @returns {ReadonlyArray<Signal>}
  */
@@ -99,9 +103,15 @@ function parseSignals(value) {
   const out = []
   for (const part of value.split(',')) {
     const trimmed = part.trim()
+    if (trimmed === '') continue
     if (trimmed === 'logs' || trimmed === 'traces' || trimmed === 'metrics') {
       out.push(trimmed)
+    } else {
+      throw new Error(`invalid upload signal "${trimmed}", expected one of: logs, traces, metrics`)
     }
+  }
+  if (out.length === 0) {
+    throw new Error('upload signals list is empty, expected one or more of: logs, traces, metrics')
   }
   return out
 }

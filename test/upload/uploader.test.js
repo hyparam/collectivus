@@ -1,5 +1,5 @@
 import { parquetReadObjects } from 'hyparquet'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -105,6 +105,47 @@ describe('uploadPending', () => {
 
     expect([...connector.store.keys()]).toEqual([
       `collectivus/svc-a/logs/date=${yesterday}/data.parquet`,
+    ])
+  })
+
+  it('isolates per-job failures so one bad object does not abort the run', async () => {
+    writeJsonl('svc-bad', 'logs', yesterday, [
+      { serviceName: 'svc-bad', body: 'x', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+    writeJsonl('svc-good', 'logs', yesterday, [
+      { serviceName: 'svc-good', body: 'y', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    const memory = memoryConnector()
+    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    const connector = {
+      scheme: 'flaky',
+      async putObject(key, body, contentType) {
+        await memory.putObject(key, body, contentType)
+      },
+      headObject(key) {
+        if (key.includes('svc-bad')) return Promise.reject(new Error('s3 HEAD returned 503'))
+        return memory.headObject(key)
+      },
+    }
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today
+    )
+    errSpy.mockRestore()
+
+    expect(results).toHaveLength(2)
+    const bad = results.find((r) => r.job.service === 'svc-bad')
+    const good = results.find((r) => r.job.service === 'svc-good')
+    expect(bad?.uploaded).toBe(false)
+    expect(bad?.error?.message).toMatch(/503/)
+    expect(good?.uploaded).toBe(true)
+    expect([...memory.store.keys()]).toEqual([
+      `collectivus/svc-good/logs/date=${yesterday}/data.parquet`,
     ])
   })
 

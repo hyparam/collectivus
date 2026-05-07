@@ -125,22 +125,30 @@ export async function uploadJob(job, options, connector, outputDir, committed) {
 
 /**
  * Upload every eligible job — used both by the daily timer and by
- * startup catch-up.
+ * startup catch-up. Per-job failures (transient 5xx, permanent 4xx,
+ * malformed JSONL, etc.) are logged and isolated so one bad file does
+ * not abort the whole run; the next tick will retry the failed jobs.
  *
  * @param {ResolvedUploadOptions} options
  * @param {StorageConnector} connector
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
- * @returns {Promise<Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number }>>}
+ * @returns {Promise<Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>>}
  */
 export async function uploadPending(options, connector, outputDir, today) {
   const committed = readLedger(outputDir)
   const jobs = discoverJobs(outputDir, today, options)
-  /** @type {Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number }>} */
+  /** @type {Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>} */
   const results = []
   for (const job of jobs) {
-    const result = await uploadJob(job, options, connector, outputDir, committed)
-    results.push({ job, ...result })
+    try {
+      const result = await uploadJob(job, options, connector, outputDir, committed)
+      results.push({ job, ...result })
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      console.error(`[collectivus] upload failed for ${job.service}/${job.signal}/${job.date}: ${error.message}`)
+      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error })
+    }
   }
   return results
 }

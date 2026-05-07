@@ -1,6 +1,9 @@
 import { randomBytes } from 'node:crypto'
+import { SseParser, isSseHeaders } from './sse.js'
 
 /** @typedef {import('./sinks/file.js').Sink} Sink */
+
+export { isSseHeaders }
 
 /**
  * Headers redacted by default. Operators can extend this set per-config; this
@@ -110,8 +113,8 @@ export class Exchange {
     this.error = null
     /** @type {boolean} */
     this.finished = false
-    /** @type {string} */
-    this.sseBuffer = ''
+    /** @type {SseParser} */
+    this.sseParser = new SseParser()
   }
 
   /**
@@ -174,25 +177,18 @@ export class Exchange {
    * @returns {Promise<void>}
    */
   async consumeStreamChunk(chunk) {
-    this.sseBuffer += chunk.toString('utf8')
+    const events = this.sseParser.feed(chunk)
     /** @type {Promise<void>[]} */
     const writes = []
-    while (true) {
-      const sep = findSseSeparator(this.sseBuffer)
-      if (sep === -1) break
-      const block = this.sseBuffer.slice(0, sep.idx)
-      this.sseBuffer = this.sseBuffer.slice(sep.idx + sep.len)
-      const ev = parseSseBlock(block)
-      if (ev) {
-        this.streamEventCount += 1
-        writes.push(this.recorder.sink.writeRow({
-          exchange_id: this.id,
-          kind: 'stream_event',
-          t_ms: Date.now() - this.tsStartMs,
-          event: ev.event,
-          data: ev.data,
-        }))
-      }
+    for (const ev of events) {
+      this.streamEventCount += 1
+      writes.push(this.recorder.sink.writeRow({
+        exchange_id: this.id,
+        kind: 'stream_event',
+        t_ms: Date.now() - this.tsStartMs,
+        event: ev.event,
+        data: ev.data,
+      }))
     }
     await Promise.all(writes)
   }
@@ -249,21 +245,6 @@ export class Exchange {
     }
     await this.recorder.sink.writeRow(row)
   }
-}
-
-/**
- * Return true if the given response headers indicate an SSE stream. Anything
- * starting with `text/event-stream` (with optional charset / parameters) is
- * treated as a stream.
- *
- * @param {Record<string, string | string[] | undefined>} headers
- * @returns {boolean}
- */
-export function isSseHeaders(headers) {
-  const ct = headers['content-type'] ?? headers['Content-Type']
-  const value = Array.isArray(ct) ? ct[0] : ct
-  if (typeof value !== 'string') return false
-  return value.toLowerCase().split(';')[0].trim() === 'text/event-stream'
 }
 
 /**
@@ -325,54 +306,3 @@ function redactString(value) {
   return `REDACTED:${tail}`
 }
 
-/**
- * Find the next SSE event separator — `\n\n` or `\r\n\r\n`. Returns the
- * starting offset and length of the separator so the caller can slice the
- * preceding event block and advance past the terminator.
- *
- * @param {string} buf
- * @returns {{ idx: number, len: number } | -1}
- */
-function findSseSeparator(buf) {
-  const a = buf.indexOf('\n\n')
-  const b = buf.indexOf('\r\n\r\n')
-  if (a === -1 && b === -1) return -1
-  if (a === -1) return { idx: b, len: 4 }
-  if (b === -1) return { idx: a, len: 2 }
-  if (a < b) return { idx: a, len: 2 }
-  return { idx: b, len: 4 }
-}
-
-/**
- * Parse one SSE event block per the WHATWG eventsource grammar — fields are
- * `field: value` lines, multiple `data:` lines concatenate with `\n`, the
- * default event type is `message`, and lines starting with `:` are comments.
- *
- * @param {string} block
- * @returns {{ event: string, data: string } | null}
- */
-function parseSseBlock(block) {
-  let event = 'message'
-  let data = ''
-  let hasField = false
-  const lines = block.split(/\r?\n/)
-  for (const line of lines) {
-    if (line.length === 0) continue
-    if (line.startsWith(':')) continue
-    const colon = line.indexOf(':')
-    const field = colon === -1 ? line : line.slice(0, colon)
-    let value = colon === -1 ? '' : line.slice(colon + 1)
-    if (value.startsWith(' ')) value = value.slice(1)
-    if (field === 'event') {
-      event = value
-      hasField = true
-    } else if (field === 'data') {
-      data = data.length === 0 ? value : `${data}\n${value}`
-      hasField = true
-    } else if (field === 'id' || field === 'retry') {
-      hasField = true
-    }
-  }
-  if (!hasField) return null
-  return { event, data }
-}

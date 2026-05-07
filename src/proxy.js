@@ -1,6 +1,6 @@
 import http from 'node:http'
 import https from 'node:https'
-import { isSseHeaders } from './recorder.js'
+import { isSseHeaders } from './sse.js'
 
 /** @typedef {import('./config.js').ProxyConfig} ProxyConfig */
 /** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
@@ -256,8 +256,11 @@ function handleRequest(upstreams, recorder, req, res) {
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
     if (exchange && !exchange.finished) {
-      // Client gave up before the response completed — record what we have.
-      exchange.setError(new Error('client aborted'))
+      // Client gave up before the response completed — cancel upstream and
+      // record what we have. The error sentinel is `client_aborted` per the
+      // proxy contract so consumers can match on a stable machine-readable
+      // value rather than a free-form Error.message string.
+      exchange.setError('client_aborted')
       finishSafely(exchange)
     }
   })

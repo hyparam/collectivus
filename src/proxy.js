@@ -59,7 +59,9 @@ export class Proxy {
   }
 
   /**
-   * Bind the proxy listener.
+   * Bind the proxy listener. Rejects with the bind error (e.g. EADDRINUSE)
+   * rather than emitting an unhandled `error` event, so the CLI can fail
+   * fast instead of hanging on `await start()`.
    * @returns {Promise<void>}
    */
   start() {
@@ -68,8 +70,19 @@ export class Proxy {
       handleRequest(upstreams, recorder, req, res)
     })
     this.server = server
-    return new Promise((resolve) => {
-      server.listen(this.port, this.host, () => resolve(undefined))
+    return new Promise((resolve, reject) => {
+      /** @param {Error} err */
+      function onError(err) {
+        server.off('listening', onListening)
+        reject(err)
+      }
+      function onListening() {
+        server.off('error', onError)
+        resolve(undefined)
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(this.port, this.host)
     })
   }
 

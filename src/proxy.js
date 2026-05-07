@@ -1,8 +1,11 @@
 import http from 'node:http'
 import https from 'node:https'
+import { isSseHeaders } from './recorder.js'
 
 /** @typedef {import('./config.js').ProxyConfig} ProxyConfig */
 /** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
+/** @typedef {import('./recorder.js').Recorder} Recorder */
+/** @typedef {import('./recorder.js').Exchange} Exchange */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to a single transport
@@ -29,13 +32,17 @@ const HOP_BY_HOP_HEADERS = new Set([
 /**
  * Reverse-proxy listener that forwards matched requests to a configured upstream.
  *
- * Pass-through only at this stage: SSE-aware streaming and recording are
- * layered on by sibling beads. All headers are forwarded verbatim except
- * hop-by-hop headers and `Host`, which is replaced with the upstream's host.
+ * Pass-through plus optional recording: when constructed with a `recorder`,
+ * each exchange is captured (request, response or stream events) and written
+ * to the recorder's sink. Recording is purely observational — failures inside
+ * the recorder must not break the proxy hot path.
  */
 export class Proxy {
-  /** @param {ProxyConfig} config */
-  constructor(config) {
+  /**
+   * @param {ProxyConfig} config
+   * @param {{ recorder?: Recorder }} [options]
+   */
+  constructor(config, options = {}) {
     /** @type {ProxyConfig} */
     this.config = config
     const { host, port } = parseListen(config.listen)
@@ -45,6 +52,8 @@ export class Proxy {
     this.port = port
     /** @type {CompiledUpstream[]} */
     this.upstreams = compileUpstreams(config.upstreams)
+    /** @type {Recorder | null} */
+    this.recorder = options.recorder ?? null
     /** @type {import('node:http').Server | null} */
     this.server = null
   }
@@ -54,9 +63,9 @@ export class Proxy {
    * @returns {Promise<void>}
    */
   start() {
-    const { upstreams } = this
+    const { upstreams, recorder } = this
     const server = http.createServer((req, res) => {
-      handleRequest(upstreams, req, res)
+      handleRequest(upstreams, recorder, req, res)
     })
     this.server = server
     return new Promise((resolve) => {
@@ -147,10 +156,11 @@ function compileUpstreams(upstreams) {
 
 /**
  * @param {CompiledUpstream[]} upstreams
+ * @param {Recorder | null} recorder
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
  */
-function handleRequest(upstreams, req, res) {
+function handleRequest(upstreams, recorder, req, res) {
   const requestUrl = req.url ?? '/'
   const url = new URL(requestUrl, 'http://placeholder')
   const upstream = matchUpstream(upstreams, url.pathname)
@@ -168,6 +178,17 @@ function handleRequest(upstreams, req, res) {
     : isHttps ? 443 : 80
 
   const headers = forwardHeaders(req.headers, upstreamHost)
+
+  const exchange = recorder?.startExchange({
+    upstream: upstream.name,
+    client: clientInfo(req),
+    request: {
+      method: req.method,
+      path: requestUrl,
+      headers: req.headers,
+    },
+  }) ?? null
+
   const upstreamReq = lib.request({
     method: req.method,
     protocol: upstream.baseUrl.protocol,
@@ -178,6 +199,32 @@ function handleRequest(upstreams, req, res) {
   }, (upstreamRes) => {
     const responseHeaders = sanitizeResponseHeaders(upstreamRes.headers)
     res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.statusMessage, responseHeaders)
+    if (exchange) {
+      exchange.setResponseStart({
+        status: upstreamRes.statusCode,
+        headers: upstreamRes.headers,
+      })
+      const streaming = isSseHeaders(upstreamRes.headers)
+      if (streaming) {
+        exchange.markStreaming()
+        upstreamRes.on('data', (chunk) => {
+          // Recorder runs alongside the proxy hot path; failures here must
+          // not break the response stream the client is consuming.
+          exchange.consumeStreamChunk(chunk).catch((err) => exchange.setError(err))
+        })
+      } else {
+        upstreamRes.on('data', (chunk) => {
+          exchange.appendResponseChunk(chunk)
+        })
+      }
+      upstreamRes.on('end', () => {
+        finishSafely(exchange)
+      })
+      upstreamRes.on('error', (err) => {
+        exchange.setError(err)
+        finishSafely(exchange)
+      })
+    }
     upstreamRes.pipe(res)
   })
 
@@ -190,16 +237,62 @@ function handleRequest(upstreams, req, res) {
       res.destroy(err)
     }
     req.resume()
+    if (exchange) {
+      if (!exchange.response) {
+        exchange.setResponseStart({ status: 502, headers: {} })
+      }
+      exchange.setError(err)
+      finishSafely(exchange)
+    }
   })
 
-  req.on('error', () => {
+  req.on('error', (err) => {
     upstreamReq.destroy()
+    if (exchange) {
+      exchange.setError(err)
+      finishSafely(exchange)
+    }
   })
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
+    if (exchange && !exchange.finished) {
+      // Client gave up before the response completed — record what we have.
+      exchange.setError(new Error('client aborted'))
+      finishSafely(exchange)
+    }
   })
 
+  if (exchange) {
+    req.on('data', (chunk) => exchange.appendRequestChunk(chunk))
+  }
   req.pipe(upstreamReq)
+}
+
+/**
+ * Capture client metadata once at exchange start so it survives socket
+ * teardown later in the lifecycle.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {import('./recorder.js').ClientInfo}
+ */
+function clientInfo(req) {
+  const remoteAddress = req.socket?.remoteAddress
+  const ua = req.headers['user-agent']
+  return {
+    ip: typeof remoteAddress === 'string' ? remoteAddress : undefined,
+    user_agent: typeof ua === 'string' ? ua : Array.isArray(ua) ? ua[0] : undefined,
+  }
+}
+
+/**
+ * Call `exchange.finish()` and swallow rejections — recording errors must not
+ * propagate as unhandled rejections that could crash the process.
+ *
+ * @param {Exchange} exchange
+ * @returns {void}
+ */
+function finishSafely(exchange) {
+  exchange.finish().catch(() => {})
 }
 
 /**

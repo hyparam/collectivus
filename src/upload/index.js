@@ -30,10 +30,18 @@ const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
 export function createUploader(args) {
   const options = resolve(args.options)
   const env = args.env ?? process.env
-  if (!args.connector && (!env.AWS_ACCESS_KEY_ID || !env.AWS_SECRET_ACCESS_KEY)) {
-    throw new Error('AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set for the S3 connector')
+  /** @type {StorageConnector} */
+  let connector
+  if (args.connector) {
+    connector = args.connector
+  } else {
+    const accessKeyId = env.AWS_ACCESS_KEY_ID
+    const secretAccessKey = env.AWS_SECRET_ACCESS_KEY
+    if (!accessKeyId || !secretAccessKey) {
+      throw new Error('AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set for the S3 connector')
+    }
+    connector = defaultConnector(options, accessKeyId, secretAccessKey, env)
   }
-  const connector = args.connector ?? defaultConnector(options, env)
 
   const scheduler = createScheduler({
     time: options.time,
@@ -65,22 +73,22 @@ function resolve(options) {
 }
 
 /**
- * Build the default connector based on the resolved options. Today S3 is
- * the only real connector; future schemes (gs://, azblob://) slot in
- * here. Caller (createUploader) is responsible for verifying that
- * AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are present in `env`.
+ * Build the default S3 connector. Today S3 is the only real connector;
+ * future schemes (gs://, azblob://) slot in here.
  *
  * @param {ResolvedUploadOptions} options
+ * @param {string} accessKeyId
+ * @param {string} secretAccessKey
  * @param {NodeJS.ProcessEnv} env
  * @returns {StorageConnector}
  */
-function defaultConnector(options, env) {
+function defaultConnector(options, accessKeyId, secretAccessKey, env) {
   const region = options.region || env.AWS_REGION || 'us-east-1'
   return s3Connector({
     bucket: options.bucket,
     region,
-    accessKeyId: /** @type {string} */ (env.AWS_ACCESS_KEY_ID),
-    secretAccessKey: /** @type {string} */ (env.AWS_SECRET_ACCESS_KEY),
+    accessKeyId,
+    secretAccessKey,
     sessionToken: env.AWS_SESSION_TOKEN,
     endpoint: options.endpoint,
   })

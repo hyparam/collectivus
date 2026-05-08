@@ -16,6 +16,8 @@ export class SseParser {
   constructor() {
     /** @type {string} */
     this.buffer = ''
+    /** @type {TextDecoder} */
+    this.decoder = new TextDecoder()
   }
 
   /**
@@ -27,7 +29,9 @@ export class SseParser {
    * @returns {SseEvent[]}
    */
   feed(chunk) {
-    this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    this.buffer += typeof chunk === 'string'
+      ? this.decoder.decode() + chunk
+      : this.decoder.decode(chunk, { stream: true })
     /** @type {SseEvent[]} */
     const events = []
     while (true) {

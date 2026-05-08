@@ -92,6 +92,25 @@ describe('Recorder — non-streaming exchange', () => {
     await exchange.finish()
     expect(sink.rows).toHaveLength(1)
   })
+
+  it('preserves multi-byte UTF-8 response body characters split across chunks', async () => {
+    const sink = makeCollectingSink()
+    const recorder = new Recorder({ sink })
+    const exchange = recorder.startExchange({
+      upstream: 'a',
+      client: { ip: undefined, user_agent: undefined },
+      request: { method: 'POST', path: '/', headers: {} },
+    })
+    const body = JSON.stringify({ text: 'hello 🚀 café' })
+    const bytes = Buffer.from(body, 'utf8')
+    const emojiStart = bytes.indexOf(Buffer.from('🚀', 'utf8'))
+    exchange.setResponseStart({ status: 200, headers: { 'content-type': 'application/json' } })
+    exchange.appendResponseChunk(bytes.subarray(0, emojiStart + 1))
+    exchange.appendResponseChunk(bytes.subarray(emojiStart + 1))
+    await exchange.finish()
+
+    expect(sink.rows[0].response.body).toBe(body)
+  })
 })
 
 describe('Recorder — header redaction', () => {

@@ -120,6 +120,8 @@ export class Exchange {
     this.requestPath = init.request.path
     /** @type {ExchangeResponse | undefined} */
     this.response = undefined
+    /** @type {Buffer[]} */
+    this.responseChunks = []
     /** @type {number} */
     this.streamEventCount = 0
     /** @type {string | undefined} */
@@ -161,6 +163,7 @@ export class Exchange {
       headers: redactHeaders(init.headers, this.recorder.redactSet),
       body: '',
     }
+    this.responseChunks = []
   }
 
   /**
@@ -173,7 +176,7 @@ export class Exchange {
   appendResponseChunk(chunk) {
     if (!this.response) return
     if (this.response.body === undefined) return
-    this.response.body += chunk.toString('utf8')
+    this.responseChunks.push(Buffer.from(chunk))
   }
 
   /**
@@ -185,6 +188,7 @@ export class Exchange {
   markStreaming() {
     if (!this.response) return
     this.response.body = undefined
+    this.responseChunks = []
   }
 
   /**
@@ -244,6 +248,7 @@ export class Exchange {
 
     const tsEndMs = Date.now()
     const requestBody = Buffer.concat(this.requestChunks).toString('utf8')
+    const response = this.finalizeResponseBody()
 
     const row = {
       exchange_id: this.id,
@@ -259,7 +264,7 @@ export class Exchange {
         headers: this.requestHeaders,
         body: requestBody,
       },
-      response: this.response,
+      response,
       stream_event_count: this.streamEventCount,
       error: this.error,
     }
@@ -268,6 +273,19 @@ export class Exchange {
     } finally {
       this._resolveFinished()
     }
+  }
+
+  /**
+   * Decode non-streaming response bytes once at the end so multi-byte UTF-8
+   * sequences split across transport chunks are not replaced.
+   *
+   * @returns {ExchangeResponse | undefined}
+   */
+  finalizeResponseBody() {
+    if (!this.response) return undefined
+    if (this.response.body === undefined) return this.response
+    this.response.body = Buffer.concat(this.responseChunks).toString('utf8')
+    return this.response
   }
 }
 
@@ -329,4 +347,3 @@ function redactString(value) {
   const tail = value.length >= 4 ? value.slice(-4) : value
   return `REDACTED:${tail}`
 }
-

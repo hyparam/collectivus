@@ -40,6 +40,19 @@ const DEFAULT_REDACT = [
 const DEFAULT_PROXY_LISTEN = '127.0.0.1:8787'
 const DEFAULT_OTEL_LISTEN = '0.0.0.0:4318'
 
+const BANNER = [
+  '        ╱────────╲',
+  '      ╱────────────╲',
+  '    ╱────────────────╲',
+  '   ┌──────────────────┐',
+  '   │   COLLECTIVUS    │',
+  '   └──────────────────┘',
+  '     ║  ║  ║  ║  ║  ║',
+  '     ║  ║  ║  ║  ║  ║',
+  '  ══════════════════════',
+  ' ════════════════════════',
+].join('\n') + '\n'
+
 /**
  * `~/.hyp/collectivus.json` is the convention for collectivus config: it lives
  * alongside the daemon's log directory at `~/.hyp/collectivus/` and survives
@@ -89,7 +102,7 @@ export async function runInit(hooks = {}) {
   const cwd = hooks.cwd ?? process.cwd()
   const defaultCfgPath = hooks.defaultConfigPath ?? defaultConfigPath()
 
-  stdout.write('\nWelcome to collectivus.\n')
+  stdout.write('\n' + BANNER + '\nWelcome to collectivus.\n')
 
   const existing = readConfig(defaultCfgPath)
   if (existing) {

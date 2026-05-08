@@ -28,7 +28,7 @@ beforeEach(function() {
   sinkDir = path.join(tmpDir, 'data')
   fs.mkdirSync(sinkDir, { recursive: true })
   configPath = path.join(tmpDir, 'config.json')
-  fs.writeFileSync(configPath, JSON.stringify({ sink: { type: 'file', dir: sinkDir } }))
+  fs.writeFileSync(configPath, JSON.stringify({ version: 1, sink: { type: 'file', dir: sinkDir } }))
 })
 
 afterEach(function() {
@@ -230,12 +230,12 @@ describe('runExport', function() {
 
   it('errors when config has no sink', async function() {
     const cfg = path.join(tmpDir, 'nosink.json')
-    fs.writeFileSync(cfg, JSON.stringify({ otel: { listen: '127.0.0.1:0' } }))
+    fs.writeFileSync(cfg, JSON.stringify({ version: 1, otel: { listen: '127.0.0.1:0' } }))
     const stdout = memo()
     const stderr = memo()
     const code = await runExport(['--config', cfg], { stdout, stderr })
     expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/no sink/)
+    expect(stderr.value()).toMatch(/sink is required/)
   })
 
   it('errors on missing --config', async function() {

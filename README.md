@@ -21,9 +21,11 @@ npm install collectivus
 ## Quick start: record claude-code
 
 The fastest path is the interactive walkthrough. Run `collectivus` with no
-arguments and it asks what to set up (LLM proxy / OTLP receiver / both),
-which provider to forward to, where to write recordings, and whether to
-install as a daemon and attach Claude Code:
+arguments and it asks whether to run in single-user (local) or enterprise
+(central server) mode, where to write recordings, and whether to install
+as a daemon and attach Claude Code. Enterprise mode also prints the
+`npx collectivus --config <url>` command teammates run on their own
+machines to forward LLM traffic and OTel telemetry to the server:
 
 ```bash
 npx collectivus

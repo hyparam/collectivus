@@ -11,11 +11,11 @@ The whole pipeline is local — no third-party services, no server-side keys.
 ## 1. Start collectivus with a proxy config
 
 The fastest path is the interactive walkthrough — run `collectivus` with no
-arguments and answer the prompts (LLM gateway proxy → Anthropic → defaults
-→ install as daemon → attach Claude Code). It writes the config to
-`~/.hyp/collectivus.json`, recordings to `~/.hyp/collectivus/`, and (if you
-opt in) sets up the LaunchAgent / systemd unit and points Claude Code at
-the proxy:
+arguments and answer the prompts (LLM gateway proxy → Anthropic → sink
+directory → optional S3 upload → install as daemon → attach Claude Code).
+It writes the config to `~/.hyp/collectivus.json`, recordings to
+`~/.hyp/collectivus/`, and (if you opt in) sets up the LaunchAgent /
+systemd unit and points Claude Code at the proxy:
 
 ```bash
 npx collectivus
@@ -26,14 +26,16 @@ The rest of this doc shows the manual config equivalent. Save this as
 
 ```json
 {
+  "version": 1,
   "proxy": {
     "listen": "127.0.0.1:8787",
-    "upstreams": {
-      "anthropic": {
+    "upstreams": [
+      {
+        "name": "anthropic",
         "base_url": "https://api.anthropic.com",
         "match": { "path_prefix": "/v1/messages" }
       }
-    },
+    ],
     "redact_headers": [
       "authorization",
       "x-api-key",
@@ -158,11 +160,25 @@ signals from one binary:
 
 ```json
 {
+  "version": 1,
   "otel": { "listen": "0.0.0.0:4318" },
-  "proxy": { "listen": "127.0.0.1:8787", "upstreams": { … } },
+  "proxy": { "listen": "127.0.0.1:8787", "upstreams": [ … ] },
   "sink": { "type": "file", "dir": "./collectivus-data" }
 }
 ```
 
 The OTLP receiver writes to `<dir>/{traces,metrics,logs}/…` exactly as before;
 the proxy writes to `<dir>/proxy.jsonl`.
+
+## Archiving recordings to S3
+
+The interactive walkthrough (`npx collectivus` with no args) includes an
+optional **"Upload daily snapshots to S3 as Parquet?"** step after the
+sink-directory prompt. Answer `y` and it collects bucket / region / prefix /
+time / signals (no AWS keys — those are read from the environment at daemon
+start) and writes an `upload` block into the saved config. Once configured,
+collectivus drains each previous day's JSONL into Hive-partitioned Parquet
+under `<prefix>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a
+day, leaving the local JSONL untouched. See the
+[S3 upload](../README.md#s3-upload) section of the README for the full
+config schema and credential resolution rules.

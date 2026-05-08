@@ -16,6 +16,7 @@ import { createScheduler } from './upload/scheduler.js'
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
+  collectivus --config <path> --strict         Reject unknown top-level config keys
   collectivus --help                           Show this help
   collectivus --version                        Print program version`
 
@@ -32,6 +33,7 @@ export function parseArgs(argv) {
   /** @type {string | undefined} */
   let configPath
   let printConfig = false
+  let strict = false
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -56,6 +58,11 @@ export function parseArgs(argv) {
       continue
     }
 
+    if (arg === '--strict') {
+      strict = true
+      continue
+    }
+
     return parseError(`unknown argument: ${arg}`)
   }
 
@@ -63,7 +70,7 @@ export function parseArgs(argv) {
     return parseError('--config <path> is required')
   }
 
-  return { mode: 'config', configPath, printConfig }
+  return { mode: 'config', configPath, printConfig, strict }
 }
 
 /**
@@ -82,7 +89,7 @@ function parseError(message) {
  * stdio and process signals.
  *
  * @param {string[]} argv CLI arguments (without node/script name).
- * @param {NodeJS.ProcessEnv} _env Environment variables (unused; reserved).
+ * @param {NodeJS.ProcessEnv} env Environment variables (read for upload credentials).
  * @param {{
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
@@ -92,7 +99,7 @@ function parseError(message) {
  * }} [hooks]
  * @returns {Promise<number>}
  */
-export async function run(argv, _env, hooks = {}) {
+export async function run(argv, env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
@@ -125,7 +132,7 @@ export async function run(argv, _env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfig(parsed.configPath)
+    config = loadConfig(parsed.configPath, { strict: parsed.strict, stderr })
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)
@@ -139,12 +146,24 @@ export async function run(argv, _env, hooks = {}) {
     return 0
   }
 
-  return runLifecycle(buildConfigListeners(config, { stderr }), stdout, stderr, onShutdownRequested)
+  // Fail at boot rather than at the first daily uploader tick when the
+  // upload section is configured but AWS credentials aren't in the env.
+  if (config.upload && (!env?.AWS_ACCESS_KEY_ID || !env?.AWS_SECRET_ACCESS_KEY)) {
+    stderr.write(
+      'config error: upload.bucket is set but AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not in the environment.\n'
+    )
+    return 1
+  }
+
+  return runLifecycle(buildConfigListeners(config, { env, stderr }), stdout, stderr, onShutdownRequested)
 }
 
 /**
  * @param {CollectivusConfig} config
- * @param {{ stderr: { write: (s: string) => void } }} ctx
+ * @param {{ env?: NodeJS.ProcessEnv, stderr: { write: (s: string) => void } }} ctx
+ *   `env` is forwarded to the uploader so its connector reads creds from the
+ *   same env we pre-flighted in `run()`. `stderr` is consumed by the
+ *   self-update factory for warning output.
  * @returns {ListenerFactory[]}
  */
 function buildConfigListeners(config, ctx) {
@@ -152,8 +171,11 @@ function buildConfigListeners(config, ctx) {
   const factories = []
 
   if (config.otel) {
+    if (!config.sink) {
+      throw new Error('otel is configured but sink is missing')
+    }
     const { listen } = config.otel
-    const outputDir = config.sink?.dir ?? './otel-data'
+    const outputDir = config.sink.dir
     factories.push(async () => {
       const { host, port } = parseListen(listen)
       const collector = new Collector({ host, port, outputDir })
@@ -189,6 +211,31 @@ function buildConfigListeners(config, ctx) {
           await recorder.drain()
           await sink.close()
         },
+      }
+    })
+  }
+
+  if (config.upload) {
+    if (!config.sink) {
+      throw new Error('upload is configured but sink is missing')
+    }
+    const uploadConfig = config.upload
+    const sinkDir = config.sink.dir
+    // Lazy import keeps the SigV4 / parquet code off the hot path for
+    // installs that don't enable upload.
+    factories.push(async () => {
+      const { createUploader } = await import('./upload/index.js')
+      const uploader = createUploader({
+        outputDir: sinkDir,
+        options: uploadConfig,
+        env: ctx.env,
+      })
+      await uploader.start()
+      const time = uploadConfig.time ?? '00:10'
+      const prefix = uploadConfig.prefix ?? 'collectivus'
+      return {
+        description: `Uploader scheduled for ${time} UTC, target s3://${uploadConfig.bucket}/${prefix}`,
+        stop: () => uploader.stop(),
       }
     })
   }

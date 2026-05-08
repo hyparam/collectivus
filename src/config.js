@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import process from 'node:process'
 
 /**
  * @import { CollectivusConfig } from './types.js'
@@ -18,19 +19,27 @@ export class ConfigError extends Error {
   }
 }
 
-const ALLOWED_TOP_KEYS = new Set(['otel', 'proxy', 'sink'])
+const ALLOWED_TOP_KEYS = new Set(['version', 'otel', 'proxy', 'sink', 'upload'])
 const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
-const ALLOWED_UPSTREAM_KEYS = new Set(['base_url', 'match'])
+const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
 const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
+const ALLOWED_UPLOAD_KEYS = new Set([
+  'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
+])
+const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
+const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 
 /**
  * Load and validate a collectivus JSON config file.
  *
  * @param {string} configPath - Absolute or relative path to a JSON config file.
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void } }} [opts]
+ *   `strict=true` rejects unknown top-level keys; the default warns to stderr
+ *   and proceeds. Per-section unknown keys are always rejected.
  * @returns {CollectivusConfig} The parsed and validated config.
  * @throws {ConfigError} when the file is missing, JSON is invalid, or the schema check fails.
  */
-export function loadConfig(configPath) {
+export function loadConfig(configPath, opts = {}) {
   let raw
   try {
     raw = fs.readFileSync(configPath, 'utf8')
@@ -52,7 +61,10 @@ export function loadConfig(configPath) {
     throw new ConfigError(`invalid JSON in ${configPath}${location}: ${msg}`)
   }
 
-  validateConfig(parsed)
+  validateConfig(parsed, {
+    strict: opts.strict ?? false,
+    stderr: opts.stderr ?? process.stderr,
+  })
   return parsed
 }
 
@@ -82,18 +94,42 @@ function jsonErrorLocation(raw, msg) {
 
 /**
  * @param {unknown} cfg
+ * @param {{ strict: boolean, stderr: { write: (s: string) => void } }} opts
  * @returns {asserts cfg is CollectivusConfig}
  */
-function validateConfig(cfg) {
+function validateConfig(cfg, opts) {
   assertObject(cfg, '')
-  assertOnlyKeys(cfg, ALLOWED_TOP_KEYS, '')
+  // version is checked first so a v0 file fails with the documented hard
+  // error instead of being routed through the unknown-key paths below.
+  if (!Object.prototype.hasOwnProperty.call(cfg, 'version')) {
+    throw new ConfigError(
+      'missing "version" field. This collectivus binary requires version: 1.',
+      { pointer: '/version' }
+    )
+  }
+  if (cfg.version !== 1) {
+    throw new ConfigError(
+      `unsupported version ${JSON.stringify(cfg.version)}. This collectivus binary requires version: 1.`,
+      { pointer: '/version' }
+    )
+  }
+
+  if (opts.strict) {
+    assertOnlyKeys(cfg, ALLOWED_TOP_KEYS, '')
+  } else {
+    warnUnknownTopKeys(cfg, opts.stderr)
+  }
 
   if (cfg.otel !== undefined) validateOtel(cfg.otel)
   if (cfg.proxy !== undefined) validateProxy(cfg.proxy)
-  if (cfg.proxy !== undefined && cfg.sink === undefined) {
-    throw new ConfigError('sink is required when proxy is configured', { pointer: '/sink' })
+  if ((cfg.otel !== undefined || cfg.proxy !== undefined) && cfg.sink === undefined) {
+    throw new ConfigError(
+      'sink is required when otel or proxy is configured',
+      { pointer: '/sink' }
+    )
   }
   if (cfg.sink !== undefined) validateSink(cfg.sink)
+  if (cfg.upload !== undefined) validateUpload(cfg.upload)
 }
 
 /** @param {unknown} otel */
@@ -112,14 +148,28 @@ function validateProxy(proxy) {
   if (proxy.upstreams === undefined) {
     throw new ConfigError('upstreams is required', { pointer: '/proxy/upstreams' })
   }
-  assertObject(proxy.upstreams, '/proxy/upstreams')
-  const names = Object.keys(proxy.upstreams)
-  if (names.length === 0) {
+  if (!Array.isArray(proxy.upstreams)) {
+    throw new ConfigError('must be an array', { pointer: '/proxy/upstreams' })
+  }
+  if (proxy.upstreams.length === 0) {
     throw new ConfigError('at least one upstream is required', { pointer: '/proxy/upstreams' })
   }
-  for (const name of names) {
-    validateUpstream(proxy.upstreams[name], `/proxy/upstreams/${name}`)
-  }
+  /** @type {Set<string>} */
+  const seen = new Set()
+  proxy.upstreams.forEach(function(u, i) {
+    const pointer = `/proxy/upstreams/${i}`
+    validateUpstream(u, pointer)
+    // validateUpstream guarantees `name` is a non-empty string above. The
+    // cast keeps the duplicate-name check working under strict typing.
+    const { name } = /** @type {{ name: string }} */ (u)
+    if (seen.has(name)) {
+      throw new ConfigError(
+        `duplicate upstream name "${name}"`,
+        { pointer: `${pointer}/name` }
+      )
+    }
+    seen.add(name)
+  })
 
   if (proxy.redact_headers !== undefined) {
     if (!Array.isArray(proxy.redact_headers)) {
@@ -140,6 +190,7 @@ function validateProxy(proxy) {
 function validateUpstream(upstream, pointer) {
   assertObject(upstream, pointer)
   assertOnlyKeys(upstream, ALLOWED_UPSTREAM_KEYS, pointer)
+  assertNonEmptyString(upstream.name, `${pointer}/name`)
   assertNonEmptyString(upstream.base_url, `${pointer}/base_url`)
   if (upstream.match === undefined) {
     throw new ConfigError('match is required', { pointer: `${pointer}/match` })
@@ -157,6 +208,52 @@ function validateSink(sink) {
     throw new ConfigError('only sink type "file" is supported in v0', { pointer: '/sink/type' })
   }
   assertNonEmptyString(sink.dir, '/sink/dir')
+}
+
+/**
+ * Validate the `upload` block. Schema only — no defaults are injected so
+ * `--print-config` round-trips a v1 config unchanged. Defaults are applied
+ * later when the uploader is wired in (co-zdn.7.3).
+ *
+ * @param {unknown} upload
+ */
+function validateUpload(upload) {
+  assertObject(upload, '/upload')
+  assertOnlyKeys(upload, ALLOWED_UPLOAD_KEYS, '/upload')
+  assertNonEmptyString(upload.bucket, '/upload/bucket')
+  if (upload.prefix !== undefined) assertNonEmptyString(upload.prefix, '/upload/prefix')
+  if (upload.region !== undefined && typeof upload.region !== 'string') {
+    throw new ConfigError('must be a string', { pointer: '/upload/region' })
+  }
+  if (upload.time !== undefined) {
+    if (typeof upload.time !== 'string' || !TIME_PATTERN.test(upload.time)) {
+      throw new ConfigError('must be HH:MM (24-hour)', { pointer: '/upload/time' })
+    }
+  }
+  if (upload.signals !== undefined) {
+    if (!Array.isArray(upload.signals)) {
+      throw new ConfigError('must be an array', { pointer: '/upload/signals' })
+    }
+    upload.signals.forEach(function(s, i) {
+      if (typeof s !== 'string' || !ALLOWED_SIGNALS.has(s)) {
+        throw new ConfigError(
+          'must be one of "logs", "traces", "metrics"',
+          { pointer: `/upload/signals/${i}` }
+        )
+      }
+    })
+  }
+  if (upload.catchupDays !== undefined) {
+    if (typeof upload.catchupDays !== 'number'
+        || !Number.isInteger(upload.catchupDays)
+        || upload.catchupDays < 0) {
+      throw new ConfigError(
+        'must be a non-negative integer',
+        { pointer: '/upload/catchupDays' }
+      )
+    }
+  }
+  if (upload.endpoint !== undefined) assertNonEmptyString(upload.endpoint, '/upload/endpoint')
 }
 
 /**
@@ -180,6 +277,29 @@ function assertOnlyKeys(obj, allowed, pointer) {
     if (!allowed.has(key)) {
       throw new ConfigError(`unknown key "${key}"`, { pointer: `${pointer}/${key}` })
     }
+  }
+}
+
+/**
+ * Non-strict mode for top-level keys: log and continue. Per-section
+ * validators still reject unknown keys to catch typos like `proxy.upsteams`.
+ *
+ * @param {Record<string, unknown>} obj
+ * @param {{ write: (s: string) => void }} stderr
+ */
+function warnUnknownTopKeys(obj, stderr) {
+  /** @type {string[]} */
+  const unknown = []
+  for (const key of Object.keys(obj)) {
+    if (!ALLOWED_TOP_KEYS.has(key)) unknown.push(key)
+  }
+  if (unknown.length === 0) return
+  const recognized = Array.from(ALLOWED_TOP_KEYS).map((k) => `"${k}"`).join(', ')
+  for (const key of unknown) {
+    stderr.write(
+      `warning: unknown config key "${key}" ignored ` +
+      `(this collectivus binary recognizes: ${recognized})\n`
+    )
   }
 }
 

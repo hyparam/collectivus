@@ -135,29 +135,29 @@ function parseListen(listen) {
 
 /**
  * Validate and pre-parse upstream URLs at startup so requests do not pay the
- * cost on every hop.
+ * cost on every hop. Iterates in declaration order — first-prefix-hit wins
+ * at request time.
  *
- * @param {Object<string, UpstreamConfig>} upstreams
+ * @param {UpstreamConfig[]} upstreams
  * @returns {CompiledUpstream[]}
  */
 function compileUpstreams(upstreams) {
   /** @type {CompiledUpstream[]} */
   const out = []
-  for (const name of Object.keys(upstreams)) {
-    const u = upstreams[name]
+  for (const u of upstreams) {
     let baseUrl
     try {
       baseUrl = new URL(u.base_url)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`invalid base_url for upstream "${name}": ${msg}`)
+      throw new Error(`invalid base_url for upstream "${u.name}": ${msg}`)
     }
     if (baseUrl.protocol !== 'http:' && baseUrl.protocol !== 'https:') {
       throw new Error(
-        `upstream "${name}" must use http:// or https://, got: ${baseUrl.protocol}`
+        `upstream "${u.name}" must use http:// or https://, got: ${baseUrl.protocol}`
       )
     }
-    out.push({ name, baseUrl, prefix: u.match.path_prefix })
+    out.push({ name: u.name, baseUrl, prefix: u.match.path_prefix })
   }
   return out
 }

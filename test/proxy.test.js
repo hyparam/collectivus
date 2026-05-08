@@ -82,7 +82,7 @@ describe('Proxy — listen address parsing', () => {
   it('parses host:port', () => {
     const p = new Proxy({
       listen: '127.0.0.1:8787',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })
     expect(p.host).toBe('127.0.0.1')
     expect(p.port).toBe(8787)
@@ -91,7 +91,7 @@ describe('Proxy — listen address parsing', () => {
   it('strips brackets from IPv6 literals', () => {
     const p = new Proxy({
       listen: '[::1]:9999',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })
     expect(p.host).toBe('::1')
     expect(p.port).toBe(9999)
@@ -100,28 +100,28 @@ describe('Proxy — listen address parsing', () => {
   it('rejects missing port', () => {
     expect(() => new Proxy({
       listen: '127.0.0.1',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })).toThrow(/missing port/)
   })
 
   it('rejects non-numeric port', () => {
     expect(() => new Proxy({
       listen: '127.0.0.1:abc',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })).toThrow(/invalid port/)
   })
 
   it('rejects out-of-range port', () => {
     expect(() => new Proxy({
       listen: '127.0.0.1:70000',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })).toThrow(/invalid port/)
   })
 
   it('rejects empty host', () => {
     expect(() => new Proxy({
       listen: ':8787',
-      upstreams: { a: { base_url: 'http://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'http://example.com', match: { path_prefix: '/' } }],
     })).toThrow(/missing host/)
   })
 })
@@ -130,14 +130,14 @@ describe('Proxy — upstream validation', () => {
   it('rejects an invalid base_url', () => {
     expect(() => new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: { a: { base_url: 'not-a-url', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'not-a-url', match: { path_prefix: '/' } }],
     })).toThrow(/invalid base_url/)
   })
 
   it('rejects non-http(s) protocols', () => {
     expect(() => new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: { a: { base_url: 'ftp://example.com', match: { path_prefix: '/' } } },
+      upstreams: [{ name: 'a', base_url: 'ftp://example.com', match: { path_prefix: '/' } }],
     })).toThrow(/http:\/\/ or https:\/\//)
   })
 })
@@ -152,12 +152,13 @@ describe('Proxy — forwarding behavior', () => {
     upstream = await createMockUpstream()
     proxy = new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: {
-        anthropic: {
+      upstreams: [
+        {
+          name: 'anthropic',
           base_url: upstream.baseUrl,
           match: { path_prefix: '/v1/messages' },
         },
-      },
+      ],
     })
     await proxy.start()
   })
@@ -319,9 +320,9 @@ describe('Proxy — catch-all prefix', () => {
     upstream = await createMockUpstream()
     proxy = new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: {
-        catchall: { base_url: upstream.baseUrl, match: { path_prefix: '/' } },
-      },
+      upstreams: [
+        { name: 'catchall', base_url: upstream.baseUrl, match: { path_prefix: '/' } },
+      ],
     })
     await proxy.start()
   })
@@ -383,10 +384,10 @@ describe('Proxy — first-match routing', () => {
 
     proxy = new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: {
-        a: { base_url: upstreamA.baseUrl, match: { path_prefix: '/v1/messages' } },
-        b: { base_url: upstreamB.baseUrl, match: { path_prefix: '/v1/embeddings' } },
-      },
+      upstreams: [
+        { name: 'a', base_url: upstreamA.baseUrl, match: { path_prefix: '/v1/messages' } },
+        { name: 'b', base_url: upstreamB.baseUrl, match: { path_prefix: '/v1/embeddings' } },
+      ],
     })
     await proxy.start()
   })
@@ -428,9 +429,9 @@ describe('Proxy — SSE pass-through', () => {
     const recorder = new Recorder({ sink })
     proxy = new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: {
-        anthropic: { base_url: upstream.baseUrl, match: { path_prefix: '/v1/messages' } },
-      },
+      upstreams: [
+        { name: 'anthropic', base_url: upstream.baseUrl, match: { path_prefix: '/v1/messages' } },
+      ],
     }, { recorder })
     await proxy.start()
   })

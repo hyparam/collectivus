@@ -96,11 +96,12 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     const sinkDir = path.join(tmpDir, 'data')
     const cfgPath = writeConfig(tmpDir, {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })
@@ -208,9 +209,9 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     const cfgPath = writeConfig(tmpDir, {
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })
@@ -272,9 +273,9 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     const cfgPath = writeConfig(tmpDir, {
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })
@@ -307,11 +308,12 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     const sinkDir = path.join(tmpDir, 'data')
     const cfgPath = writeConfig(tmpDir, {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })
@@ -397,7 +399,8 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
  */
 function writeConfig(dir, cfg) {
   const p = path.join(dir, 'config.json')
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2))
+  // v1 schema requires a top-level `version` field.
+  fs.writeFileSync(p, JSON.stringify({ version: 1, ...cfg }, null, 2))
   return p
 }
 

@@ -74,6 +74,8 @@ export interface UpstreamMatch {
 }
 
 export interface UpstreamConfig {
+  /** Identifier used in logs and recorded exchange rows. Unique within the proxy. */
+  name: string
   /** Origin to forward matched requests to. */
   base_url: string
   /** Match rule for routing requests to this upstream. */
@@ -83,8 +85,8 @@ export interface UpstreamConfig {
 export interface ProxyConfig {
   /** host:port the proxy listens on. */
   listen: string
-  /** Named upstream targets. */
-  upstreams: { [name: string]: UpstreamConfig }
+  /** Upstream targets in declaration order; first matching prefix wins. */
+  upstreams: UpstreamConfig[]
   /** Header names to redact in recorded traffic. */
   redact_headers?: string[]
 }
@@ -96,13 +98,36 @@ export interface FileSinkConfig {
   dir: string
 }
 
+export type UploadSignal = 'logs' | 'traces' | 'metrics'
+
+export interface UploadConfig {
+  /** Destination bucket. Required. */
+  bucket: string
+  /** Object-key prefix. Default 'collectivus'. */
+  prefix?: string
+  /** Region for the destination bucket. Default ''. */
+  region?: string
+  /** Daily fire time as HH:MM (24-hour, local). Default '00:10'. */
+  time?: string
+  /** Subset of signals to upload. Default ['logs', 'traces', 'metrics']. */
+  signals?: UploadSignal[]
+  /** Days of past data to backfill on startup. Default 30. */
+  catchupDays?: number
+  /** Override base URL for S3-compatible servers (MinIO, etc.). */
+  endpoint?: string
+}
+
 export interface CollectivusConfig {
+  /** Schema version. Always 1 in this binary. */
+  version: 1
   /** OTLP receiver. Omit to disable. */
   otel?: OtelConfig
   /** Proxy listener. Omit to disable. */
   proxy?: ProxyConfig
-  /** Sink for proxy recordings. Required when `proxy` is set. */
+  /** Sink for proxy recordings. Required when `otel` or `proxy` is set. */
   sink?: FileSinkConfig
+  /** Reserved upload section. Schema-validated only; uploader wires up later. */
+  upload?: UploadConfig
 }
 
 // ---------- Collector / OTLP normalization ----------
@@ -179,6 +204,7 @@ export interface ConfigResult {
   mode: 'config'
   configPath: string
   printConfig: boolean
+  strict: boolean
 }
 
 export type ParseResult = HelpResult | VersionResult | ErrorResult | ConfigResult
@@ -312,6 +338,8 @@ export interface StatusHooks {
 export interface InitHooks {
   stdout?: WriteStream
   stderr?: WriteStream
+  /** Override for `process.argv[1]` in tests. Drives npx-detection. */
+  binPath?: string
   /** Override the readline prompt. */
   prompt?: (question: string) => Promise<string>
   /** Override file write. */
@@ -324,8 +352,6 @@ export interface InitHooks {
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */
   cwd?: string
-  /** Override `process.argv[1]`. Used to detect npx-resolved binaries. */
-  binPath?: string
   /** Override the default `~/.hyp/collectivus.json` save path. */
   defaultConfigPath?: string
   /** Override the default `~/.hyp/collectivus` sink directory. */

@@ -5,7 +5,7 @@ import process from 'node:process'
 import { defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
- * @import { CollectivusConfig, FileSinkConfig, InitHooks, OtelConfig, ProxyConfig } from '../types.js'
+ * @import { CollectivusConfig, FileSinkConfig, InitHooks, OtelConfig, ProxyConfig, UploadConfig } from '../types.js'
  */
 
 const PROVIDERS = [
@@ -39,6 +39,18 @@ const DEFAULT_REDACT = [
 
 const DEFAULT_PROXY_LISTEN = '127.0.0.1:8787'
 const DEFAULT_OTEL_LISTEN = '0.0.0.0:4318'
+
+const DEFAULT_UPLOAD_REGION = 'us-east-1'
+const DEFAULT_UPLOAD_PREFIX = 'collectivus'
+const DEFAULT_UPLOAD_TIME = '00:10'
+/** @type {readonly import('../types.js').UploadSignal[]} */
+const ALLOWED_UPLOAD_SIGNALS = ['logs', 'traces', 'metrics']
+const DEFAULT_UPLOAD_SIGNALS_INPUT = ALLOWED_UPLOAD_SIGNALS.join(',')
+// DNS-compatible bucket name: 3–63 chars, lowercase, no underscores. The
+// inner `{1,61}` plus the leading and trailing single-character classes
+// produce the 3..63 length bound.
+const BUCKET_PATTERN = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/
+const TIME_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
 
 const BANNER = [
   '        ╱────────╲',
@@ -151,7 +163,7 @@ export async function runInit(hooks = {}) {
   const wantOtel = mode === '2' || mode === '3'
 
   /** @type {CollectivusConfig} */
-  const config = {}
+  const config = { version: 1 }
 
   if (wantProxy) {
     config.proxy = await askProxy(prompt, stdout, stderr)
@@ -176,6 +188,9 @@ export async function runInit(hooks = {}) {
   const sink = { type: 'file', dir: sinkAns === '' ? defaultSink : sinkAns }
   config.sink = sink
 
+  const upload = await askUpload(prompt, stdout, stderr)
+  if (upload) config.upload = upload
+
   const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
   const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
@@ -192,6 +207,10 @@ export async function runInit(hooks = {}) {
   try {
     writeFile(cfgPath, json + '\n')
     stdout.write(`✓ Wrote ${cfgPath}\n`)
+    if (config.upload) {
+      stdout.write('ⓘ Upload requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY in env.\n')
+      stdout.write('  Daemon will fail fast at start if they are missing.\n')
+    }
   } catch (err) {
     stderr.write(`error: failed to write config: ${formatError(err)}\n`)
     return 1
@@ -207,6 +226,9 @@ export async function runInit(hooks = {}) {
 /**
  * Prompt for daemon install + Claude Code attach when the platform supports it
  * and the config has a proxy listener. Otherwise prints next-step hints.
+ *
+ * Skips the daemon install offer when running via npx — daemonizing requires a
+ * persistent binary, which an npx-resolved path under `_npx/` is not.
  *
  * @param {{
  *   configPath: string,
@@ -299,11 +321,11 @@ function useExistingConfig(args) {
  */
 function printConfigSummary(stdout, config) {
   if (config.proxy) {
-    const upstreams = Object.entries(config.proxy.upstreams ?? {})
+    const upstreams = config.proxy.upstreams ?? []
     const detail = upstreams
-      .map(function([name, u]) {
+      .map(function(u) {
         const prefix = u?.match?.path_prefix ?? ''
-        return `${name} → ${u?.base_url ?? ''}${prefix}`
+        return `${u?.name ?? ''} → ${u?.base_url ?? ''}${prefix}`
       })
       .join(', ')
     stdout.write(`  proxy:  ${config.proxy.listen}${detail ? `  (${detail})` : ''}\n`)
@@ -313,6 +335,12 @@ function printConfigSummary(stdout, config) {
   }
   if (config.sink) {
     stdout.write(`  sink:   ${config.sink.dir}\n`)
+  }
+  if (config.upload) {
+    const u = config.upload
+    const prefix = u.prefix ?? DEFAULT_UPLOAD_PREFIX
+    const time = u.time ?? DEFAULT_UPLOAD_TIME
+    stdout.write(`  upload: s3://${u.bucket}/${prefix} daily at ${time} UTC\n`)
   }
 }
 
@@ -379,7 +407,24 @@ async function askProxy(prompt, stdout, stderr) {
       baseUrl = url
       const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
       prefix = prefAns === '' ? '/v1' : prefAns
-      upstreamName = 'upstream'
+      const derivedName = deriveUpstreamName(baseUrl)
+      stdout.write('\nName for this upstream — appears in recorded rows and logs.\n')
+      stdout.write('Slug: lowercase letters, digits, hyphens; must start with a letter.\n')
+      let nameValid = false
+      while (!nameValid) {
+        const nameAns = (await prompt(`Upstream name [${derivedName}]: `)).trim()
+        if (nameAns === '') {
+          upstreamName = derivedName
+          nameValid = true
+        } else if (!isValidUpstreamSlug(nameAns)) {
+          stderr.write(
+            `error: name must match [a-z][a-z0-9-]* (got ${JSON.stringify(nameAns)})\n`
+          )
+        } else {
+          upstreamName = nameAns
+          nameValid = true
+        }
+      }
       break
     }
     stderr.write(`error: invalid provider choice ${JSON.stringify(provRaw)}\n`)
@@ -394,14 +439,111 @@ async function askProxy(prompt, stdout, stderr) {
   /** @type {ProxyConfig} */
   return {
     listen,
-    upstreams: {
-      [upstreamName]: {
+    upstreams: [
+      {
+        name: upstreamName,
         base_url: baseUrl,
         match: { path_prefix: prefix },
       },
-    },
+    ],
     redact_headers: DEFAULT_REDACT,
   }
+}
+
+/**
+ * Optional S3 upload step. Asks `[y/N]` first; on `y` collects bucket /
+ * region / prefix / time / signals / endpoint with re-prompt loops on
+ * validation failure. Returns `undefined` when the user declines, so the
+ * caller can omit the `upload` block entirely.
+ *
+ * The walkthrough deliberately does not expose `catchupDays` (defaults to
+ * 30 in the uploader) — keeps the prompt count manageable. Power users
+ * edit the JSON.
+ *
+ * Credentials are never collected here; the daemon resolves them from
+ * environment variables at startup.
+ *
+ * @param {(q: string) => Promise<string>} prompt
+ * @param {{ write: (s: string) => void }} stdout
+ * @param {{ write: (s: string) => void }} stderr
+ * @returns {Promise<UploadConfig | undefined>}
+ */
+async function askUpload(prompt, stdout, stderr) {
+  const ans = (await prompt('\nUpload daily snapshots to S3 as Parquet? [y/N]: ')).trim()
+  if (!/^y(es)?$/i.test(ans)) return undefined
+
+  stdout.write('\nLocal JSONL stays put; once a day collectivus drains the previous day\'s\n')
+  stdout.write('files to your S3 bucket as Parquet partitions. Useful for long-term\n')
+  stdout.write('retention and querying with Athena / DuckDB.\n\n')
+
+  /** @type {string} */
+  let bucket
+  for (;;) {
+    const a = (await prompt('  S3 bucket: ')).trim()
+    if (a !== '' && BUCKET_PATTERN.test(a)) { bucket = a; break }
+    stderr.write('  bucket name must be 3–63 chars, lowercase, no underscores\n')
+  }
+
+  const regionAns = (await prompt(`  S3 region [${DEFAULT_UPLOAD_REGION}]: `)).trim()
+  const region = regionAns === '' ? DEFAULT_UPLOAD_REGION : regionAns
+
+  const prefixAns = (await prompt(`  Object prefix [${DEFAULT_UPLOAD_PREFIX}]: `)).trim()
+  // Strip surrounding `/` so the user pasting `/foo/` gets the same key
+  // layout as a clean `foo`. An input of just `/` collapses to empty,
+  // which falls back to the default rather than emitting an empty
+  // string (the validator rejects that).
+  const trimmedPrefix = prefixAns.replace(/^\/+|\/+$/g, '')
+  const prefix = trimmedPrefix === '' ? DEFAULT_UPLOAD_PREFIX : trimmedPrefix
+
+  /** @type {string} */
+  let time
+  for (;;) {
+    const a = (await prompt(`  Daily upload time UTC [${DEFAULT_UPLOAD_TIME}]: `)).trim()
+    const v = a === '' ? DEFAULT_UPLOAD_TIME : a
+    if (TIME_PATTERN.test(v)) { time = v; break }
+    stderr.write('  time must be HH:MM (24-hour, 00:00–23:59)\n')
+  }
+
+  /** @type {import('../types.js').UploadSignal[]} */
+  let signals
+  for (;;) {
+    const a = (await prompt(`  Signals to upload [${DEFAULT_UPLOAD_SIGNALS_INPUT}]: `)).trim()
+    const raw = a === '' ? DEFAULT_UPLOAD_SIGNALS_INPUT : a
+    const list = raw.split(',').map(function(s) { return s.trim() }).filter(function(s) { return s !== '' })
+    /** @type {import('../types.js').UploadSignal[]} */
+    const narrowed = []
+    let bad = false
+    for (const s of list) {
+      const matched = ALLOWED_UPLOAD_SIGNALS.find(function(allowed) { return allowed === s })
+      if (matched === undefined) { bad = true; break }
+      narrowed.push(matched)
+    }
+    if (!bad && narrowed.length > 0) { signals = narrowed; break }
+    stderr.write('  signals must be a comma-separated subset of: logs, traces, metrics\n')
+  }
+
+  /** @type {string | undefined} */
+  let endpoint
+  for (;;) {
+    const a = (await prompt('  Custom S3 endpoint (MinIO etc.) []: ')).trim()
+    if (a === '') { endpoint = undefined; break }
+    try {
+      new URL(a)
+      endpoint = a
+      break
+    } catch {
+      stderr.write('  endpoint must be a valid URL (e.g. https://minio.example.com)\n')
+    }
+  }
+
+  stdout.write('\nNote: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION must be\n')
+  stdout.write('set when the daemon runs. The walkthrough will not store credentials\n')
+  stdout.write('in the config file.\n')
+
+  /** @type {UploadConfig} */
+  const upload = { bucket, region, prefix, time, signals }
+  if (endpoint !== undefined) upload.endpoint = endpoint
+  return upload
 }
 
 /**
@@ -439,4 +581,38 @@ function isYes(s) {
  */
 function formatError(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+const UPSTREAM_SLUG_PATTERN = /^[a-z][a-z0-9-]*$/
+
+/**
+ * @param {string} s
+ * @returns {boolean}
+ */
+function isValidUpstreamSlug(s) {
+  return UPSTREAM_SLUG_PATTERN.test(s)
+}
+
+/**
+ * Derive a default upstream name from a base URL. Strips `api.` / `www.`
+ * prefixes and takes the first remaining hostname label, lowercased and
+ * stripped of slug-incompatible characters. Falls back to `upstream` when the
+ * URL doesn't parse, the hostname is bare-IP, or the derived label doesn't
+ * start with a letter.
+ *
+ * @param {string} baseUrl
+ * @returns {string}
+ */
+function deriveUpstreamName(baseUrl) {
+  let host
+  try {
+    host = new URL(baseUrl).hostname
+  } catch {
+    return 'upstream'
+  }
+  if (!host) return 'upstream'
+  const stripped = host.replace(/^(api|www)\./, '')
+  const label = stripped.split('.')[0] ?? ''
+  const slug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
+  return isValidUpstreamSlug(slug) ? slug : 'upstream'
 }

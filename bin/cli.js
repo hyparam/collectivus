@@ -72,32 +72,24 @@ async function loadSubcommand(name) {
 /**
  * Background check against the npm registry for a newer published version.
  * Prints a notice to stderr when one is available; never throws or rejects.
- * Aborts after 1s so a slow registry doesn't delay process exit.
  *
  * @returns {Promise<void>}
  */
 async function checkForUpdates() {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 1000)
-  if (typeof timer.unref === 'function') timer.unref()
-
   try {
-    const { readPackageVersion } = await import('../src/cli/common.js')
+    const [{ readPackageVersion }, { fetchLatestVersion }] = await Promise.all([
+      import('../src/cli/common.js'),
+      import('../src/update.js'),
+    ])
     const currentVersion = readPackageVersion()
-    const response = await fetch('https://registry.npmjs.org/collectivus/latest', {
-      signal: controller.signal,
-    })
-    if (!response.ok) return
-    const { version } = await response.json()
-    if (version && version !== currentVersion) {
+    const latest = await fetchLatestVersion()
+    if (latest && latest !== currentVersion) {
       process.stderr.write(
-        `\x1b[33mA newer version of collectivus is available: ${version} (current: ${currentVersion})\x1b[0m\n` +
+        `\x1b[33mA newer version of collectivus is available: ${latest} (current: ${currentVersion})\x1b[0m\n` +
         '\x1b[33mRun \'npm install -g collectivus\' to update\x1b[0m\n'
       )
     }
   } catch {
     // fail silently — update check is best-effort
-  } finally {
-    clearTimeout(timer)
   }
 }

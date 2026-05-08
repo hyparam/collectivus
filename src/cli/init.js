@@ -346,7 +346,20 @@ async function askProxy(prompt, stdout, stderr) {
     baseUrl = url
     const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
     prefix = prefAns === '' ? '/v1' : prefAns
-    upstreamName = 'upstream'
+    const derivedName = deriveUpstreamName(baseUrl)
+    stdout.write('\nName for this upstream — appears in recorded rows and logs.\n')
+    stdout.write('Slug: lowercase letters, digits, hyphens; must start with a letter.\n')
+    const nameAns = (await prompt(`Upstream name [${derivedName}]: `)).trim()
+    if (nameAns === '') {
+      upstreamName = derivedName
+    } else if (!isValidUpstreamSlug(nameAns)) {
+      stderr.write(
+        `error: name must match [a-z][a-z0-9-]* (got ${JSON.stringify(nameAns)})\n`
+      )
+      return undefined
+    } else {
+      upstreamName = nameAns
+    }
   } else {
     stderr.write(`error: invalid provider choice ${JSON.stringify(provRaw)}\n`)
     return undefined
@@ -407,4 +420,38 @@ function isYes(s) {
  */
 function formatError(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+const UPSTREAM_SLUG_PATTERN = /^[a-z][a-z0-9-]*$/
+
+/**
+ * @param {string} s
+ * @returns {boolean}
+ */
+function isValidUpstreamSlug(s) {
+  return UPSTREAM_SLUG_PATTERN.test(s)
+}
+
+/**
+ * Derive a default upstream name from a base URL. Strips `api.` / `www.`
+ * prefixes and takes the first remaining hostname label, lowercased and
+ * stripped of slug-incompatible characters. Falls back to `upstream` when the
+ * URL doesn't parse, the hostname is bare-IP, or the derived label doesn't
+ * start with a letter.
+ *
+ * @param {string} baseUrl
+ * @returns {string}
+ */
+function deriveUpstreamName(baseUrl) {
+  let host
+  try {
+    host = new URL(baseUrl).hostname
+  } catch {
+    return 'upstream'
+  }
+  if (!host) return 'upstream'
+  const stripped = host.replace(/^(api|www)\./, '')
+  const label = stripped.split('.')[0] ?? ''
+  const slug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
+  return isValidUpstreamSlug(slug) ? slug : 'upstream'
 }

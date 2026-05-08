@@ -249,11 +249,37 @@ collectivus does not hold a credential.
 ```text
 collectivus --config <path>                  Run with config file
 collectivus --config <path> --print-config   Validate + print resolved config
+collectivus export --config <path> [...]     Convert recorded JSONL to local Parquet (one-shot)
 collectivus --help                           Show usage
 ```
 
 `SIGINT` and `SIGTERM` trigger graceful shutdown: stop accepting new requests,
 drain in-flight, fsync sinks, exit 0.
+
+### Export to Parquet on demand
+
+`collectivus export` walks the configured sink dir and converts what it finds
+into local Parquet. Runs once and exits — independent of the daily upload
+scheduler, and includes today's open files (which the upload pipeline
+deliberately skips).
+
+Two sinks are drained:
+
+| Source | Destination |
+| --- | --- |
+| `<sink.dir>/proxy.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
+| `<sink.dir>/services/<svc>/<signal>-<date>.jsonl` (OTLP) | `<out>/<svc>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
+
+The two proxy row kinds (`exchange` and `stream_event`) get their own typed
+schemas. Headers are JSON columns; bodies are preserved as strings.
+
+```text
+collectivus export --config <path> [--out <dir>] [--date YYYY-MM-DD]
+                                   [--service <name>] [--signal logs|traces|metrics]
+```
+
+`--date`, `--service`, and `--signal` only filter the OTLP path; `proxy.jsonl`
+is always drained when present.
 
 ## Programmatic use
 
@@ -344,6 +370,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | `collectivus attach (--config <path> \| --port <n>)` | Route Claude Code through the proxy without touching the daemon |
 | `collectivus detach` | Revert Claude Code without uninstalling the daemon |
 | `collectivus status` | Print daemon (loaded / PID) and Claude Code (attached) state |
+| `collectivus export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
 Claude Code unattended, or `--no` to skip the attach step.

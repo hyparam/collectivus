@@ -28,7 +28,9 @@ const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
-const ALLOWED_SERVER_KEYS = new Set(['control_plane_listen', 'identity_issuer', 'data_dir'])
+const ALLOWED_SERVER_KEYS = new Set([
+  'control_plane_listen', 'identity_issuer', 'data_dir', 'sink_dir',
+])
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
@@ -244,6 +246,9 @@ function validateServer(server) {
   validateIdentityIssuer(server.identity_issuer)
   if (server.data_dir !== undefined) {
     assertNonEmptyString(server.data_dir, '/server/data_dir')
+  }
+  if (server.sink_dir !== undefined) {
+    assertNonEmptyString(server.sink_dir, '/server/sink_dir')
   }
 }
 

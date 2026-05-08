@@ -196,6 +196,13 @@ export interface ServerConfig {
    * when omitted.
    */
   data_dir?: string
+  /**
+   * Filesystem root where the ingest endpoint persists shipped rows. Files
+   * live at `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`. Distinct
+   * from server `data_dir` (which holds configs / bootstrap tokens). Default:
+   * `~/.hyp/collectivus/server-data/ingested`.
+   */
+  sink_dir?: string
 }
 
 /** A per-gateway config entry held by the server-side registry. */
@@ -204,6 +211,22 @@ export interface ConfigRegistryEntry {
   config: CollectivusConfig
   /** SHA-256 hex of the canonical JSON serialization of `config`. */
   etag: string
+}
+
+/** Signal kinds accepted on `POST /v1/ingest/:signal`. */
+export type IngestSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
+
+/** Response body shape for the ingest endpoint. */
+export interface IngestResponse {
+  /** Number of rows successfully persisted. */
+  accepted: number
+  /**
+   * 1-indexed line number where parsing failed. Present only on the partial-
+   * success / malformed-batch path (HTTP 400).
+   */
+  rejected_at_line?: number
+  /** Human-readable reason for the rejection. Present only on HTTP 400. */
+  error?: string
 }
 
 export interface CentralServerIdentityConfig {

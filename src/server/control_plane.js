@@ -1,6 +1,7 @@
 import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
 import { createBearerAuth, getClaims } from './auth.js'
+import { ConfigRegistry, resolveConfigsDir } from './config_registry.js'
 import {
   BootstrapStore,
   DEFAULT_JWT_TTL_SECONDS,
@@ -35,11 +36,12 @@ const REFRESH_RATE_MAX = 1
 export class ControlPlane {
   /**
    * @param {ServerConfig} config
-   * @param {{ bootstrapStore?: BootstrapStore, now?: () => number }} [opts]
+   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, now?: () => number }} [opts]
    *   Test hooks. `bootstrapStore` overrides the file-backed store derived
-   *   from `config.identity_issuer.bootstrap_store_path`. `now` is injected
-   *   into the JWT signer/verifier and the rate limiters so tests can drive
-   *   token expiry and rate-limit windows.
+   *   from `config.identity_issuer.bootstrap_store_path`. `configRegistry`
+   *   overrides the file-backed registry derived from `config.data_dir`.
+   *   `now` is injected into the JWT signer/verifier and the rate limiters
+   *   so tests can drive token expiry and rate-limit windows.
    */
   constructor(config, opts = {}) {
     /** @type {ServerConfig} */
@@ -64,6 +66,11 @@ export class ControlPlane {
         now: this.now,
       })
     }
+
+    /** @type {ConfigRegistry} */
+    this.configRegistry = opts.configRegistry ?? new ConfigRegistry({
+      configsDir: resolveConfigsDir(config),
+    })
 
     /** @type {SlidingWindowRateLimiter} */
     this.bootstrapLimiter = new SlidingWindowRateLimiter({
@@ -156,6 +163,13 @@ export class ControlPlane {
       return
     }
 
+    if (path === '/v1/config') {
+      if (method !== 'GET') return writeError(res, 405, 'method not allowed')
+      if (!this.authorize(req, res)) return
+      this.handleGetConfig(req, res)
+      return
+    }
+
     writeError(res, 404, 'not found')
   }
 
@@ -233,6 +247,49 @@ export class ControlPlane {
     })
     const expiresAt = Math.floor(this.now() / 1000) + ttlSeconds
     writeJson(res, 200, { jwt, expires_at: expiresAt })
+  }
+
+  /**
+   * Handle `GET /v1/config`. Caller must already be authenticated via
+   * `this.authorize`. The gateway_id is always read from the JWT `sub` claim
+   * (never from a query parameter) so a gateway cannot fetch another
+   * gateway's config by spoofing a path or query string.
+   *
+   * Conditional GET: clients send `If-None-Match: <etag>`; when the ETag
+   * matches the registry entry, respond 304 with no body. Otherwise return
+   * 200 + the config JSON + an `ETag` response header.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @returns {void}
+   */
+  handleGetConfig(req, res) {
+    const claims = getClaims(req)
+    if (!claims) {
+      return writeError(res, 500, 'auth claims missing after authorize')
+    }
+    /** @type {ReturnType<ConfigRegistry['getConfig']>} */
+    let entry
+    try {
+      entry = this.configRegistry.getConfig(claims.sub)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return writeError(res, 500, `config registry error: ${msg}`)
+    }
+    if (!entry) {
+      return writeError(res, 404, 'no config registered for this gateway')
+    }
+    const ifNoneMatch = req.headers['if-none-match']
+    if (typeof ifNoneMatch === 'string' && etagMatches(ifNoneMatch, entry.etag)) {
+      res.writeHead(304, { 'etag': entry.etag })
+      res.end()
+      return
+    }
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'etag': entry.etag,
+    })
+    res.end(JSON.stringify(entry.config))
   }
 }
 
@@ -406,4 +463,40 @@ function writeRateLimited(res, retryAfterMs) {
  */
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+/**
+ * Compare an `If-None-Match` header value against the current ETag. Accepts
+ * weak (`W/"abc"`) and strong (`"abc"`) entity tags, and the unquoted bare
+ * form some HTTP libraries produce. For our use case any equal token wins —
+ * we never emit weak tags ourselves, but a relaxed match avoids unnecessary
+ * 200s when a client library quotes them inconsistently.
+ *
+ * Multiple comma-separated tags are supported: any one match returns true.
+ * The wildcard `*` is treated as a match per RFC 7232 §3.2.
+ *
+ * @param {string} headerValue
+ * @param {string} currentEtag
+ * @returns {boolean}
+ */
+function etagMatches(headerValue, currentEtag) {
+  for (const raw of headerValue.split(',')) {
+    const tag = stripEtagWrapping(raw.trim())
+    if (tag.length === 0) continue
+    if (tag === '*' || tag === currentEtag) return true
+  }
+  return false
+}
+
+/**
+ * @param {string} tag
+ * @returns {string}
+ */
+function stripEtagWrapping(tag) {
+  let t = tag
+  if (t.startsWith('W/')) t = t.slice(2)
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    t = t.slice(1, -1)
+  }
+  return t
 }

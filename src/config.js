@@ -28,7 +28,7 @@ const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
-const ALLOWED_SERVER_KEYS = new Set(['control_plane_listen', 'identity_issuer'])
+const ALLOWED_SERVER_KEYS = new Set(['control_plane_listen', 'identity_issuer', 'data_dir'])
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
@@ -100,6 +100,25 @@ function jsonErrorLocation(raw, msg) {
   const lineMatch = /line (\d+) column (\d+)/.exec(msg)
   if (lineMatch) return ` at line ${lineMatch[1]}, column ${lineMatch[2]}`
   return ''
+}
+
+/**
+ * Validate an in-memory config object the way a gateway would when loading
+ * one off disk. Used by the server-side config registry to reject configs at
+ * write time that would fail to load on the receiving gateway.
+ *
+ * Defaults match `loadConfig`: non-strict (unknown top keys warn, not error),
+ * stderr swallowed so the validator can be called from non-CLI contexts.
+ *
+ * @param {unknown} cfg
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void } }} [opts]
+ * @returns {asserts cfg is CollectivusConfig}
+ */
+export function validateCollectivusConfig(cfg, opts = {}) {
+  validateConfig(cfg, {
+    strict: opts.strict ?? false,
+    stderr: opts.stderr ?? { write: () => {} },
+  })
 }
 
 /**
@@ -223,6 +242,9 @@ function validateServer(server) {
     )
   }
   validateIdentityIssuer(server.identity_issuer)
+  if (server.data_dir !== undefined) {
+    assertNonEmptyString(server.data_dir, '/server/data_dir')
+  }
 }
 
 /** @param {unknown} issuer */

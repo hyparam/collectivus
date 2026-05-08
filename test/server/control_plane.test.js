@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { run } from '../../src/cli.js'
+import { ConfigRegistry } from '../../src/server/config_registry.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
 import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
@@ -365,6 +366,212 @@ describe('Identity flow end-to-end (HTTP)', () => {
       body: JSON.stringify({ bootstrap_token: big }),
     })
     expect(res.status).toBe(413)
+  })
+})
+
+describe('GET /v1/config (auth required)', () => {
+  /** @type {string} */
+  let dir
+  /** @type {ControlPlane | undefined} */
+  let plane
+  /** @type {string} */
+  let baseUrl
+  /** @type {ConfigRegistry} */
+  let registry
+
+  /**
+   * @param {{ url?: string }} [opts]
+   * @returns {import('../../src/types.js').CollectivusConfig}
+   */
+  function gatewayCfg(opts = {}) {
+    return {
+      version: 1,
+      role: 'gateway',
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: '/tmp/cfg-vending-test-sink' },
+      central_server: {
+        url: opts.url ?? 'https://control.example.com:8788',
+        identity: {
+          bootstrap_token: 'placeholder-bootstrap-token',
+        },
+      },
+    }
+  }
+
+  beforeEach(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cp-cfg-'))
+    registry = new ConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    plane = new ControlPlane(serverConfig(), { configRegistry: registry })
+    await plane.start()
+    const addr = plane.server?.address()
+    if (!addr || typeof addr === 'string') throw new Error('no address')
+    baseUrl = `http://127.0.0.1:${addr.port}`
+  })
+
+  afterEach(async () => {
+    if (plane) await plane.stop()
+    plane = undefined
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns 401 when Authorization header is missing', async () => {
+    const res = await fetch(`${baseUrl}/v1/config`)
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 405 on non-GET methods', async () => {
+    const res = await fetch(`${baseUrl}/v1/config`, { method: 'POST' })
+    expect(res.status).toBe(405)
+  })
+
+  it('returns 404 when no config is registered for the JWT subject', async () => {
+    const jwt = signJwt({ gatewayId: 'gw-unregistered', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+    const res = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(res.status).toBe(404)
+    const body = await res.json()
+    expect(body.error).toMatch(/no config registered/)
+  })
+
+  it('returns 200 + JSON body + ETag on a fresh fetch', async () => {
+    const cfg = gatewayCfg({ url: 'https://gw-a.example.com' })
+    registry.setConfig('gw-a', cfg)
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const res = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(res.status).toBe(200)
+    const etag = res.headers.get('etag')
+    expect(etag).toMatch(/^[0-9a-f]{64}$/)
+    expect(res.headers.get('content-type')).toMatch(/application\/json/)
+    const body = await res.json()
+    expect(body).toEqual(cfg)
+  })
+
+  it('returns 304 with empty body when If-None-Match matches the current ETag', async () => {
+    registry.setConfig('gw-a', gatewayCfg())
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const first = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(first.status).toBe(200)
+    const etag = first.headers.get('etag')
+    if (!etag) throw new Error('expected etag')
+    await first.text()
+
+    const second = await fetch(`${baseUrl}/v1/config`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'if-none-match': etag,
+      },
+    })
+    expect(second.status).toBe(304)
+    expect(second.headers.get('etag')).toBe(etag)
+    const body = await second.text()
+    expect(body).toBe('')
+  })
+
+  it('returns 200 + new body when the stored config has changed since the cached ETag', async () => {
+    registry.setConfig('gw-a', gatewayCfg({ url: 'https://old.example.com' }))
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const first = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    const oldEtag = first.headers.get('etag')
+    if (!oldEtag) throw new Error('expected etag')
+    await first.text()
+
+    // Operator updates the config out-of-band.
+    registry.setConfig('gw-a', gatewayCfg({ url: 'https://new.example.com' }))
+
+    const second = await fetch(`${baseUrl}/v1/config`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'if-none-match': oldEtag,
+      },
+    })
+    expect(second.status).toBe(200)
+    const newEtag = second.headers.get('etag')
+    expect(newEtag).not.toBe(oldEtag)
+    const body = await second.json()
+    expect(body.central_server.url).toBe('https://new.example.com')
+  })
+
+  it('returns 200 with a stale (different) ETag rather than treating it as no-match', async () => {
+    registry.setConfig('gw-a', gatewayCfg())
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const res = await fetch(`${baseUrl}/v1/config`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'if-none-match': '0000000000000000000000000000000000000000000000000000000000000000',
+      },
+    })
+    expect(res.status).toBe(200)
+  })
+
+  it('honors the wildcard If-None-Match: *', async () => {
+    registry.setConfig('gw-a', gatewayCfg())
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const res = await fetch(`${baseUrl}/v1/config`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'if-none-match': '*',
+      },
+    })
+    expect(res.status).toBe(304)
+  })
+
+  it('accepts a quoted ETag in If-None-Match (RFC 7232 wrapping)', async () => {
+    registry.setConfig('gw-a', gatewayCfg())
+    const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    const first = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    const etag = first.headers.get('etag')
+    if (!etag) throw new Error('expected etag')
+    await first.text()
+
+    const second = await fetch(`${baseUrl}/v1/config`, {
+      headers: {
+        authorization: `Bearer ${jwt}`,
+        'if-none-match': `"${etag}"`,
+      },
+    })
+    expect(second.status).toBe(304)
+  })
+
+  it('serves the JWT subject\'s config and never another gateway\'s by query/path', async () => {
+    // Two gateways with distinct configs registered.
+    registry.setConfig('gw-a', gatewayCfg({ url: 'https://a.example.com' }))
+    registry.setConfig('gw-b', gatewayCfg({ url: 'https://b.example.com' }))
+
+    // Gateway A's JWT.
+    const jwtA = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+
+    // Even with an attacker-controlled query string naming gw-b, the server
+    // must derive the gateway from the JWT — gw-a's config comes back.
+    const res = await fetch(`${baseUrl}/v1/config?gateway_id=gw-b`, {
+      headers: { authorization: `Bearer ${jwtA}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.central_server.url).toBe('https://a.example.com')
+  })
+
+  it('returns 401 when the bearer JWT is signed by a different secret', async () => {
+    registry.setConfig('gw-a', gatewayCfg())
+    const wrongJwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: 'b'.repeat(32) })
+    const res = await fetch(`${baseUrl}/v1/config`, {
+      headers: { authorization: `Bearer ${wrongJwt}` },
+    })
+    expect(res.status).toBe(401)
   })
 })
 

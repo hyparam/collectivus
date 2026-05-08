@@ -301,46 +301,75 @@ describe('runInit', function() {
     expect(stdout.value()).toMatch(/Aborted/)
   })
 
-  it('exits 1 on invalid mode answer', async function() {
+  it('re-prompts on invalid mode answer until a valid one is given', async function() {
     const stdout = memo()
     const stderr = memo()
-    const { prompt } = scriptedPrompt(['7'])
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt, asked } = scriptedPrompt([
+      'oops', '7', '', // two bad answers, then accept the default (1 = proxy only)
+      '1', '', '', // anthropic / default listen / default sink
+      cfgPath, 'y', 'n',
+    ])
     const code = await runInit({
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
       defaultConfigPath: absentDefaultCfg,
     })
-    expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/please choose 1, 2, or 3/)
+    expect(code).toBe(0)
+    expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "oops"\)/)
+    expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "7"\)/)
+    // Three "Choose [1]" prompts: two rejected, one accepted via empty input.
+    expect(asked.filter(function(q) { return q === 'Choose [1]: ' })).toHaveLength(3)
+    expect(fs.existsSync(cfgPath)).toBe(true)
   })
 
-  it('exits 1 on invalid provider choice', async function() {
+  it('re-prompts on invalid provider choice until a valid one is given', async function() {
     const stdout = memo()
     const stderr = memo()
-    const { prompt } = scriptedPrompt(['1', '99'])
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt, asked } = scriptedPrompt([
+      '1', // proxy only
+      '99', 'nah', '2', // two bad provider answers, then OpenAI
+      '', '', // default proxy listen / default sink
+      cfgPath, 'y', 'n',
+    ])
     const code = await runInit({
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
       defaultConfigPath: absentDefaultCfg,
     })
-    expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/invalid provider choice/)
+    expect(code).toBe(0)
+    expect(stderr.value()).toMatch(/invalid provider choice "99"/)
+    expect(stderr.value()).toMatch(/invalid provider choice "nah"/)
+    expect(asked.filter(function(q) { return q === 'Provider [1]: ' })).toHaveLength(3)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.proxy.upstreams.openai.base_url).toBe('https://api.openai.com')
   })
 
-  it('exits 1 when custom upstream base URL is empty', async function() {
+  it('re-prompts when custom upstream base URL is empty', async function() {
     const stdout = memo()
     const stderr = memo()
-    const { prompt } = scriptedPrompt(['1', '4', ''])
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '4',
+      '', '', // two empty base URLs
+      'https://api.example.com',
+      '', // default prefix
+      '', '', // default proxy listen / default sink
+      cfgPath, 'y', 'n',
+    ])
     const code = await runInit({
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
       defaultConfigPath: absentDefaultCfg,
     })
-    expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/base URL is required/)
+    expect(code).toBe(0)
+    expect(stderr.value().match(/base URL is required/g)).toHaveLength(2)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.proxy.upstreams.upstream.base_url).toBe('https://api.example.com')
   })
 
   it('reuses an existing config and chains into runInstall', async function() {

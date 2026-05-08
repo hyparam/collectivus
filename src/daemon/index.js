@@ -1,4 +1,5 @@
 import process from 'node:process'
+import * as linux from './linux.js'
 import * as macos from './macos.js'
 
 export class DaemonError extends Error {
@@ -12,31 +13,47 @@ export class DaemonError extends Error {
 }
 
 /**
+ * @typedef {import('./macos.js').InstallOptions & import('./linux.js').InstallOptions} InstallOptions
+ * @typedef {import('./macos.js').UninstallOptions & import('./linux.js').UninstallOptions} UninstallOptions
+ */
+
+/**
  * Install the platform-appropriate daemon to keep the collectivus process
- * running across reboots. Currently macOS-only; throws a clear error on
- * other platforms so the CLI can surface it.
+ * running across reboots. Dispatches to a LaunchAgent on macOS and a systemd
+ * user unit on Linux; throws a clear error on other platforms so the CLI can
+ * surface it.
  *
- * @param {import('./macos.js').InstallOptions} options
+ * @param {InstallOptions} options
  * @returns {Promise<void>}
  */
 export async function installDaemon(options) {
-  if (process.platform !== 'darwin') {
-    throw new DaemonError(`unsupported platform: ${process.platform} (only darwin is supported in v0)`)
+  if (process.platform === 'darwin') {
+    await macos.installLaunchAgent(options)
+    return
   }
-  await macos.installLaunchAgent(options)
+  if (process.platform === 'linux') {
+    await linux.installSystemdUnit(options)
+    return
+  }
+  throw new DaemonError(`unsupported platform: ${process.platform} (only darwin and linux are supported)`)
 }
 
 /**
- * Inverse of `installDaemon`. Same platform restriction.
+ * Inverse of `installDaemon`. Same platform dispatch.
  *
- * @param {import('./macos.js').UninstallOptions} options
+ * @param {UninstallOptions} options
  * @returns {Promise<void>}
  */
 export async function uninstallDaemon(options) {
-  if (process.platform !== 'darwin') {
-    throw new DaemonError(`unsupported platform: ${process.platform} (only darwin is supported in v0)`)
+  if (process.platform === 'darwin') {
+    await macos.uninstallLaunchAgent(options)
+    return
   }
-  await macos.uninstallLaunchAgent(options)
+  if (process.platform === 'linux') {
+    await linux.uninstallSystemdUnit(options)
+    return
+  }
+  throw new DaemonError(`unsupported platform: ${process.platform} (only darwin and linux are supported)`)
 }
 
-export { macos }
+export { linux, macos }

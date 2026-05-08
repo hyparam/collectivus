@@ -91,13 +91,14 @@ curl -X POST localhost:4318/v1/traces -H 'Content-Type: application/json' -d '{"
 cat otel-data/traces/$(date -u +%F).jsonl
 ```
 
-## Install as a daemon (macOS)
+## Install as a daemon (macOS, Linux)
 
-Keep collectivus running across reboots by registering it as a user
-LaunchAgent, and (optionally) route [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
+Keep collectivus running across reboots by registering it with the system
+process supervisor — a user LaunchAgent on macOS, a systemd user unit on
+Linux — and (optionally) route [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
 through the proxy in the same step.
 
-### Quickstart
+### Quickstart (macOS)
 
 ```bash
 npm install -g collectivus
@@ -114,6 +115,40 @@ daemon starts at login and launchd restarts it if it exits. Logs land in
 
 - `collectivus.log` — stdout
 - `collectivus.err.log` — stderr
+
+### Quickstart (Linux, systemd)
+
+```bash
+npm install -g collectivus
+collectivus install --config /path/to/collectivus.json
+# ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
+# ✓ Claude Code attached (~/.claude/settings.json)
+```
+
+On Linux, `install` writes a systemd user unit to
+`~/.config/systemd/user/com.hyparam.collectivus.service`, runs
+`systemctl --user daemon-reload`, then `enable` and `restart`. The unit is
+configured with `Restart=always`, `RestartSec=5`, and
+`WantedBy=default.target` so systemd starts it at login and respawns it on
+exit. Logs are written via `StandardOutput=append:` /
+`StandardError=append:` to the directory you pass as `logDir` (the CLI
+defaults to `~/Library/Logs/Collectivus`, mirroring the macOS layout).
+
+> **Linger required for non-login boots.** User-level systemd services run
+> only while the user has a session. To keep the daemon up across reboots
+> when you are not logged in (e.g. a headless server), enable lingering
+> once:
+>
+> ```bash
+> sudo loginctl enable-linger "$USER"
+> ```
+>
+> Without this, the unit stops when your last login session ends and only
+> restarts when you log back in.
+
+System-level systemd units (root-owned, in `/etc/systemd/system/`) and
+non-systemd init systems (Alpine's OpenRC, Void's runit, etc.) are not
+supported in this build.
 
 ### Why a global install
 
@@ -154,6 +189,11 @@ collectivus status
 #   Marker version: 1.1.0
 #   Settings: /Users/you/.claude/settings.json
 ```
+
+> On Linux, `collectivus status` does not yet report systemd unit state.
+> Use `systemctl --user status com.hyparam.collectivus.service` for the
+> daemon view; `collectivus status` will still report Claude Code attach
+> state correctly.
 
 ### Reverting
 

@@ -79,6 +79,12 @@ describe('parseArgs', () => {
     expect(parseArgs(['-h'])).toEqual({ mode: 'help' })
   })
 
+  it('returns version mode for --version, -V, and -v', () => {
+    expect(parseArgs(['--version'])).toEqual({ mode: 'version' })
+    expect(parseArgs(['-V'])).toEqual({ mode: 'version' })
+    expect(parseArgs(['-v'])).toEqual({ mode: 'version' })
+  })
+
   it('rejects --print-config without --config', () => {
     const r = parseArgs(['--print-config'])
     expect(r.mode).toBe('error')
@@ -109,6 +115,15 @@ describe('run() — help and arg errors', () => {
     const code = await run(['--help'], {}, { stdout, stderr })
     expect(code).toBe(0)
     expect(stdout.value()).toMatch(/Usage:/)
+  })
+
+  it('prints version and exits 0 on --version', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run(['--version'], {}, { stdout, stderr })
+    expect(code).toBe(0)
+    expect(stdout.value()).toMatch(/^\d+\.\d+\.\d+/)
+    expect(stderr.value()).toBe('')
   })
 
   it('prints error + usage and exits 2 on bad args', async () => {

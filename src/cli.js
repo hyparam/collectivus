@@ -1,4 +1,5 @@
 import process from 'node:process'
+import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
 import { Proxy } from './proxy.js'
@@ -13,7 +14,8 @@ import { FileSink } from './sinks/file.js'
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
-  collectivus --help                           Show this help`
+  collectivus --help                           Show this help
+  collectivus --version                        Print program version`
 
 const DRAIN_TIMEOUT_MS = 5000
 
@@ -33,6 +35,10 @@ export function parseArgs(argv) {
 
     if (arg === '--help' || arg === '-h') {
       return { mode: 'help' }
+    }
+
+    if (arg === '--version' || arg === '-V' || arg === '-v') {
+      return { mode: 'version' }
     }
 
     if (arg === '--config' || arg.startsWith('--config=')) {
@@ -102,6 +108,10 @@ export async function run(argv, _env, hooks = {}) {
 
   if (parsed.mode === 'help') {
     stdout.write(USAGE + '\n')
+    return 0
+  }
+  if (parsed.mode === 'version') {
+    stdout.write(readPackageVersion() + '\n')
     return 0
   }
   if (parsed.mode === 'error') {

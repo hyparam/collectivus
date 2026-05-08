@@ -40,6 +40,19 @@ const DEFAULT_REDACT = [
 const DEFAULT_PROXY_LISTEN = '127.0.0.1:8787'
 const DEFAULT_OTEL_LISTEN = '0.0.0.0:4318'
 
+const BANNER = [
+  '        ╱────────╲',
+  '      ╱────────────╲',
+  '    ╱────────────────╲',
+  '   ┌──────────────────┐',
+  '   │   COLLECTIVUS    │',
+  '   └──────────────────┘',
+  '     ║  ║  ║  ║  ║  ║',
+  '     ║  ║  ║  ║  ║  ║',
+  '  ══════════════════════',
+  ' ════════════════════════',
+].join('\n') + '\n'
+
 /**
  * `~/.hyp/collectivus.json` is the convention for collectivus config: it lives
  * alongside the daemon's log directory at `~/.hyp/collectivus/` and survives
@@ -89,7 +102,7 @@ export async function runInit(hooks = {}) {
   const cwd = hooks.cwd ?? process.cwd()
   const defaultCfgPath = hooks.defaultConfigPath ?? defaultConfigPath()
 
-  stdout.write('\nWelcome to collectivus.\n')
+  stdout.write('\n' + BANNER + '\nWelcome to collectivus.\n')
 
   const existing = readConfig(defaultCfgPath)
   if (existing) {
@@ -123,11 +136,15 @@ export async function runInit(hooks = {}) {
   stdout.write('  3) Both — proxy and OTLP receiver in the same process.\n\n')
   stdout.write('If you are not sure: choose 1 to record LLM traffic; choose 2 if you\n')
   stdout.write('already have OTel-instrumented services.\n')
-  const modeRaw = (await prompt('Choose [1]: ')).trim()
-  const mode = modeRaw === '' ? '1' : modeRaw
-  if (mode !== '1' && mode !== '2' && mode !== '3') {
+  let mode
+  for (;;) {
+    const modeRaw = (await prompt('Choose [1]: ')).trim()
+    const candidate = modeRaw === '' ? '1' : modeRaw
+    if (candidate === '1' || candidate === '2' || candidate === '3') {
+      mode = candidate
+      break
+    }
     stderr.write(`error: please choose 1, 2, or 3 (got ${JSON.stringify(modeRaw)})\n`)
-    return 1
   }
   const wantProxy = mode === '1' || mode === '3'
   const wantOtel = mode === '2' || mode === '3'
@@ -136,9 +153,7 @@ export async function runInit(hooks = {}) {
   const config = {}
 
   if (wantProxy) {
-    const proxy = await askProxy(prompt, stdout, stderr)
-    if (!proxy) return 1
-    config.proxy = proxy
+    config.proxy = await askProxy(prompt, stdout, stderr)
   }
 
   if (wantOtel) {
@@ -310,7 +325,7 @@ function defaultReadConfig(p) {
  * @param {(q: string) => Promise<string>} prompt
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
- * @returns {Promise<ProxyConfig | undefined>}
+ * @returns {Promise<ProxyConfig>}
  */
 async function askProxy(prompt, stdout, stderr) {
   stdout.write('\nWhich LLM provider should the proxy forward to?\n')
@@ -322,9 +337,6 @@ async function askProxy(prompt, stdout, stderr) {
     stdout.write(`  ${i + 1}) ${p.name.padEnd(22)} → ${p.baseUrl}${p.prefix}\n`)
   })
   stdout.write(`  ${PROVIDERS.length + 1}) ${'Custom'.padEnd(22)} → enter your own base URL + path prefix\n`)
-  const provRaw = (await prompt('Provider [1]: ')).trim()
-  const provIdx = provRaw === '' ? 1 : Number.parseInt(provRaw, 10)
-
   /** @type {string} */
   let baseUrl
   /** @type {string} */
@@ -332,24 +344,30 @@ async function askProxy(prompt, stdout, stderr) {
   /** @type {string} */
   let upstreamName
 
-  if (Number.isInteger(provIdx) && provIdx >= 1 && provIdx <= PROVIDERS.length) {
-    const p = PROVIDERS[provIdx - 1]
-    baseUrl = p.baseUrl
-    prefix = p.prefix
-    upstreamName = p.id
-  } else if (provIdx === PROVIDERS.length + 1) {
-    const url = (await prompt('Upstream base URL (e.g. https://api.example.com): ')).trim()
-    if (url === '') {
-      stderr.write('error: base URL is required\n')
-      return undefined
+  for (;;) {
+    const provRaw = (await prompt('Provider [1]: ')).trim()
+    const provIdx = provRaw === '' ? 1 : Number.parseInt(provRaw, 10)
+
+    if (Number.isInteger(provIdx) && provIdx >= 1 && provIdx <= PROVIDERS.length) {
+      const p = PROVIDERS[provIdx - 1]
+      baseUrl = p.baseUrl
+      prefix = p.prefix
+      upstreamName = p.id
+      break
     }
-    baseUrl = url
-    const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
-    prefix = prefAns === '' ? '/v1' : prefAns
-    upstreamName = 'upstream'
-  } else {
+    if (provIdx === PROVIDERS.length + 1) {
+      let url = ''
+      while (url === '') {
+        url = (await prompt('Upstream base URL (e.g. https://api.example.com): ')).trim()
+        if (url === '') stderr.write('error: base URL is required\n')
+      }
+      baseUrl = url
+      const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
+      prefix = prefAns === '' ? '/v1' : prefAns
+      upstreamName = 'upstream'
+      break
+    }
     stderr.write(`error: invalid provider choice ${JSON.stringify(provRaw)}\n`)
-    return undefined
   }
 
   stdout.write('\nWhere should the proxy listen? This is the local address your app\n')

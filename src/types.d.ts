@@ -149,6 +149,10 @@ export interface HelpResult {
   mode: 'help'
 }
 
+export interface VersionResult {
+  mode: 'version'
+}
+
 export interface ErrorResult {
   mode: 'error'
   message: string
@@ -161,7 +165,7 @@ export interface ConfigResult {
   printConfig: boolean
 }
 
-export type ParseResult = HelpResult | ErrorResult | ConfigResult
+export type ParseResult = HelpResult | VersionResult | ErrorResult | ConfigResult
 
 export interface StartedListener {
   description: string

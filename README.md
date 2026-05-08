@@ -74,18 +74,17 @@ The OTLP receiver accepts JSON and protobuf payloads on the standard endpoints:
 - `POST /v1/metrics`
 - `POST /v1/logs`
 
-Output layout under `sink.dir` (or the legacy `--output` directory):
+Output layout under `sink.dir`:
 
 ```
 collectivus-data/
 ├── traces/<UTC-date>.jsonl       # raw export envelope
 ├── metrics/<UTC-date>.jsonl
 ├── logs/<UTC-date>.jsonl
-├── services/<service.name>/
-│   ├── traces-<UTC-date>.jsonl   # one row per span
-│   ├── metrics-<UTC-date>.jsonl  # one row per data point
-│   └── logs-<UTC-date>.jsonl     # one row per log record
-└── logs-by-service/<service.name>/<UTC-date>.jsonl   # legacy mirror
+└── services/<service.name>/
+    ├── traces-<UTC-date>.jsonl   # one row per span
+    ├── metrics-<UTC-date>.jsonl  # one row per data point
+    └── logs-<UTC-date>.jsonl     # one row per log record
 ```
 
 Each row in `services/` is a normalized JSON object — span, data point, or
@@ -166,24 +165,11 @@ collectivus does not hold a credential.
 ```text
 collectivus --config <path>                  Run with config file
 collectivus --config <path> --print-config   Validate + print resolved config
-collectivus [--port <n>] [--output <dir>]    Legacy OTLP-only mode
-collectivus                                  Legacy default (OTLP, port 4318, ./otel-data)
 collectivus --help                           Show usage
 ```
 
 `SIGINT` and `SIGTERM` trigger graceful shutdown: stop accepting new requests,
 drain in-flight, fsync sinks, exit 0.
-
-### Legacy mode
-
-The bare `npx collectivus` and `--port` / `--output` invocations still launch
-the OTLP receiver only. Two environment variables match the old flags:
-
-- `COLLECTIVUS_PORT` — listen port (default `4318`)
-- `COLLECTIVUS_OUTPUT_DIR` — output directory (default `./otel-data`)
-
-Argv overrides env vars. Bare invocation now prints a deprecation hint
-pointing at `--config`.
 
 ## Programmatic use
 

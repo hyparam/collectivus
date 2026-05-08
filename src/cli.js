@@ -8,13 +8,7 @@ import { FileSink } from './sinks/file.js'
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
-  collectivus [--port <n>] [--output <dir>]    Legacy OTLP-only mode
-  collectivus                                  Legacy default (port 4318, ./otel-data)
-  collectivus --help                           Show this help
-
-Environment (legacy mode):
-  COLLECTIVUS_PORT        Override default port
-  COLLECTIVUS_OUTPUT_DIR  Override default output directory`
+  collectivus --help                           Show this help`
 
 const DRAIN_TIMEOUT_MS = 5000
 
@@ -22,17 +16,11 @@ const DRAIN_TIMEOUT_MS = 5000
  * @typedef {{ mode: 'help' }} HelpResult
  * @typedef {{ mode: 'error', message: string, exitCode: number }} ErrorResult
  * @typedef {{
- *   mode: 'legacy',
- *   port: number | undefined,
- *   outputDir: string | undefined,
- *   bare: boolean,
- * }} LegacyResult
- * @typedef {{
  *   mode: 'config',
  *   configPath: string,
  *   printConfig: boolean,
  * }} ConfigResult
- * @typedef {HelpResult | ErrorResult | LegacyResult | ConfigResult} ParseResult
+ * @typedef {HelpResult | ErrorResult | ConfigResult} ParseResult
  */
 
 /**
@@ -42,15 +30,9 @@ const DRAIN_TIMEOUT_MS = 5000
  * @returns {ParseResult}
  */
 export function parseArgs(argv) {
-  /** @type {'config' | 'legacy' | null} */
-  let mode = null
   /** @type {string | null} */
   let configPath = null
   let printConfig = false
-  /** @type {number | undefined} */
-  let port
-  /** @type {string | undefined} */
-  let outputDir
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -62,8 +44,6 @@ export function parseArgs(argv) {
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
       if (!value) return parseError('--config requires a path')
-      if (mode === 'legacy') return parseError('--config cannot be combined with --port/--output')
-      mode = 'config'
       configPath = value
       continue
     }
@@ -73,43 +53,14 @@ export function parseArgs(argv) {
       continue
     }
 
-    if (arg === '--port' || arg.startsWith('--port=')) {
-      const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value) return parseError('--port requires a number')
-      if (!/^\d+$/.test(value)) {
-        return parseError(`--port: not a valid port (got "${value}")`)
-      }
-      const n = Number.parseInt(value, 10)
-      if (n > 65535) {
-        return parseError(`--port: not a valid port (got "${value}")`)
-      }
-      if (mode === 'config') return parseError('--port cannot be combined with --config')
-      mode = 'legacy'
-      port = n
-      continue
-    }
-
-    if (arg === '--output' || arg.startsWith('--output=')) {
-      const value = arg === '--output' ? argv[++i] : arg.slice('--output='.length)
-      if (!value) return parseError('--output requires a directory')
-      if (mode === 'config') return parseError('--output cannot be combined with --config')
-      mode = 'legacy'
-      outputDir = value
-      continue
-    }
-
     return parseError(`unknown argument: ${arg}`)
   }
 
-  if (printConfig && mode !== 'config') {
-    return parseError('--print-config requires --config <path>')
+  if (configPath === null) {
+    return parseError('--config <path> is required')
   }
 
-  if (mode === 'config' && configPath !== null) {
-    return { mode: 'config', configPath, printConfig }
-  }
-
-  return { mode: 'legacy', port, outputDir, bare: mode === null }
+  return { mode: 'config', configPath, printConfig }
 }
 
 /**
@@ -128,7 +79,7 @@ function parseError(message) {
  * stdio and process signals.
  *
  * @param {string[]} argv CLI arguments (without node/script name).
- * @param {NodeJS.ProcessEnv} env Environment variables.
+ * @param {NodeJS.ProcessEnv} _env Environment variables (unused; reserved).
  * @param {{
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
@@ -136,7 +87,7 @@ function parseError(message) {
  * }} [hooks]
  * @returns {Promise<number>}
  */
-export async function run(argv, env, hooks = {}) {
+export async function run(argv, _env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
@@ -152,51 +103,24 @@ export async function run(argv, env, hooks = {}) {
     return parsed.exitCode
   }
 
-  if (parsed.mode === 'config') {
-    /** @type {import('./config.js').CollectivusConfig} */
-    let config
-    try {
-      config = loadConfig(parsed.configPath)
-    } catch (err) {
-      if (err instanceof ConfigError) {
-        stderr.write(`config error: ${err.message}\n`)
-        return 1
-      }
-      throw err
+  /** @type {import('./config.js').CollectivusConfig} */
+  let config
+  try {
+    config = loadConfig(parsed.configPath)
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      stderr.write(`config error: ${err.message}\n`)
+      return 1
     }
-
-    if (parsed.printConfig) {
-      stdout.write(JSON.stringify(config, null, 2) + '\n')
-      return 0
-    }
-
-    return runLifecycle(buildConfigListeners(config), stdout, stderr, onShutdownRequested)
+    throw err
   }
 
-  if (parsed.bare) {
-    stderr.write('Warning: running without --config is deprecated. Use --config <path> for the new config-driven mode.\n')
+  if (parsed.printConfig) {
+    stdout.write(JSON.stringify(config, null, 2) + '\n')
+    return 0
   }
 
-  const legacyPort = parsed.port ?? envPort(env)
-  const legacyOutputDir = parsed.outputDir ?? env.COLLECTIVUS_OUTPUT_DIR ?? undefined
-
-  return runLifecycle(
-    [() => buildLegacyListener(legacyPort, legacyOutputDir)],
-    stdout,
-    stderr,
-    onShutdownRequested
-  )
-}
-
-/**
- * @param {NodeJS.ProcessEnv} env
- * @returns {number | undefined}
- */
-function envPort(env) {
-  if (!env.COLLECTIVUS_PORT) return undefined
-  const n = Number.parseInt(env.COLLECTIVUS_PORT, 10)
-  if (!Number.isInteger(n) || n < 0 || n > 65535) return undefined
-  return n
+  return runLifecycle(buildConfigListeners(config), stdout, stderr, onShutdownRequested)
 }
 
 /**
@@ -258,21 +182,6 @@ function buildConfigListeners(config) {
   }
 
   return factories
-}
-
-/**
- * @param {number | undefined} port
- * @param {string | undefined} outputDir
- * @returns {Promise<StartedListener>}
- */
-async function buildLegacyListener(port, outputDir) {
-  const collector = new Collector({ port, outputDir })
-  await collector.start()
-  const effective = effectiveBinding(collector.server, undefined, collector.port)
-  return {
-    description: `Collectivus listening on ${effective}, writing to ${collector.outputDir}`,
-    stop: () => collector.stop(),
-  }
 }
 
 /**

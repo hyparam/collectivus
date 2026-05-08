@@ -52,7 +52,7 @@ const MAX_DATE_MS = 8640000000000000n
  * @import { UploadOptions } from './upload/upload.d.ts'
  */
 
-class Collector {
+export class Collector {
   /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
   constructor(options = {}) {
     this.port = options.port ?? 4318
@@ -126,8 +126,6 @@ class Collector {
   }
 }
 
-export { Collector }
-
 /**
  * @returns {string}
  */
@@ -163,9 +161,6 @@ function writeNormalizedServiceRows(outputDir, signal, data) {
   for (const row of rows) {
     const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
     appendServiceRow(path.join(outputDir, 'services', serviceName), signal, row)
-    if (signal === 'logs') {
-      appendLegacyNormalizedLogRow(outputDir, serviceName, row)
-    }
   }
 }
 
@@ -178,21 +173,6 @@ function writeNormalizedServiceRows(outputDir, signal, data) {
 function appendServiceRow(serviceDir, signal, row) {
   ensureDir(serviceDir)
   const filePath = path.join(serviceDir, `${signal}-${todayUtc()}.jsonl`)
-  fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
-}
-
-/**
- * Preserve the legacy logs-by-service tree for compatibility.
- *
- * @param {string} outputDir
- * @param {string} serviceName
- * @param {NormalizedServiceRow} row
- * @returns {void}
- */
-function appendLegacyNormalizedLogRow(outputDir, serviceName, row) {
-  const serviceDir = path.join(outputDir, 'logs-by-service', serviceName)
-  ensureDir(serviceDir)
-  const filePath = path.join(serviceDir, `${todayUtc()}.jsonl`)
   fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
 }
 

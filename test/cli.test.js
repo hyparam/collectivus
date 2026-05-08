@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
-import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,20 +46,10 @@ function memo() {
 function noop() {}
 
 describe('parseArgs', () => {
-  it('treats no arguments as bare legacy mode', () => {
-    expect(parseArgs([])).toEqual({ mode: 'legacy', port: undefined, outputDir: undefined, bare: true })
-  })
-
-  it('parses --port=N --output=DIR as legacy with flags', () => {
-    expect(parseArgs(['--port=9000', '--output=/tmp/x'])).toEqual({
-      mode: 'legacy', port: 9000, outputDir: '/tmp/x', bare: false,
-    })
-  })
-
-  it('parses --port N --output DIR space form', () => {
-    expect(parseArgs(['--port', '9000', '--output', '/tmp/x'])).toEqual({
-      mode: 'legacy', port: 9000, outputDir: '/tmp/x', bare: false,
-    })
+  it('requires --config', () => {
+    const r = parseArgs([])
+    expect(r.mode).toBe('error')
+    if (r.mode === 'error') expect(r.message).toMatch(/--config <path> is required/)
   })
 
   it('parses --config <path>', () => {
@@ -91,11 +80,6 @@ describe('parseArgs', () => {
     expect(r.mode).toBe('error')
   })
 
-  it('rejects mixing --config and --port', () => {
-    expect(parseArgs(['--config', 'x', '--port', '9000']).mode).toBe('error')
-    expect(parseArgs(['--port', '9000', '--config', 'x']).mode).toBe('error')
-  })
-
   it('rejects unknown arguments', () => {
     const r = parseArgs(['--mystery'])
     expect(r.mode).toBe('error')
@@ -105,31 +89,6 @@ describe('parseArgs', () => {
   it('rejects --config without a value', () => {
     expect(parseArgs(['--config']).mode).toBe('error')
     expect(parseArgs(['--config=']).mode).toBe('error')
-  })
-
-  it('rejects --port without a value', () => {
-    expect(parseArgs(['--port']).mode).toBe('error')
-    expect(parseArgs(['--port=']).mode).toBe('error')
-  })
-
-  it('rejects non-numeric --port', () => {
-    expect(parseArgs(['--port=abc']).mode).toBe('error')
-    expect(parseArgs(['--port', 'abc']).mode).toBe('error')
-  })
-
-  it('rejects out-of-range --port', () => {
-    expect(parseArgs(['--port=70000']).mode).toBe('error')
-  })
-
-  it('rejects --output without a value', () => {
-    expect(parseArgs(['--output']).mode).toBe('error')
-    expect(parseArgs(['--output=']).mode).toBe('error')
-  })
-
-  it('preserves = characters in --output=VALUE', () => {
-    expect(parseArgs(['--output=/tmp/a=b'])).toEqual({
-      mode: 'legacy', port: undefined, outputDir: '/tmp/a=b', bare: false,
-    })
   })
 
   it('all error results carry exit code 2', () => {
@@ -154,6 +113,15 @@ describe('run() — help and arg errors', () => {
     const code = await run(['--mystery'], {}, { stdout, stderr })
     expect(code).toBe(2)
     expect(stderr.value()).toMatch(/unknown argument/)
+    expect(stderr.value()).toMatch(/Usage:/)
+  })
+
+  it('prints error + usage and exits 2 when --config is missing', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run([], {}, { stdout, stderr })
+    expect(code).toBe(2)
+    expect(stderr.value()).toMatch(/--config <path> is required/)
     expect(stderr.value()).toMatch(/Usage:/)
   })
 })
@@ -262,61 +230,25 @@ describe('run() — --config <path>', () => {
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/no listeners configured/)
   })
-})
-
-describe('run() — legacy mode', () => {
-  /** @type {string} */
-  let tmpDir
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cli-legacy-'))
-  })
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true })
-  })
-
-  it('starts on --port=0 --output=DIR and shuts down cleanly', async () => {
-    const stdout = memo()
-    const stderr = memo()
-    /** @type {(signal: string) => void} */
-    let trigger = noop
-    const result = run(['--port=0', '--output', tmpDir], {}, {
-      stdout, stderr,
-      onShutdownRequested: (handler) => { trigger = handler },
-    })
-    await waitFor(() => stdout.value().includes('Collectivus listening'))
-    trigger('SIGINT')
-    expect(await result).toBe(0)
-    // No deprecation hint when flags are used
-    expect(stderr.value()).not.toMatch(/deprecated/)
-  })
-
-  it('prints deprecation hint on bare invocation', async () => {
-    const stdout = memo()
-    const stderr = memo()
-    /** @type {(signal: string) => void} */
-    let trigger = noop
-    const result = run([], { COLLECTIVUS_PORT: '0', COLLECTIVUS_OUTPUT_DIR: tmpDir }, {
-      stdout, stderr,
-      onShutdownRequested: (handler) => { trigger = handler },
-    })
-    await waitFor(() => stdout.value().includes('Collectivus listening'))
-    trigger('SIGTERM')
-    expect(await result).toBe(0)
-    expect(stderr.value()).toMatch(/deprecated/)
-    expect(stderr.value()).toMatch(/--config/)
-  })
 
   it('returns 1 when the listener cannot bind (port already in use)', async () => {
-    // Hold a port on the wildcard address so the legacy listener (which also
-    // binds the wildcard) collides with EADDRINUSE.
-    const blocker = http.createServer()
-    await new Promise((resolve) => { blocker.listen(0, () => resolve(undefined)) })
+    // Hold a port so the configured listener (also binding the same address)
+    // collides with EADDRINUSE.
+    const blocker = await import('node:http').then((http) => {
+      const server = http.createServer()
+      return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)))
+    })
     const addr = blocker.address()
     if (!addr || typeof addr === 'string') throw new Error('no address')
     try {
+      const cfg = {
+        otel: { listen: `127.0.0.1:${addr.port}` },
+        sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+      }
+      const cfgPath = writeConfig(cfg)
       const stdout = memo()
       const stderr = memo()
-      const code = await run(['--port', String(addr.port), '--output', tmpDir], {}, { stdout, stderr })
+      const code = await run(['--config', cfgPath], {}, { stdout, stderr })
       expect(code).toBe(1)
       expect(stderr.value()).toMatch(/failed to start listener/)
     } finally {
@@ -339,10 +271,16 @@ async function waitFor(predicate, timeoutMs = 5000) {
 
 describe('CLI signal handling (spawned)', () => {
   it('shuts down gracefully on SIGTERM', async () => {
-    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-sigterm-'))
-    const child = spawn(process.execPath, [cliPath, '--port=0', '--output', outputDir])
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-sigterm-'))
+    const cfgPath = path.join(tmp, 'config.json')
+    const sinkDir = path.join(tmp, 'data')
+    fs.writeFileSync(cfgPath, JSON.stringify({
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: sinkDir },
+    }))
+    const child = spawn(process.execPath, [cliPath, '--config', cfgPath])
     try {
-      await waitForOutput(child, 'listening')
+      await waitForOutput(child, 'OTLP listener bound')
       const exit = new Promise((resolve) => {
         child.once('exit', (code, signal) => resolve({ code, signal }))
       })
@@ -351,29 +289,7 @@ describe('CLI signal handling (spawned)', () => {
       expect(result).toEqual({ code: 0, signal: null })
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL')
-      fs.rmSync(outputDir, { recursive: true, force: true })
-    }
-  }, 10000)
-
-  it('uses env vars when argv is absent', async () => {
-    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-env-'))
-    const child = spawn(process.execPath, [cliPath], {
-      env: {
-        ...process.env,
-        COLLECTIVUS_PORT: '0',
-        COLLECTIVUS_OUTPUT_DIR: outputDir,
-      },
-    })
-    try {
-      await waitForOutput(child, outputDir)
-      const exit = new Promise((resolve) => {
-        child.once('exit', (code) => resolve(code))
-      })
-      child.kill('SIGTERM')
-      expect(await exit).toBe(0)
-    } finally {
-      if (child.exitCode === null) child.kill('SIGKILL')
-      fs.rmSync(outputDir, { recursive: true, force: true })
+      fs.rmSync(tmp, { recursive: true, force: true })
     }
   }, 10000)
 

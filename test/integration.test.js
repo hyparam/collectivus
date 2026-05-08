@@ -15,6 +15,7 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import zlib from 'node:zlib'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders } from 'node:http'
@@ -179,6 +180,125 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(redactedValue(requestHeaders, 'content-type')).toBe('application/json')
   }, 15000)
 
+  it('records a gzipped streaming exchange — Anthropic compresses SSE when the client negotiates gzip', async () => {
+    // Real Anthropic responses we recorded: text/event-stream + content-encoding: gzip.
+    // Without decompression the recorder feeds gzip bytes to the SSE parser,
+    // which never finds an event terminator and silently drops every event.
+    const sseEvents = [
+      'event: message_start\ndata: {"type":"message_start","msg":"a"}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":" world"}}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+    upstreamHandler = (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'content-encoding': 'gzip',
+      })
+      const gz = zlib.createGzip()
+      gz.pipe(res)
+      let i = 0
+      function next() {
+        if (i >= sseEvents.length) { gz.end(); return }
+        gz.write(sseEvents[i++], () => gz.flush(setImmediate.bind(null, next)))
+      }
+      next()
+    }
+
+    const sinkDir = path.join(tmpDir, 'data')
+    const cfgPath = writeConfig(tmpDir, {
+      proxy: {
+        listen: '127.0.0.1:0',
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
+      },
+      sink: { type: 'file', dir: sinkDir },
+    })
+
+    const proxyPort = await launchAndWaitForProxy(cfgPath)
+    const r = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'text/event-stream',
+        'accept-encoding': 'gzip',
+      },
+      body: JSON.stringify({ model: 'claude-opus-4-7', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('text/event-stream')
+    // fetch transparently gunzips, so the client text is the original SSE.
+    // The wire still carried gzip — the proxy must not have stripped it.
+    expect(r.headers.get('content-encoding')).toBe('gzip')
+    expect(await r.text()).toBe(sseEvents.join(''))
+
+    await shutdown()
+
+    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const events = rows.filter((row) => row.kind === 'stream_event')
+    const exchanges = rows.filter((row) => row.kind === 'exchange')
+
+    expect(exchanges).toHaveLength(1)
+    expect(events).toHaveLength(sseEvents.length)
+    expect(events.map((row) => row.event)).toEqual([
+      'message_start',
+      'content_block_delta',
+      'content_block_delta',
+      'message_stop',
+    ])
+    // The README documents this exact extractor — make sure it works.
+    const deltas = events
+      .filter((row) => row.event === 'content_block_delta')
+      .map((row) => JSON.parse(row.data).delta.text)
+    expect(deltas).toEqual(['hello', ' world'])
+
+    expect(exchanges[0].stream_event_count).toBe(sseEvents.length)
+    expect(exchanges[0].error).toBeUndefined()
+  }, 15000)
+
+  it('records a gzipped non-streaming exchange with the decoded body, not gzip mojibake', async () => {
+    const responseBody = JSON.stringify({ id: 'msg_test', content: [{ type: 'text', text: 'hello' }] })
+    const gzipped = zlib.gzipSync(responseBody)
+    upstreamHandler = (_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+        'content-length': String(gzipped.length),
+      })
+      res.end(gzipped)
+    }
+
+    const sinkDir = path.join(tmpDir, 'data')
+    const cfgPath = writeConfig(tmpDir, {
+      proxy: {
+        listen: '127.0.0.1:0',
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
+      },
+      sink: { type: 'file', dir: sinkDir },
+    })
+
+    const proxyPort = await launchAndWaitForProxy(cfgPath)
+    const r = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'accept-encoding': 'gzip' },
+      body: '{"model":"claude-opus-4-7","stream":false,"messages":[]}',
+    })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-encoding')).toBe('gzip')
+    expect(await r.text()).toBe(responseBody)
+
+    await shutdown()
+
+    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const exchanges = rows.filter((row) => row.kind === 'exchange')
+    expect(exchanges).toHaveLength(1)
+    expect(exchanges[0].response.body).toBe(responseBody)
+    expect(exchanges[0].error).toBeUndefined()
+  }, 15000)
+
   it('records a non-streaming exchange with the full response body', async () => {
     const responseBody = JSON.stringify({ id: 'msg_test', content: [{ type: 'text', text: 'hello' }] })
     upstreamHandler = (_req, res) => {
@@ -279,7 +399,8 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
  */
 function writeConfig(dir, cfg) {
   const p = path.join(dir, 'config.json')
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2))
+  // v1 schema requires a top-level `version` field.
+  fs.writeFileSync(p, JSON.stringify({ version: 1, ...cfg }, null, 2))
   return p
 }
 

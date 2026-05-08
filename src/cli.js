@@ -1,9 +1,12 @@
 import process from 'node:process'
+import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { FileSink } from './sinks/file.js'
+import { isSupervised, selfUpdate } from './update.js'
+import { createScheduler } from './upload/scheduler.js'
 
 /**
  * @import { Server } from 'node:http'
@@ -14,9 +17,11 @@ const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
   collectivus --config <path> --strict         Reject unknown top-level config keys
-  collectivus --help                           Show this help`
+  collectivus --help                           Show this help
+  collectivus --version                        Print program version`
 
 const DRAIN_TIMEOUT_MS = 5000
+const SELF_UPDATE_TIME_UTC = '03:00'
 
 /**
  * Parse CLI arguments into a structured result.
@@ -35,6 +40,10 @@ export function parseArgs(argv) {
 
     if (arg === '--help' || arg === '-h') {
       return { mode: 'help' }
+    }
+
+    if (arg === '--version' || arg === '-V' || arg === '-v') {
+      return { mode: 'version' }
     }
 
     if (arg === '--config' || arg.startsWith('--config=')) {
@@ -111,6 +120,10 @@ export async function run(argv, env, hooks = {}) {
     stdout.write(USAGE + '\n')
     return 0
   }
+  if (parsed.mode === 'version') {
+    stdout.write(readPackageVersion() + '\n')
+    return 0
+  }
   if (parsed.mode === 'error') {
     stderr.write(`error: ${parsed.message}\n\n${USAGE}\n`)
     return parsed.exitCode
@@ -142,16 +155,18 @@ export async function run(argv, env, hooks = {}) {
     return 1
   }
 
-  return runLifecycle(buildConfigListeners(config, env), stdout, stderr, onShutdownRequested)
+  return runLifecycle(buildConfigListeners(config, { env, stderr }), stdout, stderr, onShutdownRequested)
 }
 
 /**
  * @param {CollectivusConfig} config
- * @param {NodeJS.ProcessEnv} [env] Forwarded to the uploader so its connector
- *   reads creds from the same env we pre-flighted in `run()`.
+ * @param {{ env?: NodeJS.ProcessEnv, stderr: { write: (s: string) => void } }} ctx
+ *   `env` is forwarded to the uploader so its connector reads creds from the
+ *   same env we pre-flighted in `run()`. `stderr` is consumed by the
+ *   self-update factory for warning output.
  * @returns {ListenerFactory[]}
  */
-function buildConfigListeners(config, env) {
+function buildConfigListeners(config, ctx) {
   /** @type {ListenerFactory[]} */
   const factories = []
 
@@ -187,10 +202,13 @@ function buildConfigListeners(config, env) {
       const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
       return {
         description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/proxy.jsonl`,
-        // Stop accepting new connections, then flush+close the sink so the
-        // final exchange row of any in-flight request lands before exit.
+        // Stop accepting new connections, drain any in-flight exchanges (their
+        // finalization can be async — e.g. a gzip decoder still flushing the
+        // tail of an SSE stream), then flush+close the sink so the final
+        // `exchange` row lands before exit.
         stop: async () => {
           await proxy.stop()
+          await recorder.drain()
           await sink.close()
         },
       }
@@ -210,7 +228,7 @@ function buildConfigListeners(config, env) {
       const uploader = createUploader({
         outputDir: sinkDir,
         options: uploadConfig,
-        env,
+        env: ctx.env,
       })
       await uploader.start()
       const time = uploadConfig.time ?? '00:10'
@@ -222,7 +240,63 @@ function buildConfigListeners(config, env) {
     })
   }
 
+  // Only schedule the self-update tick when we have a real listener to keep
+  // alive — an empty config should still surface "no listeners configured".
+  if (factories.length > 0) {
+    factories.push(buildSelfUpdateFactory(ctx))
+  }
+
   return factories
+}
+
+/**
+ * Build a listener factory for the daily self-update tick. The factory
+ * starts a scheduler that runs once per UTC day at `SELF_UPDATE_TIME_UTC`;
+ * each tick checks the npm registry and, if a newer version is published,
+ * runs `npm install -g collectivus@<latest>` and (only when running under
+ * a supervisor like launchd / systemd) sends SIGTERM so the supervisor
+ * respawns the process on the new code.
+ *
+ * Robustness: the tick swallows everything so a failure never escalates
+ * into the scheduler's fast-retry path — if anything goes wrong we just
+ * wait until tomorrow's tick. The factory itself also swallows startup
+ * errors and returns a no-op listener so a broken self-update path can
+ * never take down the OTLP collector or proxy.
+ *
+ * @param {{ stderr: { write: (s: string) => void } }} ctx
+ * @returns {ListenerFactory}
+ */
+function buildSelfUpdateFactory(ctx) {
+  return async () => {
+    try {
+      const scheduler = createScheduler({
+        time: SELF_UPDATE_TIME_UTC,
+        skipInitialTick: true,
+        tick: async () => {
+          try {
+            const installed = await selfUpdate()
+            if (installed !== undefined && isSupervised()) {
+              // Trigger graceful shutdown; supervisor will restart with new code.
+              process.kill(process.pid, 'SIGTERM')
+            }
+          } catch (err) {
+            ctx.stderr.write(`warning: self-update tick failed: ${formatError(err)}\n`)
+          }
+        },
+      })
+      await scheduler.start()
+      return {
+        description: `Self-update check scheduled daily at ${SELF_UPDATE_TIME_UTC} UTC`,
+        stop: () => scheduler.stop(),
+      }
+    } catch (err) {
+      ctx.stderr.write(`warning: self-update disabled (${formatError(err)})\n`)
+      return {
+        description: 'Self-update check disabled (failed to start)',
+        stop: async () => {},
+      }
+    }
+  }
 }
 
 /**

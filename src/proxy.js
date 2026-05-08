@@ -1,5 +1,6 @@
 import http from 'node:http'
 import https from 'node:https'
+import zlib from 'node:zlib'
 import { isSseHeaders } from './sse.js'
 
 /**
@@ -212,19 +213,35 @@ function handleRequest(upstreams, recorder, req, res) {
         headers: upstreamRes.headers,
       })
       const streaming = isSseHeaders(upstreamRes.headers)
+      if (streaming) exchange.markStreaming()
+
+      // The recorder needs decoded bytes to parse SSE events and capture body
+      // text. The client-facing pipe below forwards the original bytes —
+      // `content-encoding` is preserved end-to-end.
+      const decoder = decoderFor(upstreamRes.headers)
+      const recorderSource = decoder ?? upstreamRes
+      if (decoder) {
+        upstreamRes.pipe(decoder)
+        decoder.on('error', (err) => {
+          exchange.setError(err)
+          finishSafely(exchange)
+        })
+      }
       if (streaming) {
-        exchange.markStreaming()
-        upstreamRes.on('data', (chunk) => {
+        recorderSource.on('data', (chunk) => {
           // Recorder runs alongside the proxy hot path; failures here must
           // not break the response stream the client is consuming.
           exchange.consumeStreamChunk(chunk).catch((err) => exchange.setError(err))
         })
       } else {
-        upstreamRes.on('data', (chunk) => {
+        recorderSource.on('data', (chunk) => {
           exchange.appendResponseChunk(chunk)
         })
       }
       upstreamRes.on('end', () => {
+        upstreamEnded = true
+      })
+      recorderSource.on('end', () => {
         finishSafely(exchange)
       })
       upstreamRes.on('error', (err) => {
@@ -235,6 +252,12 @@ function handleRequest(upstreams, recorder, req, res) {
     upstreamRes.pipe(res)
   })
 
+  // Set when the upstream stream ends cleanly. The `res.on('close')` watchdog
+  // below uses this to distinguish a real client abort (upstream still in
+  // flight) from a decoder still flushing decompressed bytes after the client
+  // has finished reading (in which case finalization happens asynchronously
+  // via the decoder's 'end' event).
+  let upstreamEnded = false
   let failed = false
   upstreamReq.on('error', (err) => {
     failed = true
@@ -262,11 +285,13 @@ function handleRequest(upstreams, recorder, req, res) {
   })
   res.on('close', () => {
     if (!failed && !upstreamReq.destroyed) upstreamReq.destroy()
-    if (exchange && !exchange.finished) {
+    if (exchange && !exchange.finished && !upstreamEnded) {
       // Client gave up before the response completed — cancel upstream and
       // record what we have. The error sentinel is `client_aborted` per the
       // proxy contract so consumers can match on a stable machine-readable
       // value rather than a free-form Error.message string.
+      // When `upstreamEnded` is true the decoder may still be flushing; the
+      // recorder will finalize via the decoder's 'end' event.
       exchange.setError('client_aborted')
       finishSafely(exchange)
     }
@@ -345,6 +370,26 @@ function forwardHeaders(reqHeaders, upstreamHost) {
   }
   out.host = upstreamHost
   return out
+}
+
+/**
+ * Build a decompression Transform for the upstream's `content-encoding`, or
+ * return undefined for identity / missing / unrecognized encodings. The
+ * decoder is consumed by the recorder only — the client-facing pipe forwards
+ * the original encoded bytes unchanged.
+ *
+ * @param {IncomingHttpHeaders} headers
+ * @returns {import('node:stream').Transform | undefined}
+ */
+function decoderFor(headers) {
+  const ce = headers['content-encoding']
+  const value = Array.isArray(ce) ? ce[0] : ce
+  if (typeof value !== 'string') return undefined
+  const encoding = value.toLowerCase().trim()
+  if (encoding === 'gzip' || encoding === 'x-gzip') return zlib.createGunzip()
+  if (encoding === 'deflate') return zlib.createInflate()
+  if (encoding === 'br') return zlib.createBrotliDecompress()
+  return undefined
 }
 
 /**

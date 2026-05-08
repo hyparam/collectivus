@@ -400,6 +400,56 @@ describe('Recorder — error paths', () => {
   })
 })
 
+describe('Recorder — drain', () => {
+  // Mirrors the production race the gzip-decoder fix exposed: the proxy's
+  // upstream connection has closed and shutdown begins, but a finalization
+  // path (decoder still flushing) hasn't called finish() yet. drain() must
+  // wait for that finalization before the sink is allowed to close.
+  it('waits for in-flight exchanges whose finish() lands after drain begins', async () => {
+    const sink = makeCollectingSink()
+    const recorder = new Recorder({ sink })
+    const exchange = recorder.startExchange({
+      upstream: 'a',
+      client: { ip: '127.0.0.1', user_agent: 'test' },
+      request: { method: 'POST', path: '/v1/messages', headers: {} },
+    })
+    exchange.setResponseStart({ status: 200, headers: { 'content-type': 'text/event-stream' } })
+    exchange.markStreaming()
+
+    const drained = recorder.drain()
+    // Simulate the decoder firing 'end' a tick after drain starts.
+    setImmediate(() => { exchange.finish() })
+    await drained
+
+    const exchanges = sink.rows.filter((r) => r.kind === 'exchange')
+    expect(exchanges).toHaveLength(1)
+    expect(recorder.active.size).toBe(0)
+  })
+
+  it('returns immediately when no exchanges are in flight', async () => {
+    const sink = makeCollectingSink()
+    const recorder = new Recorder({ sink })
+    await recorder.drain()
+    expect(sink.rows).toHaveLength(0)
+  })
+
+  it('force-finalizes exchanges that exceed the timeout so no row is lost', async () => {
+    const sink = makeCollectingSink()
+    const recorder = new Recorder({ sink })
+    recorder.startExchange({
+      upstream: 'a',
+      client: { ip: '127.0.0.1', user_agent: 'test' },
+      request: { method: 'POST', path: '/v1/messages', headers: {} },
+    })
+    // Never call finish() — drain must time out and force-finalize so the
+    // exchange row still lands.
+    await recorder.drain(10)
+    const exchanges = sink.rows.filter((r) => r.kind === 'exchange')
+    expect(exchanges).toHaveLength(1)
+    expect(recorder.active.size).toBe(0)
+  })
+})
+
 describe('isSseHeaders', () => {
   it('detects text/event-stream content types with parameters', () => {
     expect(isSseHeaders({ 'content-type': 'text/event-stream' })).toBe(true)

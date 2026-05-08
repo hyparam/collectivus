@@ -7,10 +7,16 @@ const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status
 const argv = process.argv.slice(2)
 const subcommand = argv[0]
 
+const updateCheck = checkForUpdates()
+
 main().then(
-  function(code) { process.exit(code) },
-  function(err) {
+  async function(code) {
+    await updateCheck
+    process.exit(code)
+  },
+  async function(err) {
     process.stderr.write(`fatal: ${err instanceof Error ? err.message : String(err)}\n`)
+    await updateCheck
     process.exit(1)
   }
 )
@@ -60,5 +66,30 @@ async function loadSubcommand(name) {
   }
   default:
     throw new Error(`unknown subcommand: ${name}`)
+  }
+}
+
+/**
+ * Background check against the npm registry for a newer published version.
+ * Prints a notice to stderr when one is available; never throws or rejects.
+ *
+ * @returns {Promise<void>}
+ */
+async function checkForUpdates() {
+  try {
+    const [{ readPackageVersion }, { fetchLatestVersion }] = await Promise.all([
+      import('../src/cli/common.js'),
+      import('../src/update.js'),
+    ])
+    const currentVersion = readPackageVersion()
+    const latest = await fetchLatestVersion()
+    if (latest && latest !== currentVersion) {
+      process.stderr.write(
+        `\x1b[33mA newer version of collectivus is available: ${latest} (current: ${currentVersion})\x1b[0m\n` +
+        '\x1b[33mRun \'npm install -g collectivus\' to update\x1b[0m\n'
+      )
+    }
+  } catch {
+    // fail silently — update check is best-effort
   }
 }

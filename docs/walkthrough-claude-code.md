@@ -115,7 +115,9 @@ Average request duration, by model:
 
 ```bash
 jq -r 'select(.kind=="exchange") | [(.request.body | fromjson).model, .duration_ms] | @tsv' \
-  < collectivus-data/proxy.jsonl
+  < collectivus-data/proxy.jsonl \
+| awk -F'\t' '{ count[$1]++; sum[$1]+=$2 }
+              END { for (m in count) printf "%s\t%d calls\tavg %dms\n", m, count[m], sum[m]/count[m] }'
 ```
 
 All assistant text deltas from the most recent exchange:

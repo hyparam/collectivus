@@ -16,20 +16,25 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * @import { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders } from 'node:http'
+ * @import { ChildProcessWithoutNullStreams } from 'node:child_process'
+ */
+
 const cliPath = fileURLToPath(new URL('../bin/cli.js', import.meta.url))
 
 describe('proxy walkthrough — end-to-end via CLI', () => {
   /** @type {string} */
   let tmpDir
-  /** @type {import('node:http').Server} */
+  /** @type {Server} */
   let upstream
   /** @type {string} */
   let upstreamUrl
-  /** @type {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, body: string) => void} */
+  /** @type {(req: IncomingMessage, res: ServerResponse, body: string) => void} */
   let upstreamHandler
-  /** @type {{ method: string | undefined, url: string | undefined, headers: import('node:http').IncomingHttpHeaders, body: string }[]} */
+  /** @type {{ method: string | undefined, url: string | undefined, headers: IncomingHttpHeaders, body: string }[]} */
   let upstreamRequests
-  /** @type {import('node:child_process').ChildProcessWithoutNullStreams | null} */
+  /** @type {ChildProcessWithoutNullStreams | null} */
   let child = null
 
   beforeEach(async () => {

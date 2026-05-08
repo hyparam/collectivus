@@ -3,54 +3,14 @@ import path from 'node:path'
 import { createServer } from './server.js'
 
 /**
- * @typedef {{
- *   serviceName: string,
- *   timestamp?: string,
- *   observedTimestamp?: string,
- *   severityNumber?: number,
- *   severityText?: string,
- *   body: unknown,
- *   traceId?: string,
- *   spanId?: string,
- *   flags?: number,
- *   droppedAttributesCount?: number,
- *   resource: Record<string, unknown>,
- *   scope: {
- *     name?: string,
- *     version?: string,
- *     attributes: Record<string, unknown>,
- *   },
- *   attributes: Record<string, unknown>,
- * }} NormalizedLogRow
- */
-
-/**
- * @typedef {Record<string, unknown> & { serviceName: string }} NormalizedServiceRow
- */
-
-/**
- * @typedef {{
- *   serviceName: string,
- *   metricName?: string,
- *   description?: string,
- *   unit?: string,
- *   resource: Record<string, unknown>,
- *   scope: {
- *     name?: string,
- *     version?: string,
- *     attributes: Record<string, unknown>,
- *   },
- *   metadata: Record<string, unknown>,
- * }} MetricRowBase
+ * @import { Server } from 'node:http'
+ * @import { NormalizedLogRow, NormalizedServiceRow, MetricRowBase } from './types.js'
+ * @import { UploadOptions } from './upload/upload.js'
  */
 
 const OTLP_NS_PER_MS = 1000000n
 const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
-
-/**
- * @import { UploadOptions } from './upload/upload.d.ts'
- */
 
 export class Collector {
   /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
@@ -60,7 +20,7 @@ export class Collector {
     this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
     this.uploadOptions = options.upload
-    /** @type {import('node:http').Server | null} */
+    /** @type {Server | null} */
     this.server = null
     /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | null} */
     this.uploader = null

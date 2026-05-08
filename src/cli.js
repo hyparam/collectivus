@@ -5,23 +5,17 @@ import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { FileSink } from './sinks/file.js'
 
+/**
+ * @import { Server } from 'node:http'
+ * @import { ErrorResult, ParseResult, StartedListener, ListenerFactory, CollectivusConfig } from './types.js'
+ */
+
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
   collectivus --help                           Show this help`
 
 const DRAIN_TIMEOUT_MS = 5000
-
-/**
- * @typedef {{ mode: 'help' }} HelpResult
- * @typedef {{ mode: 'error', message: string, exitCode: number }} ErrorResult
- * @typedef {{
- *   mode: 'config',
- *   configPath: string,
- *   printConfig: boolean,
- * }} ConfigResult
- * @typedef {HelpResult | ErrorResult | ConfigResult} ParseResult
- */
 
 /**
  * Parse CLI arguments into a structured result.
@@ -103,7 +97,7 @@ export async function run(argv, _env, hooks = {}) {
     return parsed.exitCode
   }
 
-  /** @type {import('./config.js').CollectivusConfig} */
+  /** @type {CollectivusConfig} */
   let config
   try {
     config = loadConfig(parsed.configPath)
@@ -124,18 +118,7 @@ export async function run(argv, _env, hooks = {}) {
 }
 
 /**
- * @typedef {{
- *   description: string,
- *   stop: () => Promise<void>,
- * }} StartedListener
- */
-
-/**
- * @typedef {() => Promise<StartedListener>} ListenerFactory
- */
-
-/**
- * @param {import('./config.js').CollectivusConfig} config
+ * @param {CollectivusConfig} config
  * @returns {ListenerFactory[]}
  */
 function buildConfigListeners(config) {
@@ -290,7 +273,7 @@ function parseListen(value) {
 }
 
 /**
- * @param {import('node:http').Server | null} server
+ * @param {Server | null} server
  * @param {string | undefined} configuredHost
  * @param {number} configuredPort
  * @returns {string}

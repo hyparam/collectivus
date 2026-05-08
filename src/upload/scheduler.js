@@ -12,15 +12,7 @@ const MAX_TIMEOUT = 2147483647 // ~24.8 days; setTimeout caps at int32 ms
 const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000
 
 /**
- * @typedef {object} TickResult
- * @property {boolean} [retry] schedule a fast retry instead of waiting until the next daily fire
- */
-
-/**
- * @typedef {object} SchedulerDeps
- * @property {() => Date} [now] for tests
- * @property {(handler: () => void, ms: number) => NodeJS.Timeout | number} [setTimeoutFn]
- * @property {(handle: NodeJS.Timeout | number) => void} [clearTimeoutFn]
+ * @import { TickResult, SchedulerDeps } from '../types.js'
  */
 
 /**

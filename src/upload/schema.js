@@ -18,12 +18,8 @@
  */
 
 /**
- * @import { Signal } from './upload.d.ts'
- * @import { BasicType, ColumnSource } from 'hyparquet-writer'
- */
-
-/**
- * @typedef {{ name: string, type: BasicType, nullable: boolean }} ColumnSpec
+ * @import { ColumnSource } from 'hyparquet-writer'
+ * @import { Signal, ColumnSpec } from './upload.js'
  */
 
 /** @type {ReadonlyArray<ColumnSpec>} */

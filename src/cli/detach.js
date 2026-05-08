@@ -1,6 +1,10 @@
 import process from 'node:process'
 import { detach as defaultDetach, defaultSettingsPath } from '../claude-code/settings.js'
 
+/**
+ * @import { DetachParseResult, DetachHooks } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus detach
 
@@ -9,12 +13,6 @@ Removes the collectivus marker and ANTHROPIC_BASE_URL from
 
 Options:
   --help, -h        Show this help`
-
-/**
- * @typedef {object} DetachParseResult
- * @property {boolean} help
- * @property {string|null} error
- */
 
 /**
  * @param {string[]} argv
@@ -28,14 +26,6 @@ export function parseDetachArgs(argv) {
   }
   return { help: false, error: null }
 }
-
-/**
- * @typedef {object} DetachHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [settingsPath]
- * @property {typeof defaultDetach} [detach]
- */
 
 /**
  * Run `collectivus detach`.

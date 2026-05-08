@@ -9,17 +9,15 @@ import {
 } from './common.js'
 import { isLaunchAgentInstalled as defaultIsLaunchAgentInstalled, launchAgentStatus as defaultLaunchAgentStatus } from '../daemon/macos.js'
 
+/**
+ * @import { StatusParseResult, StatusHooks, CollectivusMarker, InstalledPlistFields } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus status
 
 Options:
   --help, -h        Show this help`
-
-/**
- * @typedef {object} StatusParseResult
- * @property {boolean} help
- * @property {string|null} error
- */
 
 /**
  * @param {string[]} argv
@@ -33,27 +31,6 @@ export function parseStatusArgs(argv) {
   }
   return { help: false, error: null }
 }
-
-/**
- * @typedef {object} CollectivusMarker
- * @property {string} [attached_at]
- * @property {string} [version]
- * @property {number} [port]
- */
-
-/**
- * @typedef {object} StatusHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [plistPath]
- * @property {string} [logDir]
- * @property {string} [settingsPath]
- * @property {typeof defaultLaunchAgentStatus} [launchAgentStatus]
- * @property {typeof defaultIsLaunchAgentInstalled} [isLaunchAgentInstalled]
- * @property {typeof defaultIsAttached} [isAttached]
- * @property {typeof defaultReadInstalledPlist} [readInstalledPlist]
- * @property {(p: string) => Promise<string|null>} [readSettingsRaw] - Override for raw read of settings.json (returns null on ENOENT).
- */
 
 /**
  * Run `collectivus status`.
@@ -117,7 +94,7 @@ export async function runStatus(argv, hooks = {}) {
     stdout.write(`  Status: ${formatAgentStatus(agentStatus)}\n`)
     stdout.write(`  Plist: ${plistPath}\n`)
 
-    /** @type {import('./common.js').InstalledPlistFields | null} */
+    /** @type {InstalledPlistFields | null} */
     let plistFields
     try {
       plistFields = readInstalledPlistFn(plistPath)

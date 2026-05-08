@@ -4,47 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * @typedef {object} CollectivusMarker
- * @property {string} attached_at - ISO-8601 timestamp written when attach() ran.
- * @property {string} version - Version of the collectivus install that wrote this marker.
- * @property {number} port - Loopback port the proxy was listening on at attach time.
- */
-
-/**
- * @typedef {object} AttachOptions
- * @property {number} port - TCP port (1..65535) the local proxy listens on.
- * @property {string} version - Non-empty version string recorded in the marker.
- * @property {string} [settingsPath] - Override the settings.json path (default: `~/.claude/settings.json`).
- */
-
-/**
- * @typedef {object} AttachResult
- * @property {true} changed - Always true; attach always (re)writes the marker.
- * @property {string} [prevValue] - Previous value of `env.ANTHROPIC_BASE_URL`, if any.
- */
-
-/**
- * @typedef {object} DetachOptions
- * @property {string} [settingsPath] - Override the settings.json path (default: `~/.claude/settings.json`).
- */
-
-/**
- * @typedef {object} DetachResult
- * @property {boolean} changed - True if the file was modified, false when no marker was present.
- * @property {string} [removed] - The `ANTHROPIC_BASE_URL` value that was removed when it matched the marker port.
- * @property {string} [warning] - Set when `ANTHROPIC_BASE_URL` was overridden externally and was left in place.
- */
-
-/**
- * @typedef {object} IsAttachedOptions
- * @property {string} [settingsPath] - Override the settings.json path (default: `~/.claude/settings.json`).
- */
-
-/**
- * @typedef {object} ReadResult
- * @property {Record<string, unknown>} value - Parsed object (mutable).
- * @property {boolean} existed - Whether the file was on disk.
- * @property {number | null} mtimeMs - mtime captured at read time (null when the file did not exist).
+ * @import { FileHandle } from 'node:fs/promises'
+ * @import { AttachOptions, AttachResult, DetachOptions, DetachResult, IsAttachedOptions, ReadSettingsResult } from '../types.js'
  */
 
 export class SettingsError extends Error {
@@ -173,7 +134,7 @@ export async function isAttached(opts = {}) {
  * other failure (malformed JSON, JSONC, non-object root, IO error).
  *
  * @param {string} settingsPath
- * @returns {Promise<ReadResult>}
+ * @returns {Promise<ReadSettingsResult>}
  */
 async function readSettings(settingsPath) {
   /** @type {string} */
@@ -259,7 +220,7 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
   const body = JSON.stringify(value, null, 2) + '\n'
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
 
-  /** @type {import('node:fs/promises').FileHandle | null} */
+  /** @type {FileHandle | null} */
   let handle = null
   try {
     handle = await fs.open(tmpPath, 'w', 0o600)

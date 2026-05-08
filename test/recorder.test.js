@@ -8,10 +8,8 @@ import { FileSink } from '../src/sinks/file.js'
 import { Proxy } from '../src/proxy.js'
 
 /**
- * @typedef {object} CollectingSink
- * @property {any[]} rows - Rows written so far. Typed loose so tests don't need casts.
- * @property {(obj: unknown) => Promise<void>} writeRow - Append a row.
- * @property {() => Promise<void>} close - No-op for tests.
+ * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
+ * @import { CollectingSink, MockUpstreamHandler } from './types.js'
  */
 
 /**
@@ -418,16 +416,16 @@ describe('isSseHeaders', () => {
 /**
  * Spawn a mock upstream that lets each test register a per-request handler.
  *
- * @returns {Promise<{ server: import('node:http').Server, baseUrl: string, setHandler: (h: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, body: string) => void) => void }>}
+ * @returns {Promise<{ server: Server, baseUrl: string, setHandler: (h: MockUpstreamHandler) => void }>}
  */
 function createMockUpstream() {
   return new Promise((resolve) => {
     /**
-     * @param {import('node:http').IncomingMessage} _req
-     * @param {import('node:http').ServerResponse} res
+     * @param {IncomingMessage} _req
+     * @param {ServerResponse} res
      */
     function defaultHandler(_req, res) { res.end() }
-    /** @type {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, body: string) => void} */
+    /** @type {MockUpstreamHandler} */
     let handler = defaultHandler
     const server = http.createServer((req, res) => {
       /** @type {Buffer[]} */

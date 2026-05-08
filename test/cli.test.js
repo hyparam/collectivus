@@ -6,10 +6,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs, run } from '../src/cli.js'
 
+/**
+ * @import { ChildProcessWithoutNullStreams } from 'node:child_process'
+ */
+
 const cliPath = fileURLToPath(new URL('../bin/cli.js', import.meta.url))
 
 /**
- * @param {import('node:child_process').ChildProcessWithoutNullStreams} child
+ * @param {ChildProcessWithoutNullStreams} child
  * @param {string} needle
  * @param {'stdout' | 'stderr'} [stream]
  * @returns {Promise<void>}

@@ -4,6 +4,10 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * @import { InstalledPlistFields } from '../types.js'
+ */
+
 export const LAUNCH_AGENT_LABEL = 'com.hyparam.collectivus'
 export const DEFAULT_PLIST_DIR_SEGMENTS = ['Library', 'LaunchAgents']
 
@@ -59,13 +63,6 @@ export function defaultLogDir(homeDir) {
 export function defaultPlistPath(homeDir) {
   return path.join(homeDir ?? os.homedir(), ...DEFAULT_PLIST_DIR_SEGMENTS, `${LAUNCH_AGENT_LABEL}.plist`)
 }
-
-/**
- * @typedef {object} InstalledPlistFields
- * @property {string|null} configPath - Path passed via `--config` in ProgramArguments.
- * @property {string|null} stdoutPath - Value of `StandardOutPath`.
- * @property {string|null} stderrPath - Value of `StandardErrorPath`.
- */
 
 /**
  * Read an installed LaunchAgent plist and extract the fields that the

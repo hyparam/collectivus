@@ -1,39 +1,7 @@
 import fs from 'node:fs'
 
 /**
- * @typedef {object} OtelConfig
- * @property {string} listen - host:port for the OTLP receiver (e.g. '0.0.0.0:4318').
- */
-
-/**
- * @typedef {object} UpstreamMatch
- * @property {string} path_prefix - Request path prefix that selects this upstream.
- */
-
-/**
- * @typedef {object} UpstreamConfig
- * @property {string} base_url - Origin to forward matched requests to.
- * @property {UpstreamMatch} match - Match rule for routing requests to this upstream.
- */
-
-/**
- * @typedef {object} ProxyConfig
- * @property {string} listen - host:port the proxy listens on.
- * @property {Object<string, UpstreamConfig>} upstreams - Named upstream targets.
- * @property {string[]} [redact_headers] - Header names to redact in recorded traffic.
- */
-
-/**
- * @typedef {object} FileSinkConfig
- * @property {'file'} type - Sink kind. Only 'file' is supported in v0.
- * @property {string} dir - Directory where recordings are written.
- */
-
-/**
- * @typedef {object} CollectivusConfig
- * @property {OtelConfig} [otel] - OTLP receiver. Omit to disable.
- * @property {ProxyConfig} [proxy] - Proxy listener. Omit to disable.
- * @property {FileSinkConfig} [sink] - Sink for proxy recordings. Required when `proxy` is set.
+ * @import { CollectivusConfig } from './types.js'
  */
 
 export class ConfigError extends Error {

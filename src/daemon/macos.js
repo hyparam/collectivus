@@ -4,6 +4,17 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+/**
+ * @import {
+ *   LaunchctlResult,
+ *   LaunchctlAdapter,
+ *   BuildPlistOptions,
+ *   MacosInstallOptions,
+ *   MacosUninstallOptions,
+ *   MacosStatusOptions,
+ * } from '../types.js'
+ */
+
 const DEFAULT_PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents')
 
 export class LaunchAgentError extends Error {
@@ -20,24 +31,6 @@ export class LaunchAgentError extends Error {
     this.stderr = opts.stderr
   }
 }
-
-/**
- * @typedef {object} LaunchctlResult
- * @property {number} exitCode - Exit code from the launchctl invocation.
- * @property {string} stdout - Captured standard output.
- * @property {string} stderr - Captured standard error.
- */
-
-/**
- * Adapter for invoking the `launchctl` binary. Concrete implementation uses
- * `child_process.spawn`; tests inject a fake to avoid touching the real
- * launchd domain.
- *
- * @typedef {object} LaunchctlAdapter
- * @property {(plistPath: string) => Promise<LaunchctlResult>} load - Run `launchctl load <path>`.
- * @property {(plistPath: string) => Promise<LaunchctlResult>} unload - Run `launchctl unload <path>`.
- * @property {(label: string) => Promise<LaunchctlResult>} list - Run `launchctl list <label>`.
- */
 
 /** @type {LaunchctlAdapter} */
 export const realLaunchctl = {
@@ -63,18 +56,6 @@ function runLaunchctl(args) {
     })
   })
 }
-
-/**
- * @typedef {object} BuildPlistOptions
- * @property {string} label - The Label key of the plist (e.g. 'com.hyparam.collectivus').
- * @property {string} nodePath - Path to the node executable to invoke.
- * @property {string} binPath - Absolute path to the script to run.
- * @property {string} configPath - Absolute path to the config file to pass via --config.
- * @property {string} logDir - Directory where stdout/stderr logs are written.
- * @property {Record<string, string>} [env] - Optional EnvironmentVariables. Omit the key when undefined.
- * @property {boolean} [keepAlive] - Whether to set KeepAlive=true. Defaults to true.
- * @property {boolean} [runAtLoad] - Whether to set RunAtLoad=true. Defaults to true.
- */
 
 /**
  * Build the XML body of a LaunchAgent plist.
@@ -161,27 +142,13 @@ function escapeXml(value) {
 }
 
 /**
- * @typedef {object} InstallOptions
- * @property {string} binPath - Path to the script to run under node.
- * @property {string} configPath - Path to the JSON config to pass via --config.
- * @property {string} label - LaunchAgent label (used as the plist filename).
- * @property {string} logDir - Directory for stdout/stderr logs.
- * @property {string} [nodePath] - Override node executable. Defaults to process.execPath.
- * @property {Record<string, string>} [env] - Optional EnvironmentVariables.
- * @property {boolean} [keepAlive] - Override KeepAlive. Defaults to true.
- * @property {boolean} [runAtLoad] - Override RunAtLoad. Defaults to true.
- * @property {string} [plistDir] - Override directory for the plist file. Defaults to ~/Library/LaunchAgents.
- * @property {LaunchctlAdapter} [launchctl] - Override launchctl adapter (used by tests).
- */
-
-/**
  * Install or refresh a LaunchAgent.
  *
  * Idempotent: if the agent is already loaded, it is unloaded before the new
  * plist is written and re-loaded. The plist is written atomically (tmp +
  * rename) so a crash mid-write leaves the previous file intact.
  *
- * @param {InstallOptions} options
+ * @param {MacosInstallOptions} options
  * @returns {Promise<void>}
  */
 export async function installLaunchAgent(options) {
@@ -227,20 +194,13 @@ export async function installLaunchAgent(options) {
 }
 
 /**
- * @typedef {object} UninstallOptions
- * @property {string} label - LaunchAgent label to remove.
- * @property {string} [plistDir] - Override directory for the plist file. Defaults to ~/Library/LaunchAgents.
- * @property {LaunchctlAdapter} [launchctl] - Override launchctl adapter (used by tests).
- */
-
-/**
  * Unload and remove a LaunchAgent.
  *
  * Tolerates already-unloaded state and a missing plist file. The unload step
  * is best-effort so that a stale plist file can always be cleaned up even when
  * launchctl reports the service was already gone.
  *
- * @param {UninstallOptions} options
+ * @param {MacosUninstallOptions} options
  * @returns {Promise<void>}
  */
 export async function uninstallLaunchAgent(options) {
@@ -258,13 +218,6 @@ export async function uninstallLaunchAgent(options) {
     }
   }
 }
-
-/**
- * @typedef {object} StatusOptions
- * @property {string} label - LaunchAgent label to query.
- * @property {string} [plistDir] - Unused; accepted for API symmetry.
- * @property {LaunchctlAdapter} [launchctl] - Override launchctl adapter (used by tests).
- */
 
 /**
  * Query whether the plist file for a label is installed on disk.
@@ -285,7 +238,7 @@ export function isLaunchAgentInstalled(options) {
  * a running process — short-lived agents that have already exited will be
  * reported as `{ loaded: true }` with no pid field.
  *
- * @param {StatusOptions} options
+ * @param {MacosStatusOptions} options
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function launchAgentStatus(options) {

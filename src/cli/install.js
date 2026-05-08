@@ -12,6 +12,10 @@ import {
 } from './common.js'
 import { installDaemon } from '../daemon/index.js'
 
+/**
+ * @import { InstallParseResult, InstallHooks, CollectivusConfig } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus install --config <path> [--yes|--no]
 
@@ -20,15 +24,6 @@ Options:
   --yes             Attach Claude Code without prompting
   --no              Skip the Claude Code attach step
   --help, -h        Show this help`
-
-/**
- * @typedef {object} InstallParseResult
- * @property {string|null} configPath - Resolved value of `--config`, or null when missing.
- * @property {boolean} yes - True if `--yes` was given.
- * @property {boolean} no - True if `--no` was given.
- * @property {boolean} help - True if `--help`/`-h` was given.
- * @property {string|null} error - Error message when parsing failed.
- */
 
 /**
  * Parse the argument list of `collectivus install`.
@@ -61,22 +56,6 @@ export function parseInstallArgs(argv) {
   }
   return { configPath, yes, no, help: false, error: null }
 }
-
-/**
- * @typedef {object} InstallHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [binPath] - Override for `process.argv[1]` in tests.
- * @property {string} [version] - Override for the version recorded in the marker.
- * @property {string} [logDir] - Override for `~/Library/Logs/Collectivus`.
- * @property {string} [plistDir] - Forwarded to installDaemon (`~/Library/LaunchAgents` override).
- * @property {string} [settingsPath] - Override for `~/.claude/settings.json`.
- * @property {boolean} [isTTY] - Force the TTY decision in tests.
- * @property {(question: string) => Promise<string>} [prompt] - Override the readline prompt.
- * @property {typeof installDaemon} [installLaunchAgent]
- * @property {typeof defaultAttach} [attach]
- * @property {typeof defaultLoadConfig} [loadConfig]
- */
 
 /**
  * Run `collectivus install`.
@@ -126,7 +105,7 @@ export async function runInstall(argv, hooks = {}) {
     return 1
   }
 
-  /** @type {import('../config.js').CollectivusConfig} */
+  /** @type {CollectivusConfig} */
   let config
   try {
     config = loadConfigFn(parsed.configPath)

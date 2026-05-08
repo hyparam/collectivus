@@ -6,6 +6,10 @@ import { ConfigError } from '../../src/config.js'
 import { parseInstallArgs, runInstall } from '../../src/cli/install.js'
 
 /**
+ * @import { InstallCall, AttachCall, InstallMocks } from '../types.js'
+ */
+
+/**
  * Minimal in-memory stream collector matching the existing CLI test helper.
  *
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -28,38 +32,13 @@ afterEach(function() {
 })
 
 /**
- * @typedef {object} InstallCall
- * @property {string} binPath
- * @property {string} configPath
- * @property {string} label
- * @property {string} logDir
- * @property {string} [plistDir]
- */
-
-/**
- * @typedef {object} AttachCall
- * @property {number} port
- * @property {string} version
- * @property {string} settingsPath
- */
-
-/**
- * @typedef {object} Mocks
- * @property {InstallCall[]} installCalls
- * @property {AttachCall[]} attachCalls
- * @property {(opts: any) => Promise<void>} installLaunchAgent
- * @property {(opts: any) => Promise<{ changed: true, prevValue?: string }>} attach
- * @property {(p: string) => any} loadConfig
- */
-
-/**
  * @param {{
  *   installError?: Error,
  *   attachError?: Error,
  *   attachResult?: { changed: true, prevValue?: string },
  *   loadConfigImpl?: (p: string) => any,
  * }} [opts]
- * @returns {Mocks}
+ * @returns {InstallMocks}
  */
 function makeMocks(opts = {}) {
   /** @type {InstallCall[]} */

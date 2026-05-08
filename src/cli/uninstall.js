@@ -3,19 +3,16 @@ import { detach as defaultDetach, isAttached as defaultIsAttached, defaultSettin
 import { LAUNCH_AGENT_LABEL, daemonKindLabel, defaultPrompt } from './common.js'
 import { uninstallDaemon } from '../daemon/index.js'
 
+/**
+ * @import { UninstallParseResult, UninstallHooks } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus uninstall [--detach]
 
 Options:
   --detach          Also revert Claude Code settings.json without prompting
   --help, -h        Show this help`
-
-/**
- * @typedef {object} UninstallParseResult
- * @property {boolean} detach - True if --detach was given.
- * @property {boolean} help - True if --help/-h was given.
- * @property {string|null} error - Error message when parsing failed.
- */
 
 /**
  * Parse the argument list of `collectivus uninstall`.
@@ -33,19 +30,6 @@ export function parseUninstallArgs(argv) {
   }
   return { detach, help: false, error: null }
 }
-
-/**
- * @typedef {object} UninstallHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [plistDir] - Forwarded to uninstallDaemon (`~/Library/LaunchAgents` override).
- * @property {string} [settingsPath] - Override for `~/.claude/settings.json`.
- * @property {boolean} [isTTY]
- * @property {(question: string) => Promise<string>} [prompt]
- * @property {typeof uninstallDaemon} [uninstallLaunchAgent]
- * @property {typeof defaultDetach} [detach]
- * @property {typeof defaultIsAttached} [isAttached]
- */
 
 /**
  * Run `collectivus uninstall`.

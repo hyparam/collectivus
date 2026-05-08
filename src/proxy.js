@@ -2,10 +2,11 @@ import http from 'node:http'
 import https from 'node:https'
 import { isSseHeaders } from './sse.js'
 
-/** @typedef {import('./config.js').ProxyConfig} ProxyConfig */
-/** @typedef {import('./config.js').UpstreamConfig} UpstreamConfig */
-/** @typedef {import('./recorder.js').Recorder} Recorder */
-/** @typedef {import('./recorder.js').Exchange} Exchange */
+/**
+ * @import { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
+ * @import { ProxyConfig, UpstreamConfig, CompiledUpstream, ClientInfo } from './types.js'
+ * @import { Recorder, Exchange } from './recorder.js'
+ */
 
 /**
  * Hop-by-hop headers per RFC 7230 §6.1. These are scoped to a single transport
@@ -21,13 +22,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ])
-
-/**
- * @typedef {object} CompiledUpstream
- * @property {string} name - Upstream key from config.
- * @property {URL} baseUrl - Parsed base URL.
- * @property {string} prefix - Path prefix used for routing.
- */
 
 /**
  * Reverse-proxy listener that forwards matched requests to a configured upstream.
@@ -54,7 +48,7 @@ export class Proxy {
     this.upstreams = compileUpstreams(config.upstreams)
     /** @type {Recorder | null} */
     this.recorder = options.recorder ?? null
-    /** @type {import('node:http').Server | null} */
+    /** @type {Server | null} */
     this.server = null
   }
 
@@ -170,8 +164,8 @@ function compileUpstreams(upstreams) {
 /**
  * @param {CompiledUpstream[]} upstreams
  * @param {Recorder | null} recorder
- * @param {import('node:http').IncomingMessage} req
- * @param {import('node:http').ServerResponse} res
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
  */
 function handleRequest(upstreams, recorder, req, res) {
   const requestUrl = req.url ?? '/'
@@ -288,8 +282,8 @@ function handleRequest(upstreams, recorder, req, res) {
  * Capture client metadata once at exchange start so it survives socket
  * teardown later in the lifecycle.
  *
- * @param {import('node:http').IncomingMessage} req
- * @returns {import('./recorder.js').ClientInfo}
+ * @param {IncomingMessage} req
+ * @returns {ClientInfo}
  */
 function clientInfo(req) {
   const remoteAddress = req.socket?.remoteAddress
@@ -334,12 +328,12 @@ function matchUpstream(upstreams, pathname) {
  * Build outbound headers from inbound headers. Strips hop-by-hop headers and
  * the inbound `Host`, then injects the upstream `Host`.
  *
- * @param {import('node:http').IncomingHttpHeaders} reqHeaders
+ * @param {IncomingHttpHeaders} reqHeaders
  * @param {string} upstreamHost
- * @returns {import('node:http').OutgoingHttpHeaders}
+ * @returns {OutgoingHttpHeaders}
  */
 function forwardHeaders(reqHeaders, upstreamHost) {
-  /** @type {import('node:http').OutgoingHttpHeaders} */
+  /** @type {OutgoingHttpHeaders} */
   const out = {}
   for (const key of Object.keys(reqHeaders)) {
     const lower = key.toLowerCase()
@@ -356,11 +350,11 @@ function forwardHeaders(reqHeaders, upstreamHost) {
 /**
  * Strip hop-by-hop headers from an upstream response before forwarding.
  *
- * @param {import('node:http').IncomingHttpHeaders} headers
- * @returns {import('node:http').OutgoingHttpHeaders}
+ * @param {IncomingHttpHeaders} headers
+ * @returns {OutgoingHttpHeaders}
  */
 function sanitizeResponseHeaders(headers) {
-  /** @type {import('node:http').OutgoingHttpHeaders} */
+  /** @type {OutgoingHttpHeaders} */
   const out = {}
   for (const key of Object.keys(headers)) {
     if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) continue
@@ -372,7 +366,7 @@ function sanitizeResponseHeaders(headers) {
 }
 
 /**
- * @param {import('node:http').ServerResponse} res
+ * @param {ServerResponse} res
  * @param {number} status
  * @param {object} body
  */

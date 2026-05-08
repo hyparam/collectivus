@@ -4,20 +4,8 @@ import { Proxy } from '../src/proxy.js'
 import { Recorder } from '../src/recorder.js'
 
 /**
- * @typedef {object} CapturedRequest
- * @property {string | undefined} method
- * @property {string | undefined} url
- * @property {Record<string, string | string[] | undefined>} headers
- * @property {string} body
- */
-
-/**
- * @typedef {object} MockUpstream
- * @property {import('node:http').Server} server
- * @property {string} baseUrl
- * @property {number} port
- * @property {CapturedRequest[]} requests
- * @property {(handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, body: string) => void) => void} setHandler
+ * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
+ * @import { CapturedRequest, MockUpstream, MockUpstreamHandler, FetchTextResult } from './types.js'
  */
 
 /**
@@ -32,14 +20,14 @@ function createMockUpstream() {
     /** @type {CapturedRequest[]} */
     const requests = []
     /**
-     * @param {import('node:http').IncomingMessage} _req
-     * @param {import('node:http').ServerResponse} res
+     * @param {IncomingMessage} _req
+     * @param {ServerResponse} res
      */
     function defaultHandler(_req, res) {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end('{"ok":true}')
     }
-    /** @type {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, body: string) => void} */
+    /** @type {MockUpstreamHandler} */
     let handler = defaultHandler
     const server = http.createServer((req, res) => {
       /** @type {Buffer[]} */
@@ -71,7 +59,7 @@ function createMockUpstream() {
 }
 
 /**
- * @param {import('node:http').Server} server
+ * @param {Server} server
  * @returns {Promise<void>}
  */
 function closeServer(server) {
@@ -645,7 +633,7 @@ async function waitForRows(sink, count, predicate) {
  *
  * @param {string} origin - e.g. http://127.0.0.1:8787
  * @param {{ method: string, path: string, headers: Record<string, string>, body?: string }} opts
- * @returns {Promise<{ status: number, headers: import('node:http').IncomingHttpHeaders, body: string }>}
+ * @returns {Promise<FetchTextResult>}
  */
 function rawRequest(origin, opts) {
   const url = new URL(opts.path, origin)

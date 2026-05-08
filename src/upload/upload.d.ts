@@ -66,3 +66,34 @@ export interface UploadDeps {
   /** Sleep override — tests pass `() => Promise.resolve()` to skip the wait. */
   sleep?: (ms: number) => Promise<void>
 }
+
+import type { BasicType } from 'hyparquet-writer'
+
+export interface ColumnSpec {
+  name: string
+  type: BasicType
+  nullable: boolean
+}
+
+export interface S3ConnectorOptions {
+  bucket: string
+  region: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+  /** Override base URL for S3-compatible servers (MinIO, etc.) */
+  endpoint?: string
+}
+
+export interface S3RequestOptions {
+  bucket: string
+  region: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+  endpoint?: string
+  method: 'PUT' | 'HEAD' | 'GET'
+  key: string
+  body?: Uint8Array
+  contentType?: string
+}

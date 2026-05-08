@@ -6,6 +6,10 @@ import { ConfigError } from '../../src/config.js'
 import { parseAttachArgs, runAttach } from '../../src/cli/attach.js'
 
 /**
+ * @import { AttachOptions } from '../../src/types.js'
+ */
+
+/**
  * @returns {{ write: (s: string) => void, value: () => string }}
  */
 function memo() {
@@ -103,7 +107,7 @@ describe('runAttach', function() {
     const stdout = memo()
     const stderr = memo()
     const cfg = { proxy: { listen: '0.0.0.0:8765', upstreams: {} } }
-    /** @type {Array<import('../../src/claude-code/settings.js').AttachOptions>} */
+    /** @type {Array<AttachOptions>} */
     const calls = []
     const code = await runAttach(['--config', '/tmp/x'], {
       stdout, stderr,

@@ -3,6 +3,10 @@ import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
 
+/**
+ * @import { AttachParseResult, AttachHooks, CollectivusConfig } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus attach (--config <path> | --port <n>)
 
@@ -13,14 +17,6 @@ Options:
 
 Edits ~/.claude/settings.json to point Claude Code at the local proxy.
 Exactly one of --config or --port is required.`
-
-/**
- * @typedef {object} AttachParseResult
- * @property {string|null} configPath - Resolved value of `--config`, or null when missing.
- * @property {number|null} port - Resolved value of `--port`, or null when missing.
- * @property {boolean} help
- * @property {string|null} error
- */
 
 /**
  * Parse the argument list of `collectivus attach`.
@@ -63,16 +59,6 @@ export function parseAttachArgs(argv) {
 }
 
 /**
- * @typedef {object} AttachHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [version]
- * @property {string} [settingsPath]
- * @property {typeof defaultAttach} [attach]
- * @property {typeof defaultLoadConfig} [loadConfig]
- */
-
-/**
  * Run `collectivus attach`.
  *
  * Resolves the proxy port from `--port` or `proxy.listen` in the supplied
@@ -104,7 +90,7 @@ export async function runAttach(argv, hooks = {}) {
   if (parsed.port !== null) {
     port = parsed.port
   } else if (parsed.configPath !== null) {
-    /** @type {import('../config.js').CollectivusConfig} */
+    /** @type {CollectivusConfig} */
     let config
     try {
       config = loadConfigFn(parsed.configPath)

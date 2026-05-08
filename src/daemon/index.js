@@ -2,6 +2,10 @@ import process from 'node:process'
 import * as linux from './linux.js'
 import * as macos from './macos.js'
 
+/**
+ * @import { DaemonInstallOptions, DaemonUninstallOptions } from '../types.js'
+ */
+
 export class DaemonError extends Error {
   /**
    * @param {string} message
@@ -13,17 +17,12 @@ export class DaemonError extends Error {
 }
 
 /**
- * @typedef {import('./macos.js').InstallOptions & import('./linux.js').InstallOptions} InstallOptions
- * @typedef {import('./macos.js').UninstallOptions & import('./linux.js').UninstallOptions} UninstallOptions
- */
-
-/**
  * Install the platform-appropriate daemon to keep the collectivus process
  * running across reboots. Dispatches to a LaunchAgent on macOS and a systemd
  * user unit on Linux; throws a clear error on other platforms so the CLI can
  * surface it.
  *
- * @param {InstallOptions} options
+ * @param {DaemonInstallOptions} options
  * @returns {Promise<void>}
  */
 export async function installDaemon(options) {
@@ -41,7 +40,7 @@ export async function installDaemon(options) {
 /**
  * Inverse of `installDaemon`. Same platform dispatch.
  *
- * @param {UninstallOptions} options
+ * @param {DaemonUninstallOptions} options
  * @returns {Promise<void>}
  */
 export async function uninstallDaemon(options) {

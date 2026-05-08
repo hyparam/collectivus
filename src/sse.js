@@ -5,9 +5,7 @@
  */
 
 /**
- * @typedef {object} SseEvent
- * @property {string} event - Event type (defaults to 'message' when no `event:` field is present).
- * @property {string} data - Event data; multiple `data:` lines are joined with `\n`.
+ * @import { SseEvent } from './types.js'
  */
 
 /**

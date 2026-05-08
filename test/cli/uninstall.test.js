@@ -5,6 +5,10 @@ import path from 'node:path'
 import { parseUninstallArgs, runUninstall } from '../../src/cli/uninstall.js'
 
 /**
+ * @import { UninstallCall, DetachCall, UninstallMocks } from '../types.js'
+ */
+
+/**
  * @returns {{ write: (s: string) => void, value: () => string }}
  */
 function memo() {
@@ -25,26 +29,6 @@ afterEach(function() {
 })
 
 /**
- * @typedef {object} UninstallCall
- * @property {string} label
- * @property {string} [plistDir]
- */
-
-/**
- * @typedef {object} DetachCall
- * @property {string} settingsPath
- */
-
-/**
- * @typedef {object} Mocks
- * @property {UninstallCall[]} uninstallCalls
- * @property {DetachCall[]} detachCalls
- * @property {(opts: any) => Promise<void>} uninstallLaunchAgent
- * @property {(opts: any) => Promise<{ changed: boolean, removed?: string, warning?: string }>} detach
- * @property {(opts: any) => Promise<boolean>} isAttached
- */
-
-/**
  * @param {{
  *   uninstallError?: Error,
  *   detachError?: Error,
@@ -52,7 +36,7 @@ afterEach(function() {
  *   isAttachedResult?: boolean,
  *   isAttachedError?: Error,
  * }} [opts]
- * @returns {Mocks}
+ * @returns {UninstallMocks}
  */
 function makeMocks(opts = {}) {
   /** @type {UninstallCall[]} */

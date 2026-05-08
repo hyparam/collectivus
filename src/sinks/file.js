@@ -2,9 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 
 /**
- * @typedef {object} Sink
- * @property {(obj: unknown) => Promise<void>} writeRow - Append a row to the sink.
- * @property {() => Promise<void>} close - Flush, fsync, and release resources.
+ * @import { FileHandle } from 'node:fs/promises'
  */
 
 /**
@@ -20,7 +18,7 @@ export class FileSink {
     this.dir = dir
     /** @type {string} */
     this.filePath = path.join(dir, 'proxy.jsonl')
-    /** @type {import('node:fs/promises').FileHandle | null} */
+    /** @type {FileHandle | null} */
     this.fh = null
     /** @type {Promise<void>} */
     this.queue = Promise.resolve()

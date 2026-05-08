@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { parseUninstallArgs, runUninstall } from './uninstall.js'
+import { parseUninstallArgs, runUninstall } from '../../src/cli/uninstall.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}

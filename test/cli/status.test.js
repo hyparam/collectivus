@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { SettingsError } from '../claude-code/settings.js'
-import { parseStatusArgs, runStatus } from './status.js'
+import { SettingsError } from '../../src/claude-code/settings.js'
+import { parseStatusArgs, runStatus } from '../../src/cli/status.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}

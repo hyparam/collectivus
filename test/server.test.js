@@ -41,18 +41,6 @@ function readLines(signal) {
 
 /**
  * @param {string} serviceName
- * @returns {unknown[]}
- */
-function readNormalizedLogLines(serviceName) {
-  const file = path.join(outputDir, 'logs-by-service', serviceName, `${new Date().toISOString().slice(0, 10)}.jsonl`)
-  if (!fs.existsSync(file)) return []
-  const text = fs.readFileSync(file, 'utf8').trim()
-  if (!text) return []
-  return text.split('\n').map((line) => JSON.parse(line))
-}
-
-/**
- * @param {string} serviceName
  * @param {string} signal
  * @returns {unknown[]}
  */
@@ -396,28 +384,6 @@ describe('OTLP endpoints', () => {
         attributes: { k: 'v2' },
       }),
     ])
-    expect(readNormalizedLogLines('svc-a')).toEqual([
-      expect.objectContaining({
-        serviceName: 'svc-a',
-        timestamp: '2026-04-22T19:38:39.688Z',
-        severityNumber: 9,
-        severityText: 'INFO',
-        body: 'hello 1',
-        resource: { 'service.name': 'svc-a' },
-        scope: { name: 'test.scope', version: '1.2.3', attributes: {} },
-        attributes: { k: 'v1' },
-      }),
-      expect.objectContaining({
-        serviceName: 'svc-a',
-        timestamp: '2026-04-22T19:38:39.689Z',
-        severityNumber: 13,
-        severityText: 'WARN',
-        body: 'hello 2',
-        resource: { 'service.name': 'svc-a' },
-        scope: { name: 'test.scope', version: '1.2.3', attributes: {} },
-        attributes: { k: 'v2' },
-      }),
-    ])
   })
 
   it('uses _unknown when service.name is missing', async () => {
@@ -443,12 +409,6 @@ describe('OTLP endpoints', () => {
     })
     expect(res.status).toBe(200)
     expect(readServiceLines('_unknown', 'logs')).toEqual([
-      expect.objectContaining({
-        serviceName: '_unknown',
-        body: 'missing service name',
-      }),
-    ])
-    expect(readNormalizedLogLines('_unknown')).toEqual([
       expect.objectContaining({
         serviceName: '_unknown',
         body: 'missing service name',
@@ -486,17 +446,17 @@ describe('OTLP endpoints', () => {
       body: JSON.stringify(payload),
     })
     expect(res.status).toBe(200)
-    expect(readNormalizedLogLines('svc-a')).toEqual([
+    expect(readServiceLines('svc-a', 'logs')).toEqual([
       expect.not.objectContaining({
         timestamp: expect.anything(),
       }),
     ])
-    expect(readNormalizedLogLines('svc-a')).toEqual([
+    expect(readServiceLines('svc-a', 'logs')).toEqual([
       expect.not.objectContaining({
         observedTimestamp: expect.anything(),
       }),
     ])
-    expect(readNormalizedLogLines('svc-a')).toEqual([
+    expect(readServiceLines('svc-a', 'logs')).toEqual([
       expect.objectContaining({
         serviceName: 'svc-a',
         body: 'bad timestamps',
@@ -535,7 +495,7 @@ describe('OTLP endpoints', () => {
       body: JSON.stringify(payload),
     })
     expect(res.status).toBe(200)
-    expect(readNormalizedLogLines('svc-a')).toEqual([
+    expect(readServiceLines('svc-a', 'logs')).toEqual([
       expect.objectContaining({
         serviceName: 'svc-a',
         body: '',
@@ -573,12 +533,6 @@ describe('OTLP endpoints', () => {
     })
     expect(res.status).toBe(200)
     expect(readServiceLines('_dotdot', 'logs')).toEqual([
-      expect.objectContaining({
-        serviceName: '..',
-        body: 'dot segment service',
-      }),
-    ])
-    expect(readNormalizedLogLines('_dotdot')).toEqual([
       expect.objectContaining({
         serviceName: '..',
         body: 'dot segment service',
@@ -636,22 +590,6 @@ describe('OTLP endpoints', () => {
       }),
     ])
     expect(readServiceLines('svc-pb', 'logs')).toEqual([
-      expect.objectContaining({
-        serviceName: 'svc-pb',
-        timestamp: '2026-04-22T19:38:39.688Z',
-        observedTimestamp: '2026-04-22T19:38:39.689Z',
-        severityNumber: 9,
-        severityText: 'INFO',
-        body: 'protobuf hello',
-        traceId: '00112233445566778899aabbccddeeff',
-        spanId: '1122334455667788',
-        flags: 1,
-        resource: { 'service.name': 'svc-pb', 'service.version': '0.1.0' },
-        scope: { name: 'gascity', version: '1.2.3', attributes: {} },
-        attributes: { 'gc.agent': 'mayor' },
-      }),
-    ])
-    expect(readNormalizedLogLines('svc-pb')).toEqual([
       expect.objectContaining({
         serviceName: 'svc-pb',
         timestamp: '2026-04-22T19:38:39.688Z',

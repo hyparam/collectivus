@@ -12,15 +12,7 @@ const MAX_TIMEOUT = 2147483647 // ~24.8 days; setTimeout caps at int32 ms
 const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000
 
 /**
- * @typedef {object} TickResult
- * @property {boolean} [retry] schedule a fast retry instead of waiting until the next daily fire
- */
-
-/**
- * @typedef {object} SchedulerDeps
- * @property {() => Date} [now] for tests
- * @property {(handler: () => void, ms: number) => NodeJS.Timeout | number} [setTimeoutFn]
- * @property {(handle: NodeJS.Timeout | number) => void} [clearTimeoutFn]
+ * @import { TickResult, SchedulerDeps } from '../types.js'
  */
 
 /**
@@ -41,8 +33,8 @@ export function createScheduler(options, deps = {}) {
 
   const [hh, mm] = parseTime(options.time)
 
-  /** @type {NodeJS.Timeout | number | null} */
-  let handle = null
+  /** @type {NodeJS.Timeout | number | undefined} */
+  let handle
   let stopped = false
   let lastRetry = false
   /** @type {Promise<void>} */
@@ -70,7 +62,7 @@ export function createScheduler(options, deps = {}) {
     if (lastRetry && retryDelayMs < delay) delay = retryDelayMs
     const capped = Math.min(delay, MAX_TIMEOUT)
     handle = setT(() => {
-      handle = null
+      handle = undefined
       if (stopped) return
       // If we capped the delay, just re-schedule without firing the tick.
       if (capped < delay) {
@@ -90,9 +82,9 @@ export function createScheduler(options, deps = {}) {
     },
     async stop() {
       stopped = true
-      if (handle !== null) {
+      if (handle !== undefined) {
         clearT(handle)
-        handle = null
+        handle = undefined
       }
       await chain
     },

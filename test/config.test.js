@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ConfigError, loadConfig, resolveOptions } from '../src/config.js'
+import { ConfigError, loadConfig } from '../src/config.js'
 
 /** @type {string} */
 let tmpDir
@@ -202,95 +202,5 @@ describe('loadConfig - valid configs', () => {
   it('accepts an empty config object (every section is optional)', () => {
     const p = writeJson('empty.json', {})
     expect(loadConfig(p)).toEqual({})
-  })
-})
-
-describe('resolveOptions', () => {
-  it('returns empty options when nothing is set', () => {
-    expect(resolveOptions([], {})).toEqual({})
-  })
-
-  it('reads COLLECTIVUS_PORT and COLLECTIVUS_OUTPUT_DIR from env', () => {
-    const opts = resolveOptions([], {
-      COLLECTIVUS_PORT: '8080',
-      COLLECTIVUS_OUTPUT_DIR: '/tmp/otel',
-    })
-    expect(opts).toEqual({ port: 8080, outputDir: '/tmp/otel' })
-  })
-
-  it('ignores non-numeric COLLECTIVUS_PORT', () => {
-    expect(resolveOptions([], { COLLECTIVUS_PORT: 'not-a-port' })).toEqual({})
-  })
-
-  it('gives argv precedence over env', () => {
-    const opts = resolveOptions(
-      ['--port', '9000', '--output', '/tmp/override'],
-      { COLLECTIVUS_PORT: '8080', COLLECTIVUS_OUTPUT_DIR: '/tmp/env' }
-    )
-    expect(opts).toEqual({ port: 9000, outputDir: '/tmp/override' })
-  })
-
-  it('supports --port=N and --output=DIR equals syntax', () => {
-    expect(resolveOptions(['--port=9000', '--output=/tmp/x'], {})).toEqual({
-      port: 9000,
-      outputDir: '/tmp/x',
-    })
-  })
-
-  it('leaves keys unset when only one of port/outputDir is provided', () => {
-    expect(resolveOptions([], { COLLECTIVUS_PORT: '9001' })).toEqual({ port: 9001 })
-    expect(resolveOptions(['--output', '/tmp/only'], {})).toEqual({ outputDir: '/tmp/only' })
-  })
-
-  it('ignores non-numeric --port=VALUE', () => {
-    expect(resolveOptions(['--port=abc'], {})).toEqual({})
-  })
-
-  it('ignores non-numeric --port VALUE (space form)', () => {
-    expect(resolveOptions(['--port', 'abc'], {})).toEqual({})
-  })
-
-  it('ignores empty --port value after =', () => {
-    expect(resolveOptions(['--port='], {})).toEqual({})
-  })
-
-  it('ignores empty --port \'\' space form', () => {
-    expect(resolveOptions(['--port', ''], {})).toEqual({})
-  })
-
-  it('preserves = characters in --output=VALUE', () => {
-    expect(resolveOptions(['--output=/tmp/a=b'], {})).toEqual({
-      outputDir: '/tmp/a=b',
-    })
-  })
-
-  it('still parses --port=4319 correctly', () => {
-    expect(resolveOptions(['--port=4319'], {})).toEqual({ port: 4319 })
-  })
-
-  it('still parses --output /tmp/x space form', () => {
-    expect(resolveOptions(['--output', '/tmp/x'], {})).toEqual({
-      outputDir: '/tmp/x',
-    })
-  })
-
-  it('throws on unrecognized upload signals to fail loudly on typos', () => {
-    expect(() => resolveOptions([], {
-      COLLECTIVUS_UPLOAD_BUCKET: 'b',
-      COLLECTIVUS_UPLOAD_SIGNALS: 'Logs',
-    })).toThrow(/invalid upload signal "Logs"/)
-    expect(() => resolveOptions(['--upload-signals=loggs'], {})).toThrow(/invalid upload signal "loggs"/)
-  })
-
-  it('throws when upload signals list resolves to empty', () => {
-    expect(() => resolveOptions(['--upload-signals='], {})).toThrow(/upload signals list is empty/)
-    expect(() => resolveOptions(['--upload-signals', ', ,'], {})).toThrow(/upload signals list is empty/)
-  })
-
-  it('parses a valid comma-separated upload-signals list', () => {
-    const opts = resolveOptions(['--upload-signals=logs,traces'], {
-      COLLECTIVUS_UPLOAD_BUCKET: 'b',
-    })
-    expect(opts.upload?.signals).toEqual(['logs', 'traces'])
   })
 })

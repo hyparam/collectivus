@@ -3,56 +3,16 @@ import path from 'node:path'
 import { createServer } from './server.js'
 
 /**
- * @typedef {{
- *   serviceName: string,
- *   timestamp?: string,
- *   observedTimestamp?: string,
- *   severityNumber?: number,
- *   severityText?: string,
- *   body: unknown,
- *   traceId?: string,
- *   spanId?: string,
- *   flags?: number,
- *   droppedAttributesCount?: number,
- *   resource: Record<string, unknown>,
- *   scope: {
- *     name?: string,
- *     version?: string,
- *     attributes: Record<string, unknown>,
- *   },
- *   attributes: Record<string, unknown>,
- * }} NormalizedLogRow
- */
-
-/**
- * @typedef {Record<string, unknown> & { serviceName: string }} NormalizedServiceRow
- */
-
-/**
- * @typedef {{
- *   serviceName: string,
- *   metricName?: string,
- *   description?: string,
- *   unit?: string,
- *   resource: Record<string, unknown>,
- *   scope: {
- *     name?: string,
- *     version?: string,
- *     attributes: Record<string, unknown>,
- *   },
- *   metadata: Record<string, unknown>,
- * }} MetricRowBase
+ * @import { Server } from 'node:http'
+ * @import { NormalizedLogRow, NormalizedServiceRow, MetricRowBase } from './types.js'
+ * @import { UploadOptions } from './upload/upload.js'
  */
 
 const OTLP_NS_PER_MS = 1000000n
 const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
 
-/**
- * @import { UploadOptions } from './upload/upload.d.ts'
- */
-
-class Collector {
+export class Collector {
   /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
   constructor(options = {}) {
     this.port = options.port ?? 4318
@@ -60,10 +20,10 @@ class Collector {
     this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
     this.uploadOptions = options.upload
-    /** @type {import('node:http').Server | null} */
-    this.server = null
-    /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | null} */
-    this.uploader = null
+    /** @type {Server | undefined} */
+    this.server = undefined
+    /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | undefined} */
+    this.uploader = undefined
   }
 
   async start() {
@@ -104,7 +64,7 @@ class Collector {
   async stop() {
     if (this.uploader) {
       await this.uploader.stop()
-      this.uploader = null
+      this.uploader = undefined
     }
     await new Promise((resolve, reject) => {
       const { server } = this
@@ -125,8 +85,6 @@ class Collector {
     writeNormalizedServiceRows(this.outputDir, signal, data)
   }
 }
-
-export { Collector }
 
 /**
  * @returns {string}
@@ -163,9 +121,6 @@ function writeNormalizedServiceRows(outputDir, signal, data) {
   for (const row of rows) {
     const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
     appendServiceRow(path.join(outputDir, 'services', serviceName), signal, row)
-    if (signal === 'logs') {
-      appendLegacyNormalizedLogRow(outputDir, serviceName, row)
-    }
   }
 }
 
@@ -178,21 +133,6 @@ function writeNormalizedServiceRows(outputDir, signal, data) {
 function appendServiceRow(serviceDir, signal, row) {
   ensureDir(serviceDir)
   const filePath = path.join(serviceDir, `${signal}-${todayUtc()}.jsonl`)
-  fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
-}
-
-/**
- * Preserve the legacy logs-by-service tree for compatibility.
- *
- * @param {string} outputDir
- * @param {string} serviceName
- * @param {NormalizedServiceRow} row
- * @returns {void}
- */
-function appendLegacyNormalizedLogRow(outputDir, serviceName, row) {
-  const serviceDir = path.join(outputDir, 'logs-by-service', serviceName)
-  ensureDir(serviceDir)
-  const filePath = path.join(serviceDir, `${todayUtc()}.jsonl`)
   fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
 }
 

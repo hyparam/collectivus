@@ -4,6 +4,17 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
+/**
+ * @import {
+ *   SystemctlResult,
+ *   SystemctlAdapter,
+ *   BuildUnitOptions,
+ *   LinuxInstallOptions,
+ *   LinuxUninstallOptions,
+ *   LinuxStatusOptions,
+ * } from '../types.js'
+ */
+
 const DEFAULT_UNIT_DIR = path.join(os.homedir(), '.config', 'systemd', 'user')
 
 export class SystemdUnitError extends Error {
@@ -20,27 +31,6 @@ export class SystemdUnitError extends Error {
     this.stderr = opts.stderr
   }
 }
-
-/**
- * @typedef {object} SystemctlResult
- * @property {number} exitCode - Exit code from the systemctl invocation.
- * @property {string} stdout - Captured standard output.
- * @property {string} stderr - Captured standard error.
- */
-
-/**
- * Adapter for invoking the `systemctl --user` binary. Concrete implementation
- * uses `child_process.spawn`; tests inject a fake to avoid touching the real
- * user manager.
- *
- * @typedef {object} SystemctlAdapter
- * @property {() => Promise<SystemctlResult>} daemonReload - Run `systemctl --user daemon-reload`.
- * @property {(unit: string) => Promise<SystemctlResult>} enable - Run `systemctl --user enable <unit>`.
- * @property {(unit: string) => Promise<SystemctlResult>} disable - Run `systemctl --user disable <unit>`.
- * @property {(unit: string) => Promise<SystemctlResult>} restart - Run `systemctl --user restart <unit>`.
- * @property {(unit: string) => Promise<SystemctlResult>} stop - Run `systemctl --user stop <unit>`.
- * @property {(unit: string) => Promise<SystemctlResult>} show - Run `systemctl --user show <unit> -p LoadState,ActiveState,MainPID`.
- */
 
 /** @type {SystemctlAdapter} */
 export const realSystemctl = {
@@ -71,17 +61,6 @@ function runSystemctl(args) {
     })
   })
 }
-
-/**
- * @typedef {object} BuildUnitOptions
- * @property {string} description - [Unit] Description= value.
- * @property {string} nodePath - Path to the node executable to invoke.
- * @property {string} binPath - Absolute path to the script to run.
- * @property {string} configPath - Absolute path to the config file passed via --config.
- * @property {string} logDir - Directory for stdout/stderr log files.
- * @property {Record<string, string>} [env] - Optional Environment= entries.
- * @property {boolean} [restart] - Whether to set Restart=always. Defaults to true.
- */
 
 /**
  * Build the body of a systemd .service unit file.
@@ -177,20 +156,6 @@ function escapeQuoted(value) {
 }
 
 /**
- * @typedef {object} InstallOptions
- * @property {string} label - Service name; the unit file is `<label>.service`.
- * @property {string} binPath - Path to the script to run under node.
- * @property {string} configPath - Path to the JSON config to pass via --config.
- * @property {string} logDir - Directory for stdout/stderr logs.
- * @property {string} [description] - Human-readable description for [Unit] Description=. Defaults to `Collectivus daemon (<label>)`.
- * @property {string} [nodePath] - Override node executable. Defaults to process.execPath.
- * @property {Record<string, string>} [env] - Optional Environment= entries.
- * @property {boolean} [restart] - Override Restart. Defaults to true.
- * @property {string} [unitDir] - Override directory for the unit file. Defaults to ~/.config/systemd/user.
- * @property {SystemctlAdapter} [systemctl] - Override systemctl adapter (used by tests).
- */
-
-/**
  * Install or refresh a systemd user unit.
  *
  * Writes the unit file atomically (tmp + rename), runs `daemon-reload` so
@@ -199,7 +164,7 @@ function escapeQuoted(value) {
  * re-running with unchanged inputs leaves the same file on disk and bounces
  * the service.
  *
- * @param {InstallOptions} options
+ * @param {LinuxInstallOptions} options
  * @returns {Promise<void>}
  */
 export async function installSystemdUnit(options) {
@@ -251,13 +216,6 @@ export async function installSystemdUnit(options) {
 }
 
 /**
- * @typedef {object} UninstallOptions
- * @property {string} label - Service name to remove.
- * @property {string} [unitDir] - Override directory for the unit file. Defaults to ~/.config/systemd/user.
- * @property {SystemctlAdapter} [systemctl] - Override systemctl adapter (used by tests).
- */
-
-/**
  * Stop, disable, and remove a systemd user unit.
  *
  * Tolerates already-stopped / already-disabled state and a missing unit file.
@@ -266,7 +224,7 @@ export async function installSystemdUnit(options) {
  * removing the file we run a final `daemon-reload` to drop systemd's cached
  * registration.
  *
- * @param {UninstallOptions} options
+ * @param {LinuxUninstallOptions} options
  * @returns {Promise<void>}
  */
 export async function uninstallSystemdUnit(options) {
@@ -283,19 +241,12 @@ export async function uninstallSystemdUnit(options) {
   try {
     fs.unlinkSync(unitPath)
   } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? err.code : null
+    const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined
     if (code !== 'ENOENT') throw err
   }
 
   await systemctl.daemonReload() // best-effort; clears cached registration
 }
-
-/**
- * @typedef {object} StatusOptions
- * @property {string} label - Service name to query.
- * @property {string} [unitDir] - Used when probing existence on disk.
- * @property {SystemctlAdapter} [systemctl] - Override systemctl adapter (used by tests).
- */
 
 /**
  * Query whether the unit file for a label is installed on disk.
@@ -317,7 +268,7 @@ export function isSystemdUnitInstalled(options) {
  * MainPID is a positive integer — units that are loaded but not currently
  * running report `MainPID=0` and surface as `{ loaded: true }` with no pid.
  *
- * @param {StatusOptions} options
+ * @param {LinuxStatusOptions} options
  * @returns {Promise<{ loaded: boolean, pid?: number }>}
  */
 export async function systemdUnitStatus(options) {

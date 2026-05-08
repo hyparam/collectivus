@@ -1,6 +1,10 @@
 import process from 'node:process'
 import { detach as defaultDetach, defaultSettingsPath } from '../claude-code/settings.js'
 
+/**
+ * @import { DetachParseResult, DetachHooks } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus detach
 
@@ -11,31 +15,17 @@ Options:
   --help, -h        Show this help`
 
 /**
- * @typedef {object} DetachParseResult
- * @property {boolean} help
- * @property {string|null} error
- */
-
-/**
  * @param {string[]} argv
  * @returns {DetachParseResult}
  */
 export function parseDetachArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { help: true, error: null }
+    if (arg === '--help' || arg === '-h') return { help: true }
     return { help: false, error: `unknown argument: ${arg}` }
   }
-  return { help: false, error: null }
+  return { help: false }
 }
-
-/**
- * @typedef {object} DetachHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [settingsPath]
- * @property {typeof defaultDetach} [detach]
- */
 
 /**
  * Run `collectivus detach`.

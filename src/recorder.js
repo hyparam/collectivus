@@ -1,7 +1,9 @@
 import { randomBytes } from 'node:crypto'
 import { SseParser, isSseHeaders } from './sse.js'
 
-/** @typedef {import('./sinks/file.js').Sink} Sink */
+/**
+ * @import { Sink, ClientInfo, ExchangeResponse } from './types.js'
+ */
 
 export { isSseHeaders }
 
@@ -17,27 +19,6 @@ const DEFAULT_REDACT_HEADERS = [
   'cookie',
   'set-cookie',
 ]
-
-/**
- * @typedef {object} ClientInfo
- * @property {string | undefined} ip - Client remote address as observed by the proxy.
- * @property {string | undefined} user_agent - Client User-Agent header value.
- */
-
-/**
- * @typedef {object} ExchangeRequest
- * @property {string | undefined} method - HTTP method (e.g. 'POST').
- * @property {string | undefined} path - Path + query as received.
- * @property {Record<string, string | string[] | undefined>} headers - Headers post-redaction.
- * @property {string} body - Request body as received (utf-8). Empty string for requests with no body.
- */
-
-/**
- * @typedef {object} ExchangeResponse
- * @property {number | undefined} status - HTTP status from upstream.
- * @property {Record<string, string | string[] | undefined>} headers - Response headers post-redaction.
- * @property {string | null} body - Response body for non-streaming responses; `null` for SSE (events recorded separately).
- */
 
 /**
  * Recorder factory. Holds the redact configuration and the sink used to
@@ -105,12 +86,12 @@ export class Exchange {
     this.requestMethod = init.request.method
     /** @type {string | undefined} */
     this.requestPath = init.request.path
-    /** @type {ExchangeResponse | null} */
-    this.response = null
+    /** @type {ExchangeResponse | undefined} */
+    this.response = undefined
     /** @type {number} */
     this.streamEventCount = 0
-    /** @type {string | null} */
-    this.error = null
+    /** @type {string | undefined} */
+    this.error = undefined
     /** @type {boolean} */
     this.finished = false
     /** @type {SseParser} */
@@ -153,7 +134,7 @@ export class Exchange {
    */
   appendResponseChunk(chunk) {
     if (!this.response) return
-    if (this.response.body === null) return
+    if (this.response.body === undefined) return
     this.response.body += chunk.toString('utf8')
   }
 
@@ -165,7 +146,7 @@ export class Exchange {
    */
   markStreaming() {
     if (!this.response) return
-    this.response.body = null
+    this.response.body = undefined
   }
 
   /**

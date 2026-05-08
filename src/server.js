@@ -4,6 +4,10 @@ import { decodeExportLogsServiceRequest } from './otlp/logs.js'
 import { decodeExportMetricsServiceRequest } from './otlp/metrics.js'
 import { decodeExportTraceServiceRequest } from './otlp/traces.js'
 
+/**
+ * @import { Server } from 'node:http'
+ */
+
 const JSON_CT = { 'Content-Type': 'application/json' }
 const PROTOBUF_CONTENT_TYPE = 'application/x-protobuf'
 const PROTOBUF_CT = { 'Content-Type': PROTOBUF_CONTENT_TYPE }
@@ -29,7 +33,7 @@ function decodeProtobufRequest(signal, body) {
 
 /**
  * @param {(signal: string, data: unknown) => void} handler
- * @returns {import('node:http').Server}
+ * @returns {Server}
  */
 function createServer(handler) {
   const server = http.createServer(async function(req, res) {

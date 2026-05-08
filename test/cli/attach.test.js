@@ -6,6 +6,10 @@ import { ConfigError } from '../../src/config.js'
 import { parseAttachArgs, runAttach } from '../../src/cli/attach.js'
 
 /**
+ * @import { AttachOptions } from '../../src/types.js'
+ */
+
+/**
  * @returns {{ write: (s: string) => void, value: () => string }}
  */
 function memo() {
@@ -36,13 +40,13 @@ describe('parseAttachArgs', function() {
 
   it('parses --config <path>', function() {
     expect(parseAttachArgs(['--config', '/tmp/c.json'])).toMatchObject({
-      configPath: '/tmp/c.json', port: null, help: false, error: null,
+      configPath: '/tmp/c.json', help: false,
     })
   })
 
   it('parses --port <n>', function() {
     expect(parseAttachArgs(['--port', '8787'])).toMatchObject({
-      configPath: null, port: 8787, error: null,
+      port: 8787,
     })
   })
 
@@ -103,7 +107,7 @@ describe('runAttach', function() {
     const stdout = memo()
     const stderr = memo()
     const cfg = { proxy: { listen: '0.0.0.0:8765', upstreams: {} } }
-    /** @type {Array<import('../../src/claude-code/settings.js').AttachOptions>} */
+    /** @type {Array<AttachOptions>} */
     const calls = []
     const code = await runAttach(['--config', '/tmp/x'], {
       stdout, stderr,

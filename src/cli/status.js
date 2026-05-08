@@ -9,17 +9,15 @@ import {
 } from './common.js'
 import { isLaunchAgentInstalled as defaultIsLaunchAgentInstalled, launchAgentStatus as defaultLaunchAgentStatus } from '../daemon/macos.js'
 
+/**
+ * @import { StatusParseResult, StatusHooks, CollectivusMarker, InstalledPlistFields } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus status
 
 Options:
   --help, -h        Show this help`
-
-/**
- * @typedef {object} StatusParseResult
- * @property {boolean} help
- * @property {string|null} error
- */
 
 /**
  * @param {string[]} argv
@@ -28,32 +26,11 @@ Options:
 export function parseStatusArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { help: true, error: null }
+    if (arg === '--help' || arg === '-h') return { help: true }
     return { help: false, error: `unknown argument: ${arg}` }
   }
-  return { help: false, error: null }
+  return { help: false }
 }
-
-/**
- * @typedef {object} CollectivusMarker
- * @property {string} [attached_at]
- * @property {string} [version]
- * @property {number} [port]
- */
-
-/**
- * @typedef {object} StatusHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [plistPath]
- * @property {string} [logDir]
- * @property {string} [settingsPath]
- * @property {typeof defaultLaunchAgentStatus} [launchAgentStatus]
- * @property {typeof defaultIsLaunchAgentInstalled} [isLaunchAgentInstalled]
- * @property {typeof defaultIsAttached} [isAttached]
- * @property {typeof defaultReadInstalledPlist} [readInstalledPlist]
- * @property {(p: string) => Promise<string|null>} [readSettingsRaw] - Override for raw read of settings.json (returns null on ENOENT).
- */
 
 /**
  * Run `collectivus status`.
@@ -117,15 +94,15 @@ export async function runStatus(argv, hooks = {}) {
     stdout.write(`  Status: ${formatAgentStatus(agentStatus)}\n`)
     stdout.write(`  Plist: ${plistPath}\n`)
 
-    /** @type {import('./common.js').InstalledPlistFields | null} */
+    /** @type {InstalledPlistFields | undefined} */
     let plistFields
     try {
       plistFields = readInstalledPlistFn(plistPath)
     } catch (err) {
       stderr.write(`warning: failed to parse plist: ${formatError(err)}\n`)
-      plistFields = null
+      plistFields = undefined
     }
-    const configPath = plistFields?.configPath ?? null
+    const configPath = plistFields?.configPath
     const stdoutPath = plistFields?.stdoutPath ?? `${logDir}/collectivus.log`
     const stderrPath = plistFields?.stderrPath ?? `${logDir}/collectivus.err.log`
     if (configPath) stdout.write(`  Config: ${configPath}\n`)
@@ -153,11 +130,11 @@ export async function runStatus(argv, hooks = {}) {
     return exitCode
   }
 
-  /** @type {CollectivusMarker | null} */
-  let marker = null
+  /** @type {CollectivusMarker | undefined} */
+  let marker
   try {
     const raw = await readSettingsRaw(settingsPath)
-    if (raw !== null) {
+    if (raw !== undefined) {
       const parsed = JSON.parse(raw)
       if (parsed && typeof parsed === 'object' && parsed._collectivus
           && typeof parsed._collectivus === 'object' && !Array.isArray(parsed._collectivus)) {
@@ -166,7 +143,7 @@ export async function runStatus(argv, hooks = {}) {
     }
   } catch (err) {
     // isAttached already accepted the file, so a parse failure here is unexpected.
-    // Keep going with marker=null so we can still report the attached status.
+    // Keep going so we can still report the attached status.
     stderr.write(`warning: failed to parse marker: ${formatError(err)}\n`)
   }
 
@@ -199,13 +176,13 @@ function plistDirOf(p) {
 
 /**
  * @param {string} p
- * @returns {Promise<string|null>}
+ * @returns {Promise<string | undefined>}
  */
 async function defaultReadSettingsRaw(p) {
   try {
     return await fs.readFile(p, 'utf8')
   } catch (err) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return null
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
     throw err
   }
 }

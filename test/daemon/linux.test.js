@@ -12,6 +12,10 @@ import {
   uninstallSystemdUnit,
 } from '../../src/daemon/linux.js'
 
+/**
+ * @import { LinuxFakeCall, LinuxFakeSystemctl, LinuxFakeResponses } from '../types.js'
+ */
+
 /** @type {string} */
 let tmpDir
 /** @type {string} */
@@ -29,42 +33,15 @@ afterEach(function() {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 
-/**
- * @typedef {object} FakeCall
- * @property {'daemonReload'|'enable'|'disable'|'restart'|'stop'|'show'} op
- * @property {string} [arg]
- */
-
-/**
- * @typedef {object} FakeSystemctl
- * @property {FakeCall[]} calls
- * @property {() => Promise<import('../../src/daemon/linux.js').SystemctlResult>} daemonReload
- * @property {(unit: string) => Promise<import('../../src/daemon/linux.js').SystemctlResult>} enable
- * @property {(unit: string) => Promise<import('../../src/daemon/linux.js').SystemctlResult>} disable
- * @property {(unit: string) => Promise<import('../../src/daemon/linux.js').SystemctlResult>} restart
- * @property {(unit: string) => Promise<import('../../src/daemon/linux.js').SystemctlResult>} stop
- * @property {(unit: string) => Promise<import('../../src/daemon/linux.js').SystemctlResult>} show
- */
-
-/**
- * @typedef {object} FakeResponses
- * @property {import('../../src/daemon/linux.js').SystemctlResult} [daemonReload]
- * @property {import('../../src/daemon/linux.js').SystemctlResult} [enable]
- * @property {import('../../src/daemon/linux.js').SystemctlResult} [disable]
- * @property {import('../../src/daemon/linux.js').SystemctlResult} [restart]
- * @property {import('../../src/daemon/linux.js').SystemctlResult} [stop]
- * @property {import('../../src/daemon/linux.js').SystemctlResult | ((unit: string, callIndex: number) => import('../../src/daemon/linux.js').SystemctlResult)} [show]
- */
-
 const ok = { exitCode: 0, stdout: '', stderr: '' }
 const notFound = { exitCode: 5, stdout: '', stderr: 'Unit not loaded\n' }
 
 /**
- * @param {FakeResponses} [responses]
- * @returns {FakeSystemctl}
+ * @param {LinuxFakeResponses} [responses]
+ * @returns {LinuxFakeSystemctl}
  */
 function makeFakeSystemctl(responses = {}) {
-  /** @type {FakeCall[]} */
+  /** @type {LinuxFakeCall[]} */
   const calls = []
   let showIdx = 0
   return {

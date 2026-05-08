@@ -12,6 +12,10 @@ import {
   uninstallLaunchAgent,
 } from '../../src/daemon/macos.js'
 
+/**
+ * @import { MacosFakeCall, MacosFakeLaunchctl, MacosFakeResponses } from '../types.js'
+ */
+
 /** @type {string} */
 let tmpDir
 /** @type {string} */
@@ -29,36 +33,15 @@ afterEach(function() {
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 
-/**
- * @typedef {object} FakeCall
- * @property {'load'|'unload'|'list'} op
- * @property {string} arg
- */
-
-/**
- * @typedef {object} FakeLaunchctl
- * @property {FakeCall[]} calls
- * @property {(p: string) => Promise<import('../../src/daemon/macos.js').LaunchctlResult>} load
- * @property {(p: string) => Promise<import('../../src/daemon/macos.js').LaunchctlResult>} unload
- * @property {(l: string) => Promise<import('../../src/daemon/macos.js').LaunchctlResult>} list
- */
-
-/**
- * @typedef {object} FakeResponses
- * @property {import('../../src/daemon/macos.js').LaunchctlResult} [load]
- * @property {import('../../src/daemon/macos.js').LaunchctlResult} [unload]
- * @property {import('../../src/daemon/macos.js').LaunchctlResult | ((label: string, callIndex: number) => import('../../src/daemon/macos.js').LaunchctlResult)} [list]
- */
-
 const ok = { exitCode: 0, stdout: '', stderr: '' }
 const notLoaded = { exitCode: 113, stdout: '', stderr: 'Could not find service\n' }
 
 /**
- * @param {FakeResponses} [responses]
- * @returns {FakeLaunchctl}
+ * @param {MacosFakeResponses} [responses]
+ * @returns {MacosFakeLaunchctl}
  */
 function makeFakeLaunchctl(responses = {}) {
-  /** @type {FakeCall[]} */
+  /** @type {MacosFakeCall[]} */
   const calls = []
   let listIdx = 0
   return {

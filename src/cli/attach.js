@@ -3,6 +3,10 @@ import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
 
+/**
+ * @import { AttachParseResult, AttachHooks, CollectivusConfig } from '../types.js'
+ */
+
 const USAGE = `Usage:
   collectivus attach (--config <path> | --port <n>)
 
@@ -15,62 +19,45 @@ Edits ~/.claude/settings.json to point Claude Code at the local proxy.
 Exactly one of --config or --port is required.`
 
 /**
- * @typedef {object} AttachParseResult
- * @property {string|null} configPath - Resolved value of `--config`, or null when missing.
- * @property {number|null} port - Resolved value of `--port`, or null when missing.
- * @property {boolean} help
- * @property {string|null} error
- */
-
-/**
  * Parse the argument list of `collectivus attach`.
  *
  * @param {string[]} argv
  * @returns {AttachParseResult}
  */
 export function parseAttachArgs(argv) {
-  /** @type {string|null} */
-  let configPath = null
-  /** @type {number|null} */
-  let port = null
+  /** @type {AttachParseResult} */
+  const r = { help: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { configPath, port, help: true, error: null }
+    if (arg === '--help' || arg === '-h') {
+      r.help = true
+      return r
+    }
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return { configPath, port, help: false, error: '--config requires a path' }
-      configPath = value
+      if (!value) { r.error = '--config requires a path'; return r }
+      r.configPath = value
       continue
     }
     if (arg === '--port' || arg.startsWith('--port=')) {
       const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value) return { configPath, port, help: false, error: '--port requires a number' }
-      if (!/^\d+$/.test(value)) return { configPath, port, help: false, error: `--port: not a valid port (got "${value}")` }
+      if (!value) { r.error = '--port requires a number'; return r }
+      if (!/^\d+$/.test(value)) { r.error = `--port: not a valid port (got "${value}")`; return r }
       const n = Number.parseInt(value, 10)
-      if (n < 1 || n > 65535) return { configPath, port, help: false, error: `--port: not a valid port (got "${value}")` }
-      port = n
+      if (n < 1 || n > 65535) { r.error = `--port: not a valid port (got "${value}")`; return r }
+      r.port = n
       continue
     }
-    return { configPath, port, help: false, error: `unknown argument: ${arg}` }
+    r.error = `unknown argument: ${arg}`
+    return r
   }
-  if (configPath !== null && port !== null) {
-    return { configPath, port, help: false, error: '--config and --port are mutually exclusive' }
+  if (r.configPath !== undefined && r.port !== undefined) {
+    r.error = '--config and --port are mutually exclusive'
+  } else if (r.configPath === undefined && r.port === undefined) {
+    r.error = 'one of --config or --port is required'
   }
-  if (configPath === null && port === null) {
-    return { configPath, port, help: false, error: 'one of --config or --port is required' }
-  }
-  return { configPath, port, help: false, error: null }
+  return r
 }
-
-/**
- * @typedef {object} AttachHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [version]
- * @property {string} [settingsPath]
- * @property {typeof defaultAttach} [attach]
- * @property {typeof defaultLoadConfig} [loadConfig]
- */
 
 /**
  * Run `collectivus attach`.
@@ -101,10 +88,10 @@ export async function runAttach(argv, hooks = {}) {
 
   /** @type {number} */
   let port
-  if (parsed.port !== null) {
+  if (parsed.port !== undefined) {
     port = parsed.port
-  } else if (parsed.configPath !== null) {
-    /** @type {import('../config.js').CollectivusConfig} */
+  } else if (parsed.configPath !== undefined) {
+    /** @type {CollectivusConfig} */
     let config
     try {
       config = loadConfigFn(parsed.configPath)

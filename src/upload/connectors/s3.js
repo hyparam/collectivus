@@ -3,17 +3,8 @@ import http from 'node:http'
 import https from 'node:https'
 
 /**
- * @import { StorageConnector } from '../upload.d.ts'
- */
-
-/**
- * @typedef {object} S3ConnectorOptions
- * @property {string} bucket
- * @property {string} region
- * @property {string} accessKeyId
- * @property {string} secretAccessKey
- * @property {string} [sessionToken]
- * @property {string} [endpoint] override base URL for S3-compatible servers (MinIO, etc.)
+ * @import { IncomingHttpHeaders, RequestOptions } from 'node:http'
+ * @import { StorageConnector, S3ConnectorOptions, S3RequestOptions } from '../upload.js'
  */
 
 const ALGORITHM = 'AWS4-HMAC-SHA256'
@@ -46,7 +37,7 @@ export function s3Connector(options) {
         method: 'HEAD',
         key,
       })
-      if (res.statusCode === 404) return null
+      if (res.statusCode === 404) return undefined
       if (res.statusCode === 200) {
         const contentLength = res.headers['content-length']
         return { size: contentLength ? Number(contentLength) : 0 }
@@ -57,26 +48,12 @@ export function s3Connector(options) {
 }
 
 /**
- * @typedef {object} S3RequestOptions
- * @property {string} bucket
- * @property {string} region
- * @property {string} accessKeyId
- * @property {string} secretAccessKey
- * @property {string} [sessionToken]
- * @property {string} [endpoint]
- * @property {'PUT' | 'HEAD' | 'GET'} method
- * @property {string} key
- * @property {Uint8Array} [body]
- * @property {string} [contentType]
- */
-
-/**
  * Issue one signed S3 request and resolve with the response (status,
  * headers, and any body bytes for GET). Throws on non-2xx for PUT/GET;
  * HEAD passes 404 through to the caller via the resolved result.
  *
  * @param {S3RequestOptions} options
- * @returns {Promise<{ statusCode: number, headers: http.IncomingHttpHeaders, body: Buffer }>}
+ * @returns {Promise<{ statusCode: number, headers: IncomingHttpHeaders, body: Buffer }>}
  */
 function s3Request(options) {
   const { bucket, region, accessKeyId, secretAccessKey, sessionToken, endpoint, method, key, body, contentType } = options
@@ -136,7 +113,7 @@ function s3Request(options) {
   headers.Authorization = `${ALGORITHM} Credential=${accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`
 
   const transport = protocol === 'https:' ? https : http
-  /** @type {http.RequestOptions} */
+  /** @type {RequestOptions} */
   const reqOptions = {
     method,
     host: base.hostname,

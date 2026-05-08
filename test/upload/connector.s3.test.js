@@ -70,7 +70,7 @@ describe('s3Connector', () => {
     expect(Array.from(req.body)).toEqual([1, 2, 3, 4, 5])
   })
 
-  it('returns null on HEAD 404 and { size } on HEAD 200', async () => {
+  it('returns undefined on HEAD 404 and { size } on HEAD 200', async () => {
     const connector = s3Connector({
       bucket: 'mybucket',
       region: 'us-east-1',
@@ -80,7 +80,7 @@ describe('s3Connector', () => {
     })
 
     const missing = await connector.headObject('missing/key.parquet')
-    expect(missing).toBeNull()
+    expect(missing).toBeUndefined()
 
     const present = await connector.headObject('present/key.parquet')
     expect(present).toEqual({ size: 42 })

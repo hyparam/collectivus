@@ -6,6 +6,10 @@ import path from 'node:path'
 import { memoryConnector } from '../../src/upload/connectors/memory.js'
 import { uploadPending } from '../../src/upload/uploader.js'
 
+/**
+ * @import { StorageConnector } from '../../src/upload/upload.js'
+ */
+
 /** @type {string} */
 let outputDir
 
@@ -117,7 +121,7 @@ describe('uploadPending', () => {
     ])
 
     const memory = memoryConnector()
-    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
       async putObject(key, body, contentType) {
@@ -163,7 +167,7 @@ describe('uploadPending', () => {
     let putAttempts = 0
     /** @type {number[]} */
     const sleeps = []
-    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
       async putObject(key, body, contentType) {
@@ -199,7 +203,7 @@ describe('uploadPending', () => {
     ])
 
     let putAttempts = 0
-    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
       async putObject() {
@@ -208,7 +212,7 @@ describe('uploadPending', () => {
         err.statusCode = 403
         throw err
       },
-      async headObject() { return null },
+      async headObject() { return undefined },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -232,7 +236,7 @@ describe('uploadPending', () => {
       { serviceName: 'svc-a', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
     ])
 
-    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
       async putObject() {
@@ -240,7 +244,7 @@ describe('uploadPending', () => {
         err.statusCode = 503
         throw err
       },
-      async headObject() { return null },
+      async headObject() { return undefined },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

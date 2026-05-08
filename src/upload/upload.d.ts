@@ -5,8 +5,8 @@ export interface StorageConnector {
   readonly scheme: string
   /** PUT a single object. Idempotent — overwriting is fine. */
   putObject(key: string, body: Uint8Array, contentType?: string): Promise<void>
-  /** HEAD an object to check existence. Returns null if absent. */
-  headObject(key: string): Promise<{ size: number } | null>
+  /** HEAD an object to check existence. Returns undefined if absent. */
+  headObject(key: string): Promise<{ size: number } | undefined>
   close?(): Promise<void>
 }
 
@@ -65,4 +65,35 @@ export interface UploadDeps {
   initialBackoffMs?: number
   /** Sleep override — tests pass `() => Promise.resolve()` to skip the wait. */
   sleep?: (ms: number) => Promise<void>
+}
+
+import type { BasicType } from 'hyparquet-writer'
+
+export interface ColumnSpec {
+  name: string
+  type: BasicType
+  nullable: boolean
+}
+
+export interface S3ConnectorOptions {
+  bucket: string
+  region: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+  /** Override base URL for S3-compatible servers (MinIO, etc.) */
+  endpoint?: string
+}
+
+export interface S3RequestOptions {
+  bucket: string
+  region: string
+  accessKeyId: string
+  secretAccessKey: string
+  sessionToken?: string
+  endpoint?: string
+  method: 'PUT' | 'HEAD' | 'GET'
+  key: string
+  body?: Uint8Array
+  contentType?: string
 }

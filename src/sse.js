@@ -5,9 +5,7 @@
  */
 
 /**
- * @typedef {object} SseEvent
- * @property {string} event - Event type (defaults to 'message' when no `event:` field is present).
- * @property {string} data - Event data; multiple `data:` lines are joined with `\n`.
+ * @import { SseEvent } from './types.js'
  */
 
 /**
@@ -83,7 +81,7 @@ function findSeparator(buf) {
  * blocks containing only comments dispatch nothing.
  *
  * @param {string} block
- * @returns {SseEvent | null}
+ * @returns {SseEvent | undefined}
  */
 function parseBlock(block) {
   let event = 'message'
@@ -109,6 +107,6 @@ function parseBlock(block) {
       hasField = true
     }
   }
-  if (!hasField) return null
+  if (!hasField) return undefined
   return { event, data }
 }

@@ -3,6 +3,7 @@ import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
 import {
   LAUNCH_AGENT_LABEL,
+  daemonKindLabel,
   defaultLogDir,
   defaultPrompt,
   isNpxBinPath,
@@ -10,6 +11,10 @@ import {
   readPackageVersion,
 } from './common.js'
 import { installDaemon } from '../daemon/index.js'
+
+/**
+ * @import { InstallParseResult, InstallHooks, CollectivusConfig } from '../types.js'
+ */
 
 const USAGE = `Usage:
   collectivus install --config <path> [--yes|--no]
@@ -21,61 +26,36 @@ Options:
   --help, -h        Show this help`
 
 /**
- * @typedef {object} InstallParseResult
- * @property {string|null} configPath - Resolved value of `--config`, or null when missing.
- * @property {boolean} yes - True if `--yes` was given.
- * @property {boolean} no - True if `--no` was given.
- * @property {boolean} help - True if `--help`/`-h` was given.
- * @property {string|null} error - Error message when parsing failed.
- */
-
-/**
  * Parse the argument list of `collectivus install`.
  *
  * @param {string[]} argv
  * @returns {InstallParseResult}
  */
 export function parseInstallArgs(argv) {
-  /** @type {string|null} */
-  let configPath = null
-  let yes = false
-  let no = false
+  /** @type {InstallParseResult} */
+  const r = { yes: false, no: false, help: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') {
-      return { configPath, yes, no, help: true, error: null }
+      r.help = true
+      return r
     }
-    if (arg === '--yes' || arg === '-y') { yes = true; continue }
-    if (arg === '--no' || arg === '-n') { no = true; continue }
+    if (arg === '--yes' || arg === '-y') { r.yes = true; continue }
+    if (arg === '--no' || arg === '-n') { r.no = true; continue }
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return { configPath, yes, no, help: false, error: '--config requires a path' }
-      configPath = value
+      if (!value) { r.error = '--config requires a path'; return r }
+      r.configPath = value
       continue
     }
-    return { configPath, yes, no, help: false, error: `unknown argument: ${arg}` }
+    r.error = `unknown argument: ${arg}`
+    return r
   }
-  if (yes && no) {
-    return { configPath, yes, no, help: false, error: '--yes and --no are mutually exclusive' }
+  if (r.yes && r.no) {
+    r.error = '--yes and --no are mutually exclusive'
   }
-  return { configPath, yes, no, help: false, error: null }
+  return r
 }
-
-/**
- * @typedef {object} InstallHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [binPath] - Override for `process.argv[1]` in tests.
- * @property {string} [version] - Override for the version recorded in the marker.
- * @property {string} [logDir] - Override for `~/Library/Logs/Collectivus`.
- * @property {string} [plistDir] - Forwarded to installDaemon (`~/Library/LaunchAgents` override).
- * @property {string} [settingsPath] - Override for `~/.claude/settings.json`.
- * @property {boolean} [isTTY] - Force the TTY decision in tests.
- * @property {(question: string) => Promise<string>} [prompt] - Override the readline prompt.
- * @property {typeof installDaemon} [installLaunchAgent]
- * @property {typeof defaultAttach} [attach]
- * @property {typeof defaultLoadConfig} [loadConfig]
- */
 
 /**
  * Run `collectivus install`.
@@ -125,7 +105,7 @@ export async function runInstall(argv, hooks = {}) {
     return 1
   }
 
-  /** @type {import('../config.js').CollectivusConfig} */
+  /** @type {CollectivusConfig} */
   let config
   try {
     config = loadConfigFn(parsed.configPath)
@@ -166,7 +146,7 @@ export async function runInstall(argv, hooks = {}) {
     return 1
   }
 
-  stdout.write(`✓ Daemon installed (LaunchAgent: ${LAUNCH_AGENT_LABEL})\n`)
+  stdout.write(`✓ Daemon installed (${daemonKindLabel()})\n`)
 
   /** @type {boolean} */
   let shouldAttach

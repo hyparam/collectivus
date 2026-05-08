@@ -1,7 +1,11 @@
 import process from 'node:process'
 import { detach as defaultDetach, isAttached as defaultIsAttached, defaultSettingsPath } from '../claude-code/settings.js'
-import { LAUNCH_AGENT_LABEL, defaultPrompt } from './common.js'
+import { LAUNCH_AGENT_LABEL, daemonKindLabel, defaultPrompt } from './common.js'
 import { uninstallDaemon } from '../daemon/index.js'
+
+/**
+ * @import { UninstallParseResult, UninstallHooks } from '../types.js'
+ */
 
 const USAGE = `Usage:
   collectivus uninstall [--detach]
@@ -9,13 +13,6 @@ const USAGE = `Usage:
 Options:
   --detach          Also revert Claude Code settings.json without prompting
   --help, -h        Show this help`
-
-/**
- * @typedef {object} UninstallParseResult
- * @property {boolean} detach - True if --detach was given.
- * @property {boolean} help - True if --help/-h was given.
- * @property {string|null} error - Error message when parsing failed.
- */
 
 /**
  * Parse the argument list of `collectivus uninstall`.
@@ -27,25 +24,12 @@ export function parseUninstallArgs(argv) {
   let detach = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { detach, help: true, error: null }
+    if (arg === '--help' || arg === '-h') return { detach, help: true }
     if (arg === '--detach') { detach = true; continue }
     return { detach, help: false, error: `unknown argument: ${arg}` }
   }
-  return { detach, help: false, error: null }
+  return { detach, help: false }
 }
-
-/**
- * @typedef {object} UninstallHooks
- * @property {{ write: (s: string) => void }} [stdout]
- * @property {{ write: (s: string) => void }} [stderr]
- * @property {string} [plistDir] - Forwarded to uninstallDaemon (`~/Library/LaunchAgents` override).
- * @property {string} [settingsPath] - Override for `~/.claude/settings.json`.
- * @property {boolean} [isTTY]
- * @property {(question: string) => Promise<string>} [prompt]
- * @property {typeof uninstallDaemon} [uninstallLaunchAgent]
- * @property {typeof defaultDetach} [detach]
- * @property {typeof defaultIsAttached} [isAttached]
- */
 
 /**
  * Run `collectivus uninstall`.
@@ -87,7 +71,7 @@ export async function runUninstall(argv, hooks = {}) {
     stderr.write(`error: failed to uninstall daemon: ${formatError(err)}\n`)
     return 1
   }
-  stdout.write(`✓ Daemon removed (LaunchAgent: ${LAUNCH_AGENT_LABEL})\n`)
+  stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
 
   /** @type {boolean} */
   let shouldDetach

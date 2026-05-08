@@ -5,6 +5,10 @@ import path from 'node:path'
 import process from 'node:process'
 import { DaemonError, installDaemon, uninstallDaemon } from '../../src/daemon/index.js'
 
+/**
+ * @import { LaunchctlAdapter, SystemctlAdapter } from '../../src/types.js'
+ */
+
 /** @type {string} */
 let tmpDir
 
@@ -20,7 +24,7 @@ const ok = { exitCode: 0, stdout: '', stderr: '' }
 const notLoaded = { exitCode: 113, stdout: '', stderr: '' }
 
 /**
- * @returns {{ calls: string[], adapter: import('../../src/daemon/macos.js').LaunchctlAdapter }}
+ * @returns {{ calls: string[], adapter: LaunchctlAdapter }}
  */
 function makeRecordingLaunchctl() {
   /** @type {string[]} */
@@ -36,7 +40,7 @@ function makeRecordingLaunchctl() {
 }
 
 /**
- * @returns {{ calls: string[], adapter: import('../../src/daemon/linux.js').SystemctlAdapter }}
+ * @returns {{ calls: string[], adapter: SystemctlAdapter }}
  */
 function makeRecordingSystemctl() {
   /** @type {string[]} */

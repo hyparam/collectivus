@@ -308,6 +308,8 @@ export interface InitHooks {
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */
   cwd?: string
+  /** Override `process.argv[1]`. Used to detect npx-resolved binaries. */
+  binPath?: string
   /** Override the default `~/.hyp/collectivus.json` save path. */
   defaultConfigPath?: string
   /** Override the default `~/.hyp/collectivus` sink directory. */

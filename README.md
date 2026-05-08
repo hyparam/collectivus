@@ -1,16 +1,16 @@
 # Collectivus
 
-OTLP collector and pass-through LLM proxy that records every request and
-response to JSONL.
+[![npm](https://img.shields.io/npm/v/collectivus)](https://www.npmjs.com/package/collectivus)
+[![minzipped](https://img.shields.io/bundlephobia/minzip/collectivus)](https://www.npmjs.com/package/collectivus)
+[![workflow status](https://github.com/hyparam/collectivus/actions/workflows/ci.yml/badge.svg)](https://github.com/hyparam/collectivus/actions)
+[![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
+[![dependencies](https://img.shields.io/badge/Dependencies-0-blueviolet)](https://www.npmjs.com/package/collectivus?activeTab=dependencies)
 
-Two listeners in one Node process:
+Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two listeners in one process record everything to local JSONL: an OpenTelemetry receiver that normalizes traces, metrics, and logs by signal and service, and a transparent reverse proxy for the Anthropic Messages API that captures every request and SSE event. Pick one or run both.
 
-- **OTLP receiver** — accepts OpenTelemetry traces, metrics, and logs over
-  HTTP, normalizes them, and writes JSONL by signal and by service.
-- **LLM proxy** — pass-through reverse proxy for the Anthropic Messages API,
-  capturing each request and every SSE event to a single `proxy.jsonl` file.
-
-Pick one or run both. Zero runtime dependencies.
+- **OTLP receiver**: traces, metrics, and logs over HTTP, normalized to JSONL
+- **LLM proxy**: transparent pass-through for Anthropic Messages, full request/response capture
+- **Zero dependencies**: Node built-ins only, single binary, instant startup
 
 ## Installation
 

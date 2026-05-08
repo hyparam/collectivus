@@ -1,12 +1,32 @@
 {
   "name": "collectivus",
-  "version": "1.1.0",
-  "description": "OTLP collector and pass-through LLM proxy that records every request and response to JSONL",
+  "version": "1.2.0",
+  "description": "OTLP collector and pass-through LLM proxy",
+  "author": "Hyperparam",
+  "homepage": "https://hyperparam.app",
+  "keywords": [
+    "opentelemetry",
+    "otlp",
+    "collector",
+    "traces",
+    "metrics",
+    "logs",
+    "anthropic",
+    "claude",
+    "llm-proxy",
+    "claude-code"
+  ],
+  "license": "MIT",
   "type": "module",
   "main": "src/index.js",
   "bin": {
     "collectivus": "bin/cli.js"
   },
+  "files": [
+    "src",
+    "types"
+  ],
+  "sideEffects": false,
   "scripts": {
     "start": "node bin/cli.js",
     "lint": "eslint",
@@ -25,18 +45,5 @@
   },
   "optionalDependencies": {
     "hyparquet-writer": "0.14.0"
-  },
-  "keywords": [
-    "opentelemetry",
-    "otlp",
-    "collector",
-    "traces",
-    "metrics",
-    "logs",
-    "anthropic",
-    "claude",
-    "llm-proxy",
-    "claude-code"
-  ],
-  "license": "MIT"
+  }
 }

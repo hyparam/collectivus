@@ -71,6 +71,33 @@ describe('createScheduler', () => {
     await scheduler.stop()
   })
 
+  it('skipInitialTick: true skips the catch-up tick and only schedules the next fire', async () => {
+    const now = new Date('2026-05-07T08:00:00Z')
+    /** @type {Array<{ delay: number, handler: () => void }>} */
+    const timers = []
+
+    let ticks = 0
+    const scheduler = createScheduler({
+      time: '12:00',
+      skipInitialTick: true,
+      tick: async () => { ticks++ },
+    }, {
+      now: () => now,
+      setTimeoutFn: (handler, delay) => {
+        timers.push({ delay, handler })
+        return timers.length
+      },
+      clearTimeoutFn: () => {},
+    })
+
+    await scheduler.start()
+    expect(ticks).toBe(0)
+    expect(timers).toHaveLength(1)
+    expect(timers[0].delay).toBe(4 * 60 * 60 * 1000)
+
+    await scheduler.stop()
+  })
+
   it('schedules a fast retry when the previous tick reports retry: true', async () => {
     let now = new Date('2026-05-07T08:00:00Z')
     /** @type {Array<{ delay: number, handler: () => void }>} */

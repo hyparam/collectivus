@@ -21,6 +21,7 @@ const DEFAULT_RETRY_DELAY_MS = 15 * 60 * 1000
  * @param {() => Promise<void | TickResult>} options.tick
  * @param {(err: unknown) => void} [options.onError] called when tick rejects
  * @param {number} [options.retryDelayMs] fast-retry delay after a failed tick (default 15min)
+ * @param {boolean} [options.skipInitialTick] when true, `start()` only schedules the next firing; the upload subsystem leaves this off so a missed daily run gets caught up immediately, but the self-update tick sets it so we don't try to `npm install -g` on every process launch
  * @param {SchedulerDeps} [deps]
  * @returns {{ start: () => Promise<void>, stop: () => Promise<void> }}
  */
@@ -30,6 +31,7 @@ export function createScheduler(options, deps = {}) {
   const clearT = deps.clearTimeoutFn ?? clearTimeout
   const onError = options.onError ?? defaultOnError
   const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
+  const skipInitialTick = options.skipInitialTick === true
 
   const [hh, mm] = parseTime(options.time)
 
@@ -76,8 +78,7 @@ export function createScheduler(options, deps = {}) {
   return {
     async start() {
       stopped = false
-      // Run catch-up immediately, then schedule the next firing.
-      await runTick()
+      if (!skipInitialTick) await runTick()
       schedule()
     },
     async stop() {

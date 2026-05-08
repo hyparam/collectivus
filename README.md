@@ -54,15 +54,17 @@ Pass a JSON config with `--config <path>`. The schema:
 
 ```json
 {
+  "version": 1,
   "otel":  { "listen": "0.0.0.0:4318" },
   "proxy": {
     "listen": "127.0.0.1:8787",
-    "upstreams": {
-      "anthropic": {
+    "upstreams": [
+      {
+        "name": "anthropic",
         "base_url": "https://api.anthropic.com",
         "match": { "path_prefix": "/v1/messages" }
       }
-    },
+    ],
     "redact_headers": ["authorization", "x-api-key", "anthropic-api-key", "cookie", "set-cookie"]
   },
   "sink": { "type": "file", "dir": "./collectivus-data" }
@@ -71,15 +73,82 @@ Pass a JSON config with `--config <path>`. The schema:
 
 | Block | Purpose |
 |-------|---------|
-| `otel`  | Enable the OTLP receiver. Omit to disable. |
-| `proxy` | Enable the LLM proxy. Omit to disable. Requires `sink`. |
-| `sink`  | Where the proxy writes `proxy.jsonl`. (OTLP output also lands under `sink.dir` when set.) The walkthrough defaults this to `~/.hyp/collectivus/`. |
+| `version` | Schema version. Required. Currently `1`. |
+| `otel`    | Enable the OTLP receiver. Omit to disable. |
+| `proxy`   | Enable the LLM proxy. Omit to disable. Requires `sink`. |
+| `sink`    | Where the proxy writes `proxy.jsonl`. Required when `otel` or `proxy` is set. (OTLP output also lands under `sink.dir`.) The walkthrough defaults this to `~/.hyp/collectivus/`. |
+| `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
+
+Add an `upload` block to drain JSONL to S3 once a day:
+
+```json
+{
+  "version": 1,
+  "proxy": { "listen": "127.0.0.1:8787", "upstreams": [] },
+  "sink":   { "type": "file", "dir": "./collectivus-data" },
+  "upload": {
+    "bucket": "my-collectivus-archive",
+    "prefix": "collectivus",
+    "region": "us-east-1",
+    "time":   "00:10",
+    "signals": ["logs", "traces", "metrics"]
+  }
+}
+```
 
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
 ```bash
 npx collectivus --config collectivus.json --print-config
 ```
+
+### v1 schema
+
+`version: 1` introduces array-shape `upstreams`, an optional `upload` block,
+and makes `sink` mandatory whenever `otel` or `proxy` is set. v0 configs
+(missing the `version` field) hard-fail with a clear error — the walkthrough
+writes v1 only.
+
+## S3 upload
+
+Collectivus always writes raw JSONL to your local sink directory. When the
+`upload` block is configured, a daily scheduler drains the previous day's
+JSONL into Parquet partitions in S3. Object keys are Hive-partitioned:
+
+```
+<prefix>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet
+```
+
+This is useful for long-term retention, columnar queries with
+Athena / DuckDB / Snowflake, and offsite backup of recordings that would
+otherwise live only on the daemon host. The local JSONL is the source of
+truth; the S3 drain is additive and idempotent (a per-(service, signal,
+date) ledger and a HEAD check on the destination key prevent duplicate
+uploads).
+
+| Field         | Required | Default     | Notes                                         |
+|---------------|----------|-------------|-----------------------------------------------|
+| `bucket`      | yes      | —           | Destination S3 bucket name.                   |
+| `prefix`      | no       | `collectivus` | Key prefix under the bucket.               |
+| `region`      | no       | `AWS_REGION` env, or `us-east-1` | AWS region. |
+| `time`        | no       | `00:10`     | Daily run time, `HH:MM` UTC.                  |
+| `signals`     | no       | all three   | Subset of `logs`, `traces`, `metrics`.        |
+| `catchupDays` | no       | `30`        | Look back this many days for unuploaded JSONL. |
+| `endpoint`    | no       | —           | Custom S3-compatible endpoint (e.g. MinIO).   |
+
+### Credentials
+
+Credentials are never stored in the config. They are resolved at daemon
+start from the environment:
+
+- `AWS_ACCESS_KEY_ID` (required)
+- `AWS_SECRET_ACCESS_KEY` (required)
+- `AWS_SESSION_TOKEN` (optional, for temporary credentials)
+- `AWS_REGION` (optional; the `upload.region` config field overrides this)
+
+When `upload` is set in the config but `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` are missing from the environment, the daemon
+fails fast at startup rather than at the first daily tick.
 
 ## OTLP receiver
 

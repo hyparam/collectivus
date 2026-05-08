@@ -95,11 +95,12 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     const sinkDir = path.join(tmpDir, 'data')
     const cfgPath = writeConfig(tmpDir, {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })
@@ -187,11 +188,12 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     const sinkDir = path.join(tmpDir, 'data')
     const cfgPath = writeConfig(tmpDir, {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: {
-          anthropic: { base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: upstreamUrl, match: { path_prefix: '/v1/messages' } },
+        ],
       },
       sink: { type: 'file', dir: sinkDir },
     })

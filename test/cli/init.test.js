@@ -91,14 +91,16 @@ describe('runInit', function() {
     expect(installCalls).toHaveLength(0)
     expect(fs.existsSync(cfgPath)).toBe(true)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.version).toBe(1)
     expect(written.proxy).toMatchObject({
       listen: '127.0.0.1:8787',
-      upstreams: {
-        anthropic: {
+      upstreams: [
+        {
+          name: 'anthropic',
           base_url: 'https://api.anthropic.com',
           match: { path_prefix: '/v1/messages' },
         },
-      },
+      ],
     })
     expect(written.proxy.redact_headers).toContain('x-api-key')
     expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
@@ -153,6 +155,7 @@ describe('runInit', function() {
     expect(code).toBe(0)
     expect(installCalls).toHaveLength(0)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.version).toBe(1)
     expect(written.otel).toEqual({ listen: '127.0.0.1:4318' })
     expect(written.proxy).toBeUndefined()
     expect(written.sink.dir).toBe(path.join(tmpDir, 'data'))
@@ -184,8 +187,10 @@ describe('runInit', function() {
     })
     expect(code).toBe(0)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.version).toBe(1)
     expect(written.proxy.listen).toBe('127.0.0.1:9090')
-    expect(written.proxy.upstreams.openai.base_url).toBe('https://api.openai.com')
+    const openai = written.proxy.upstreams.find((/** @type {{ name: string }} */ u) => u.name === 'openai')
+    expect(openai.base_url).toBe('https://api.openai.com')
     expect(written.otel).toEqual({ listen: '0.0.0.0:4317' })
   })
 
@@ -212,10 +217,12 @@ describe('runInit', function() {
     })
     expect(code).toBe(0)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-    expect(written.proxy.upstreams.upstream).toEqual({
+    expect(written.version).toBe(1)
+    expect(written.proxy.upstreams).toEqual([{
+      name: 'upstream',
       base_url: 'https://api.example.com',
       match: { path_prefix: '/v2/chat' },
-    })
+    }])
   })
 
   it('chains into runInstall with --yes when daemon + Claude Code accepted', async function() {
@@ -349,9 +356,10 @@ describe('runInit', function() {
     const cfgPath = path.join(tmpDir, 'existing.json')
     /** @type {CollectivusConfig} */
     const existing = {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:8787',
-        upstreams: { anthropic: { base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } } },
+        upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } }],
         redact_headers: ['authorization'],
       },
       sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
@@ -388,9 +396,10 @@ describe('runInit', function() {
     const newCfgPath = path.join(tmpDir, 'new.json')
     /** @type {CollectivusConfig} */
     const existing = {
+      version: 1,
       proxy: {
         listen: '127.0.0.1:9999',
-        upstreams: { anthropic: { base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } } },
+        upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } }],
       },
       sink: { type: 'file', dir: path.join(tmpDir, 'old-sink') },
     }
@@ -420,6 +429,7 @@ describe('runInit', function() {
     const cfgPath = path.join(tmpDir, 'existing.json')
     /** @type {CollectivusConfig} */
     const existing = {
+      version: 1,
       otel: { listen: '0.0.0.0:4318' },
       sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
     }

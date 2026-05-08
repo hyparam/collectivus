@@ -133,7 +133,7 @@ export async function runInit(hooks = {}) {
   const wantOtel = mode === '2' || mode === '3'
 
   /** @type {CollectivusConfig} */
-  const config = {}
+  const config = { version: 1 }
 
   if (wantProxy) {
     const proxy = await askProxy(prompt, stdout, stderr)
@@ -269,11 +269,11 @@ function useExistingConfig(args) {
  */
 function printConfigSummary(stdout, config) {
   if (config.proxy) {
-    const upstreams = Object.entries(config.proxy.upstreams ?? {})
+    const upstreams = config.proxy.upstreams ?? []
     const detail = upstreams
-      .map(function([name, u]) {
+      .map(function(u) {
         const prefix = u?.match?.path_prefix ?? ''
-        return `${name} → ${u?.base_url ?? ''}${prefix}`
+        return `${u?.name ?? ''} → ${u?.base_url ?? ''}${prefix}`
       })
       .join(', ')
     stdout.write(`  proxy:  ${config.proxy.listen}${detail ? `  (${detail})` : ''}\n`)
@@ -361,12 +361,13 @@ async function askProxy(prompt, stdout, stderr) {
   /** @type {ProxyConfig} */
   return {
     listen,
-    upstreams: {
-      [upstreamName]: {
+    upstreams: [
+      {
+        name: upstreamName,
         base_url: baseUrl,
         match: { path_prefix: prefix },
       },
-    },
+    ],
     redact_headers: DEFAULT_REDACT,
   }
 }

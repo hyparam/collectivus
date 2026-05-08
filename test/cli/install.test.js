@@ -60,7 +60,7 @@ function makeMocks(opts = {}) {
     },
     loadConfig(p) {
       if (opts.loadConfigImpl) return opts.loadConfigImpl(p)
-      return { proxy: { listen: '127.0.0.1:8787', upstreams: {} }, sink: { type: 'file', dir: '/tmp/x' } }
+      return { version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] }, sink: { type: 'file', dir: '/tmp/x' } }
     },
   }
 }
@@ -202,7 +202,7 @@ describe('runInstall', function() {
   it('--yes installs and attaches without prompting', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     /** @type {string[]} */
     const promptCalls = []
@@ -239,7 +239,7 @@ describe('runInstall', function() {
   it('--no installs without attach and without prompting', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     /** @type {string[]} */
     const promptCalls = []
@@ -264,7 +264,7 @@ describe('runInstall', function() {
   it('TTY without flags: empty answer attaches (Y default)', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     const code = await runInstall(['--config', cfgPath], {
       stdout, stderr,
@@ -285,7 +285,7 @@ describe('runInstall', function() {
   it('TTY without flags: explicit yes attaches', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     const code = await runInstall(['--config', cfgPath], {
       stdout, stderr,
@@ -306,7 +306,7 @@ describe('runInstall', function() {
   it('TTY without flags: explicit no skips attach', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     const code = await runInstall(['--config', cfgPath], {
       stdout, stderr,
@@ -328,7 +328,7 @@ describe('runInstall', function() {
   it('non-TTY without flags: warns and skips attach', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks()
     /** @type {string[]} */
     const promptCalls = []
@@ -353,7 +353,7 @@ describe('runInstall', function() {
   it('exits 1 when LaunchAgent install fails', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks({ installError: new Error('launchctl exploded') })
     const code = await runInstall(['--config', cfgPath, '--yes'], {
       stdout, stderr,
@@ -372,7 +372,7 @@ describe('runInstall', function() {
   it('exits 1 when attach fails after install', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks({ attachError: new Error('settings.json missing') })
     const code = await runInstall(['--config', cfgPath, '--yes'], {
       stdout, stderr,
@@ -393,7 +393,7 @@ describe('runInstall', function() {
   it('reports prevValue when attach overwrote ANTHROPIC_BASE_URL', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:8787', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:8787', upstreams: [] } })
     const m = makeMocks({ attachResult: { changed: true, prevValue: 'https://elsewhere.test' } })
     const code = await runInstall(['--config', cfgPath, '--yes'], {
       stdout, stderr,
@@ -412,9 +412,9 @@ describe('runInstall', function() {
   it('errors clearly when proxy.listen is not parseable', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: 'garbage', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: 'garbage', upstreams: [] } })
     const m = makeMocks({
-      loadConfigImpl() { return { proxy: { listen: 'garbage', upstreams: {} } } },
+      loadConfigImpl() { return { version: 1, proxy: { listen: 'garbage', upstreams: [] } } },
     })
     const code = await runInstall(['--config', cfgPath, '--yes'], {
       stdout, stderr,
@@ -432,7 +432,7 @@ describe('runInstall', function() {
   it('forwards plistDir to installDaemon when supplied (test injection)', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ proxy: { listen: '127.0.0.1:9090', upstreams: {} } })
+    const cfgPath = writeConfig({ version: 1, proxy: { listen: '127.0.0.1:9090', upstreams: [] } })
     const m = makeMocks()
     const code = await runInstall(['--config', cfgPath, '--no'], {
       stdout, stderr,

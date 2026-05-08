@@ -500,7 +500,7 @@ describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => 
     const recorder = new Recorder({ sink })
     proxy = new Proxy({
       listen: '127.0.0.1:0',
-      upstreams: { anthropic: { base_url: upstream.baseUrl, match: { path_prefix: '/v1' } } },
+      upstreams: [{ name: 'anthropic', base_url: upstream.baseUrl, match: { path_prefix: '/v1' } }],
     }, { recorder })
     await proxy.start()
   })

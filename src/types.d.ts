@@ -296,6 +296,8 @@ export interface InitHooks {
   prompt?: (question: string) => Promise<string>
   /** Override file write. */
   writeFile?: (path: string, contents: string) => void
+  /** Override the read used to detect an existing config at the default path. */
+  readConfig?: (path: string) => CollectivusConfig | undefined
   /** Override `collectivus install` chain entry. */
   runInstall?: (args: string[]) => Promise<number>
   /** Override `process.platform`. */

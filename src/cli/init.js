@@ -72,6 +72,10 @@ function defaultSinkDir(homeDir) {
  * darwin/linux) chains into `runInstall` to install the daemon and optionally
  * attach Claude Code.
  *
+ * If a config already exists at the default save path, summarizes it first and
+ * offers the user the choice to reuse it (skipping straight to the daemon
+ * install offer) or to start fresh.
+ *
  * @param {InitHooks} [hooks]
  * @returns {Promise<number>}
  */
@@ -80,11 +84,28 @@ export async function runInit(hooks = {}) {
   const stderr = hooks.stderr ?? process.stderr
   const prompt = hooks.prompt ?? defaultPrompt
   const writeFile = hooks.writeFile ?? defaultWriteFile
+  const readConfig = hooks.readConfig ?? defaultReadConfig
   const platform = hooks.platform ?? process.platform
   const cwd = hooks.cwd ?? process.cwd()
+  const defaultCfgPath = hooks.defaultConfigPath ?? defaultConfigPath()
 
   stdout.write('\nWelcome to collectivus.\n')
-  stdout.write('I\'ll ask a few questions and write a config for you.\n')
+
+  const existing = readConfig(defaultCfgPath)
+  if (existing) {
+    stdout.write(`\nFound an existing config at ${defaultCfgPath}:\n`)
+    printConfigSummary(stdout, existing)
+    const ans = (await prompt('\nUse this config, or create a new one? [use/new]: ')).trim()
+    if (ans === '' || /^u(se)?$/i.test(ans) || /^y(es)?$/i.test(ans)) {
+      return useExistingConfig({
+        config: existing, configPath: defaultCfgPath,
+        stdout, prompt, platform,
+        runInstall: hooks.runInstall,
+      })
+    }
+  }
+
+  stdout.write('\nI\'ll ask a few questions and write a config for you.\n')
 
   stdout.write('\nWhat would you like collectivus to do?\n\n')
   stdout.write('  1) LLM gateway proxy\n')
@@ -139,7 +160,6 @@ export async function runInit(hooks = {}) {
   const sink = { type: 'file', dir: sinkAns === '' ? defaultSink : sinkAns }
   config.sink = sink
 
-  const defaultCfgPath = hooks.defaultConfigPath ?? defaultConfigPath()
   const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
   const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
@@ -161,8 +181,29 @@ export async function runInit(hooks = {}) {
     return 1
   }
 
-  // Daemon install is only meaningful when the proxy is configured (the
-  // install command requires a proxy listener) and the platform is supported.
+  return offerDaemonInstall({
+    configPath: cfgPath, wantProxy,
+    stdout, prompt, platform,
+    runInstall: hooks.runInstall,
+  })
+}
+
+/**
+ * Prompt for daemon install + Claude Code attach when the platform supports it
+ * and the config has a proxy listener. Otherwise prints next-step hints.
+ *
+ * @param {{
+ *   configPath: string,
+ *   wantProxy: boolean,
+ *   stdout: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   platform: NodeJS.Platform,
+ *   runInstall?: (args: string[]) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function offerDaemonInstall(args) {
+  const { configPath, wantProxy, stdout, prompt, platform } = args
   if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
     stdout.write('\nRun collectivus as a background daemon?\n')
@@ -180,18 +221,89 @@ export async function runInit(hooks = {}) {
       stdout.write('  No  → leaves Claude Code untouched; attach later with\n')
       stdout.write('        `collectivus attach`.\n')
       const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
-      const installArgs = ['--config', cfgPath, isYes(cAns) ? '--yes' : '--no']
-      const runInstallFn = hooks.runInstall ?? await loadRunInstall()
+      const installArgs = ['--config', configPath, isYes(cAns) ? '--yes' : '--no']
+      const runInstallFn = args.runInstall ?? await loadRunInstall()
       return runInstallFn(installArgs)
     }
   }
 
   stdout.write('\nNext steps:\n')
-  stdout.write(`  collectivus --config ${cfgPath}\n`)
+  stdout.write(`  collectivus --config ${configPath}\n`)
   if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
-    stdout.write(`  collectivus install --config ${cfgPath}   (run as a background daemon)\n`)
+    stdout.write(`  collectivus install --config ${configPath}   (run as a background daemon)\n`)
   }
   return 0
+}
+
+/**
+ * Reuse-existing branch: the user accepted the config we found at the default
+ * path. Skip the question flow and jump to the daemon install offer (or hint
+ * when the platform / config doesn't qualify).
+ *
+ * @param {{
+ *   config: CollectivusConfig,
+ *   configPath: string,
+ *   stdout: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   platform: NodeJS.Platform,
+ *   runInstall?: (args: string[]) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+function useExistingConfig(args) {
+  const wantProxy = args.config.proxy !== undefined
+  return offerDaemonInstall({
+    configPath: args.configPath, wantProxy,
+    stdout: args.stdout, prompt: args.prompt, platform: args.platform,
+    runInstall: args.runInstall,
+  })
+}
+
+/**
+ * Print a short, human-readable summary of an existing config so the user can
+ * decide whether to reuse it. Intentionally not the full JSON dump — that's
+ * what `--print-config` is for.
+ *
+ * @param {{ write: (s: string) => void }} stdout
+ * @param {CollectivusConfig} config
+ */
+function printConfigSummary(stdout, config) {
+  if (config.proxy) {
+    const upstreams = Object.entries(config.proxy.upstreams ?? {})
+    const detail = upstreams
+      .map(function([name, u]) {
+        const prefix = u?.match?.path_prefix ?? ''
+        return `${name} → ${u?.base_url ?? ''}${prefix}`
+      })
+      .join(', ')
+    stdout.write(`  proxy:  ${config.proxy.listen}${detail ? `  (${detail})` : ''}\n`)
+  }
+  if (config.otel) {
+    stdout.write(`  otel:   ${config.otel.listen}\n`)
+  }
+  if (config.sink) {
+    stdout.write(`  sink:   ${config.sink.dir}\n`)
+  }
+}
+
+/**
+ * Read and parse a config file. Returns undefined when the file is missing or
+ * unparseable — the walkthrough treats both as "no usable existing config" and
+ * falls through to the question flow.
+ *
+ * @param {string} p
+ * @returns {CollectivusConfig | undefined}
+ */
+function defaultReadConfig(p) {
+  let raw
+  try {
+    raw = fs.readFileSync(p, 'utf8')
+  } catch {
+    return
+  }
+  try {
+    return JSON.parse(raw)
+  } catch { /* ignore — fall through to undefined */ }
 }
 
 /**

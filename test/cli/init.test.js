@@ -5,6 +5,10 @@ import path from 'node:path'
 import { runInit } from '../../src/cli/init.js'
 
 /**
+ * @import { CollectivusConfig } from '../../src/types.js'
+ */
+
+/**
  * Minimal in-memory stream collector, matching the existing CLI test helper.
  *
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -42,8 +46,17 @@ function scriptedPrompt(answers) {
 
 /** @type {string} */
 let tmpDir
+/**
+ * Path inside `tmpDir` that no test creates. Tests pass this as
+ * `defaultConfigPath` so the new "found existing config" branch sees nothing
+ * and falls through to the question flow.
+ *
+ * @type {string}
+ */
+let absentDefaultCfg
 beforeEach(function() {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-init-'))
+  absentDefaultCfg = path.join(tmpDir, 'absent-default.json')
 })
 afterEach(function() {
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -71,6 +84,7 @@ describe('runInit', function() {
       platform: 'darwin',
       cwd: tmpDir,
       defaultSinkDir: sinkDir,
+      defaultConfigPath: absentDefaultCfg,
       runInstall(args) { installCalls.push(args.join(' ')); return Promise.resolve(0) },
     })
     expect(code).toBe(0)
@@ -133,6 +147,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
       runInstall(args) { installCalls.push(args.join(' ')); return Promise.resolve(0) },
     })
     expect(code).toBe(0)
@@ -165,6 +180,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'linux',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(0)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
@@ -192,6 +208,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(0)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
@@ -216,6 +233,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
       runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
     })
     expect(code).toBe(0)
@@ -237,6 +255,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
       runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
     })
     expect(code).toBe(0)
@@ -256,6 +275,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'win32',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
       runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
     })
     expect(code).toBe(0)
@@ -274,6 +294,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(0)
     expect(fs.existsSync(cfgPath)).toBe(false)
@@ -288,6 +309,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/please choose 1, 2, or 3/)
@@ -301,6 +323,7 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/invalid provider choice/)
@@ -314,8 +337,104 @@ describe('runInit', function() {
       stdout, stderr, prompt,
       platform: 'darwin',
       cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/base URL is required/)
+  })
+
+  it('reuses an existing config and chains into runInstall', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'existing.json')
+    /** @type {CollectivusConfig} */
+    const existing = {
+      proxy: {
+        listen: '127.0.0.1:8787',
+        upstreams: { anthropic: { base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } } },
+        redact_headers: ['authorization'],
+      },
+      sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
+    }
+    const { prompt, asked } = scriptedPrompt([
+      '', // accept reuse (default = use)
+      'y', // install daemon
+      'y', // attach Claude Code
+    ])
+    /** @type {string[][]} */
+    const installCalls = []
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: cfgPath,
+      readConfig() { return existing },
+      runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+    })
+    expect(code).toBe(0)
+    expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
+    expect(stdout.value()).toMatch(/Found an existing config/)
+    expect(stdout.value()).toMatch(/127\.0\.0\.1:8787/)
+    expect(stdout.value()).toMatch(/anthropic → https:\/\/api\.anthropic\.com\/v1\/messages/)
+    // Did not ask the mode/provider questions.
+    expect(asked.some(function(q) { return /What would you like collectivus to do/.test(q) })).toBe(false)
+    expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
+  })
+
+  it('declining the existing config falls through to the question flow', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const existingPath = path.join(tmpDir, 'existing.json')
+    const newCfgPath = path.join(tmpDir, 'new.json')
+    /** @type {CollectivusConfig} */
+    const existing = {
+      proxy: {
+        listen: '127.0.0.1:9999',
+        upstreams: { anthropic: { base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } } },
+      },
+      sink: { type: 'file', dir: path.join(tmpDir, 'old-sink') },
+    }
+    const { prompt } = scriptedPrompt([
+      'new', // reject reuse
+      '1', '1', '', '', // proxy / anthropic / default listen / default sink
+      newCfgPath, // save to a new path
+      'y', // confirm write
+      'n', // skip daemon
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: existingPath,
+      readConfig() { return existing },
+    })
+    expect(code).toBe(0)
+    expect(fs.existsSync(newCfgPath)).toBe(true)
+    const written = JSON.parse(fs.readFileSync(newCfgPath, 'utf8'))
+    expect(written.proxy.listen).toBe('127.0.0.1:8787')
+  })
+
+  it('reusing an otel-only config skips the daemon prompt', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'existing.json')
+    /** @type {CollectivusConfig} */
+    const existing = {
+      otel: { listen: '0.0.0.0:4318' },
+      sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
+    }
+    const { prompt, asked } = scriptedPrompt([
+      'use', // reuse explicitly
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: cfgPath,
+      readConfig() { return existing },
+    })
+    expect(code).toBe(0)
+    expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
+    expect(stdout.value()).toMatch(/Next steps:/)
   })
 })

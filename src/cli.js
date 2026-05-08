@@ -80,7 +80,7 @@ function parseError(message) {
  * stdio and process signals.
  *
  * @param {string[]} argv CLI arguments (without node/script name).
- * @param {NodeJS.ProcessEnv} _env Environment variables (unused; reserved).
+ * @param {NodeJS.ProcessEnv} env Environment variables (read for upload credentials).
  * @param {{
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
@@ -90,7 +90,7 @@ function parseError(message) {
  * }} [hooks]
  * @returns {Promise<number>}
  */
-export async function run(argv, _env, hooks = {}) {
+export async function run(argv, env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
@@ -133,14 +133,25 @@ export async function run(argv, _env, hooks = {}) {
     return 0
   }
 
-  return runLifecycle(buildConfigListeners(config), stdout, stderr, onShutdownRequested)
+  // Fail at boot rather than at the first daily uploader tick when the
+  // upload section is configured but AWS credentials aren't in the env.
+  if (config.upload && (!env?.AWS_ACCESS_KEY_ID || !env?.AWS_SECRET_ACCESS_KEY)) {
+    stderr.write(
+      'config error: upload.bucket is set but AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not in the environment.\n'
+    )
+    return 1
+  }
+
+  return runLifecycle(buildConfigListeners(config, env), stdout, stderr, onShutdownRequested)
 }
 
 /**
  * @param {CollectivusConfig} config
+ * @param {NodeJS.ProcessEnv} [env] Forwarded to the uploader so its connector
+ *   reads creds from the same env we pre-flighted in `run()`.
  * @returns {ListenerFactory[]}
  */
-function buildConfigListeners(config) {
+function buildConfigListeners(config, env) {
   /** @type {ListenerFactory[]} */
   const factories = []
 
@@ -182,6 +193,31 @@ function buildConfigListeners(config) {
           await proxy.stop()
           await sink.close()
         },
+      }
+    })
+  }
+
+  if (config.upload) {
+    if (!config.sink) {
+      throw new Error('upload is configured but sink is missing')
+    }
+    const uploadConfig = config.upload
+    const sinkDir = config.sink.dir
+    // Lazy import keeps the SigV4 / parquet code off the hot path for
+    // installs that don't enable upload.
+    factories.push(async () => {
+      const { createUploader } = await import('./upload/index.js')
+      const uploader = createUploader({
+        outputDir: sinkDir,
+        options: uploadConfig,
+        env,
+      })
+      await uploader.start()
+      const time = uploadConfig.time ?? '00:10'
+      const prefix = uploadConfig.prefix ?? 'collectivus'
+      return {
+        description: `Uploader scheduled for ${time} UTC, target s3://${uploadConfig.bucket}/${prefix}`,
+        stop: () => uploader.stop(),
       }
     })
   }

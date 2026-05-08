@@ -536,6 +536,66 @@ describe('runInit', function() {
     expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
   })
 
+  it('skips daemon install offer when running via npx and prints global-install hint', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt, asked } = scriptedPrompt([
+      '1', '1', '', '', // proxy / anthropic / default listen / default sink
+      '', // no S3 upload
+      cfgPath, 'y',
+    ])
+    /** @type {string[][]} */
+    const installCalls = []
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+      binPath: '/Users/test/.npm/_npx/abc123/node_modules/.bin/collectivus',
+      runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+    })
+    expect(code).toBe(0)
+    expect(installCalls).toHaveLength(0)
+    expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
+    expect(stdout.value()).toMatch(/npx collectivus --config/)
+    expect(stdout.value()).toMatch(/npm install -g collectivus/)
+  })
+
+  it('skips daemon install offer when reusing an existing config via npx', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'existing.json')
+    /** @type {CollectivusConfig} */
+    const existing = {
+      version: 1,
+      proxy: {
+        listen: '127.0.0.1:8787',
+        upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } }],
+      },
+      sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
+    }
+    const { prompt, asked } = scriptedPrompt([
+      '', // accept reuse
+    ])
+    /** @type {string[][]} */
+    const installCalls = []
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: cfgPath,
+      binPath: '/Users/test/.npm/_npx/abc123/node_modules/.bin/collectivus',
+      readConfig() { return existing },
+      runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+    })
+    expect(code).toBe(0)
+    expect(installCalls).toHaveLength(0)
+    expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
+    expect(stdout.value()).toMatch(/npx collectivus --config/)
+    expect(stdout.value()).toMatch(/npm install -g collectivus/)
+  })
+
   it('declining the existing config falls through to the question flow', async function() {
     const stdout = memo()
     const stderr = memo()

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
-import { defaultPrompt } from './common.js'
+import { defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
  * @import { CollectivusConfig, FileSinkConfig, InitHooks, OtelConfig, ProxyConfig, UploadConfig } from '../types.js'
@@ -112,6 +112,7 @@ export async function runInit(hooks = {}) {
   const readConfig = hooks.readConfig ?? defaultReadConfig
   const platform = hooks.platform ?? process.platform
   const cwd = hooks.cwd ?? process.cwd()
+  const binPath = hooks.binPath ?? process.argv[1] ?? ''
   const defaultCfgPath = hooks.defaultConfigPath ?? defaultConfigPath()
 
   stdout.write('\n' + BANNER + '\nWelcome to collectivus.\n')
@@ -124,7 +125,7 @@ export async function runInit(hooks = {}) {
     if (ans === '' || /^u(se)?$/i.test(ans) || /^y(es)?$/i.test(ans)) {
       return useExistingConfig({
         config: existing, configPath: defaultCfgPath,
-        stdout, prompt, platform,
+        stdout, prompt, platform, binPath,
         runInstall: hooks.runInstall,
       })
     }
@@ -217,7 +218,7 @@ export async function runInit(hooks = {}) {
 
   return offerDaemonInstall({
     configPath: cfgPath, wantProxy,
-    stdout, prompt, platform,
+    stdout, prompt, platform, binPath,
     runInstall: hooks.runInstall,
   })
 }
@@ -226,19 +227,24 @@ export async function runInit(hooks = {}) {
  * Prompt for daemon install + Claude Code attach when the platform supports it
  * and the config has a proxy listener. Otherwise prints next-step hints.
  *
+ * Skips the daemon install offer when running via npx — daemonizing requires a
+ * persistent binary, which an npx-resolved path under `_npx/` is not.
+ *
  * @param {{
  *   configPath: string,
  *   wantProxy: boolean,
  *   stdout: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
+ *   binPath: string,
  *   runInstall?: (args: string[]) => Promise<number>,
  * }} args
  * @returns {Promise<number>}
  */
 async function offerDaemonInstall(args) {
-  const { configPath, wantProxy, stdout, prompt, platform } = args
-  if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
+  const { configPath, wantProxy, stdout, prompt, platform, binPath } = args
+  const viaNpx = isNpxBinPath(binPath)
+  if (wantProxy && (platform === 'darwin' || platform === 'linux') && !viaNpx) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
     stdout.write('\nRun collectivus as a background daemon?\n')
     stdout.write(`  Yes → installs a ${daemonKind} that starts at login and respawns\n`)
@@ -262,9 +268,19 @@ async function offerDaemonInstall(args) {
   }
 
   stdout.write('\nNext steps:\n')
-  stdout.write(`  collectivus --config ${configPath}\n`)
+  if (viaNpx) {
+    stdout.write(`  npx collectivus --config ${configPath}\n`)
+  } else {
+    stdout.write(`  collectivus --config ${configPath}\n`)
+  }
   if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
-    stdout.write(`  collectivus install --config ${configPath}   (run as a background daemon)\n`)
+    if (viaNpx) {
+      stdout.write('\nTo run collectivus as a background daemon, install it globally first:\n')
+      stdout.write('  npm install -g collectivus\n')
+      stdout.write(`  collectivus install --config ${configPath}\n`)
+    } else {
+      stdout.write(`  collectivus install --config ${configPath}   (run as a background daemon)\n`)
+    }
   }
   return 0
 }
@@ -280,6 +296,7 @@ async function offerDaemonInstall(args) {
  *   stdout: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
+ *   binPath: string,
  *   runInstall?: (args: string[]) => Promise<number>,
  * }} args
  * @returns {Promise<number>}
@@ -289,6 +306,7 @@ function useExistingConfig(args) {
   return offerDaemonInstall({
     configPath: args.configPath, wantProxy,
     stdout: args.stdout, prompt: args.prompt, platform: args.platform,
+    binPath: args.binPath,
     runInstall: args.runInstall,
   })
 }

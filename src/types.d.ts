@@ -322,6 +322,8 @@ export interface StatusHooks {
 export interface InitHooks {
   stdout?: WriteStream
   stderr?: WriteStream
+  /** Override for `process.argv[1]` in tests. Drives npx-detection. */
+  binPath?: string
   /** Override the readline prompt. */
   prompt?: (question: string) => Promise<string>
   /** Override file write. */

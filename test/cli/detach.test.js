@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { parseDetachArgs, runDetach } from './detach.js'
+import { parseDetachArgs, runDetach } from '../../src/cli/detach.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}

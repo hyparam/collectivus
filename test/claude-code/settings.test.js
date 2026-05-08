@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { SettingsError, attach, defaultSettingsPath, detach, isAttached } from './settings.js'
+import { SettingsError, attach, defaultSettingsPath, detach, isAttached } from '../../src/claude-code/settings.js'
 
 /** @type {string} */
 let tmpDir

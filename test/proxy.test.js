@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import http from 'node:http'
 import { Proxy } from '../src/proxy.js'
+import { Recorder } from '../src/recorder.js'
 
 /**
  * @typedef {object} CapturedRequest
@@ -418,6 +419,225 @@ describe('Proxy — first-match routing', () => {
     expect(upstreamB.requests).toHaveLength(1)
   })
 })
+
+describe('Proxy — SSE pass-through', () => {
+  /** @type {Proxy} */
+  let proxy
+  /** @type {MockUpstream} */
+  let upstream
+  /** @type {{ rows: any[], writeRow: (r: unknown) => Promise<void>, close: () => Promise<void> }} */
+  let sink
+
+  beforeEach(async () => {
+    upstream = await createMockUpstream()
+    /** @type {any[]} */
+    const rows = []
+    sink = {
+      rows,
+      writeRow(r) { rows.push(r); return Promise.resolve() },
+      close() { return Promise.resolve() },
+    }
+    const recorder = new Recorder({ sink })
+    proxy = new Proxy({
+      listen: '127.0.0.1:0',
+      upstreams: {
+        anthropic: { base_url: upstream.baseUrl, match: { path_prefix: '/v1/messages' } },
+      },
+    }, { recorder })
+    await proxy.start()
+  })
+
+  afterEach(async () => {
+    await proxy.stop()
+    await closeServer(upstream.server)
+  })
+
+  it('streams the upstream byte-for-byte to the client', async () => {
+    /** @type {string[]} */
+    const writes = [
+      'event: message_start\ndata: {"type":"message_start","msg":"a"}\n\n',
+      'event: content_block_delta\ndata: {"text":"hello"}\n\n',
+      'event: content_block_delta\ndata: {"text":" world"}\n\n',
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+    ]
+    const expected = writes.join('')
+
+    upstream.setHandler((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      // Write each event in its own tick so the proxy genuinely sees a stream
+      // rather than a single buffered response — this exercises the chunk tap.
+      let i = 0
+      function next() {
+        if (i >= writes.length) { res.end(); return }
+        res.write(writes[i++])
+        setImmediate(next)
+      }
+      next()
+    })
+
+    const r = await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'accept': 'text/event-stream' },
+      body: '{}',
+    })
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('text/event-stream')
+    const received = await r.text()
+    expect(received).toBe(expected)
+  })
+
+  it('records stream events in order with monotonic t_ms', async () => {
+    upstream.setHandler((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      // Space the writes so the t_ms values diverge meaningfully (>1 ms apart).
+      const events = [
+        'event: a\ndata: 1\n\n',
+        'event: b\ndata: 2\n\n',
+        'event: c\ndata: 3\n\n',
+      ]
+      let i = 0
+      function tick() {
+        if (i >= events.length) { res.end(); return }
+        res.write(events[i++])
+        setTimeout(tick, 5)
+      }
+      tick()
+    })
+
+    const r = await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'accept': 'text/event-stream' },
+      body: '{}',
+    })
+    await r.text()
+
+    await waitForRows(sink, 4)
+    const events = sink.rows.filter((row) => row.kind === 'stream_event')
+    expect(events.map((row) => ({ event: row.event, data: row.data }))).toEqual([
+      { event: 'a', data: '1' },
+      { event: 'b', data: '2' },
+      { event: 'c', data: '3' },
+    ])
+    // Monotonic non-decreasing.
+    for (let i = 1; i < events.length; i++) {
+      expect(events[i].t_ms).toBeGreaterThanOrEqual(events[i - 1].t_ms)
+    }
+    // All event rows share the exchange_id with the final exchange row.
+    const exchanges = sink.rows.filter((row) => row.kind === 'exchange')
+    expect(exchanges).toHaveLength(1)
+    const id = exchanges[0].exchange_id
+    expect(events.every((row) => row.exchange_id === id)).toBe(true)
+    expect(exchanges[0].stream_event_count).toBe(3)
+    expect(exchanges[0].response.body).toBeNull()
+  })
+
+  it('records error: "client_aborted" and cancels the upstream when the client disconnects mid-stream', async () => {
+    /** @type {(() => void) | null} */
+    let upstreamReqClosed = null
+    /** @type {Promise<void>} */
+    const upstreamClosed = new Promise((resolve) => {
+      upstreamReqClosed = () => resolve()
+    })
+
+    upstream.setHandler((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('event: first\ndata: 1\n\n')
+      // Hold the connection open so the client has a chance to abort
+      // mid-stream; resolve when the upstream sees the request close.
+      req.on('close', () => upstreamReqClosed && upstreamReqClosed())
+    })
+
+    const ac = new AbortController()
+    const r = await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'accept': 'text/event-stream' },
+      body: '{}',
+      signal: ac.signal,
+    })
+    expect(r.status).toBe(200)
+
+    // Read the first event so we know streaming started, then abort.
+    const reader = r.body.getReader()
+    const first = await reader.read()
+    expect(first.done).toBe(false)
+    ac.abort()
+    try { await reader.cancel() } catch { /* ignore */ }
+
+    // Upstream should observe the request close — proves the proxy really
+    // cancelled the upstream connection rather than letting it dangle.
+    await upstreamClosed
+
+    await waitForRows(sink, 1, (rows) => rows.some((row) => row.kind === 'exchange'))
+    const exchanges = sink.rows.filter((row) => row.kind === 'exchange')
+    expect(exchanges).toHaveLength(1)
+    expect(exchanges[0].error).toBe('client_aborted')
+  })
+
+  it('keeps TTFB overhead under 50ms on localhost', async () => {
+    upstream.setHandler((_req, res) => {
+      // Flush headers + first event immediately; no setTimeout.
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write('event: ping\ndata: 1\n\n')
+      // Hold the response open briefly so we measure TTFB cleanly without
+      // racing the close event.
+      setTimeout(() => res.end(), 20)
+    })
+
+    // Warm up the keep-alive connection pool, the V8 method caches, and the
+    // upstream's TCP listener — first-request overhead in node:undici and
+    // node:http on a cold process easily eats >100ms. The bead's <50ms budget
+    // is about the proxy's *steady-state* tee overhead, not cold start.
+    const warm = await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'accept': 'text/event-stream' },
+      body: '{}',
+    })
+    await warm.text()
+
+    // Best-of-3 — IO timing on a busy CI box is noisy; the proxy's steady-state
+    // overhead is the floor we're measuring, not any one sample.
+    /** @type {number[]} */
+    const samples = []
+    for (let i = 0; i < 3; i++) {
+      const start = Date.now()
+      const r = await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+        method: 'POST',
+        headers: { 'accept': 'text/event-stream' },
+        body: '{}',
+      })
+      const reader = r.body.getReader()
+      const { value } = await reader.read()
+      samples.push(Date.now() - start)
+      try { await reader.cancel() } catch { /* ignore */ }
+      expect(r.status).toBe(200)
+      expect(value.byteLength).toBeGreaterThan(0)
+    }
+    const best = Math.min(...samples)
+    expect(best).toBeLessThan(50)
+  })
+})
+
+/**
+ * Wait until the in-memory sink has at least `count` rows or the optional
+ * predicate returns true. Polls because writes happen on the proxy's IO
+ * callbacks — we can't await them directly from outside the proxy.
+ *
+ * @param {{ rows: any[] }} sink
+ * @param {number} count
+ * @param {(rows: any[]) => boolean} [predicate]
+ * @returns {Promise<void>}
+ */
+async function waitForRows(sink, count, predicate) {
+  const start = Date.now()
+  while (sink.rows.length < count || predicate && !predicate(sink.rows)) {
+    if (Date.now() - start > 2000) {
+      throw new Error(
+        `waitForRows timeout: have ${sink.rows.length} rows, need ${count}`
+      )
+    }
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
 
 /**
  * Minimal raw HTTP request that lets the test set headers fetch refuses to set

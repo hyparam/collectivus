@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ConfigError } from '../config.js'
-import { parseAttachArgs, runAttach } from './attach.js'
+import { ConfigError } from '../../src/config.js'
+import { parseAttachArgs, runAttach } from '../../src/cli/attach.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -103,7 +103,7 @@ describe('runAttach', function() {
     const stdout = memo()
     const stderr = memo()
     const cfg = { proxy: { listen: '0.0.0.0:8765', upstreams: {} } }
-    /** @type {Array<import('../claude-code/settings.js').AttachOptions>} */
+    /** @type {Array<import('../../src/claude-code/settings.js').AttachOptions>} */
     const calls = []
     const code = await runAttach(['--config', '/tmp/x'], {
       stdout, stderr,

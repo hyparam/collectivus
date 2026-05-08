@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ConfigError } from '../config.js'
-import { parseInstallArgs, runInstall } from './install.js'
+import { ConfigError } from '../../src/config.js'
+import { parseInstallArgs, runInstall } from '../../src/cli/install.js'
 
 /**
  * Minimal in-memory stream collector matching the existing CLI test helper.

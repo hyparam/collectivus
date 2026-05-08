@@ -1,7 +1,7 @@
 {
   "name": "collectivus",
   "version": "1.1.0",
-  "description": "Zero-dependency OTLP/HTTP collector that writes to JSONL files",
+  "description": "OTLP collector and pass-through LLM proxy that records every request and response to JSONL",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -19,8 +19,12 @@
     "eslint": "9.39.2",
     "eslint-plugin-jsdoc": "62.9.0",
     "globals": "16.2.0",
+    "hyparquet": "1.25.6",
     "typescript": "6.0.2",
     "vitest": "2.1.0"
+  },
+  "optionalDependencies": {
+    "hyparquet-writer": "0.14.0"
   },
   "keywords": [
     "opentelemetry",
@@ -28,7 +32,11 @@
     "collector",
     "traces",
     "metrics",
-    "logs"
+    "logs",
+    "anthropic",
+    "claude",
+    "llm-proxy",
+    "claude-code"
   ],
   "license": "MIT"
 }

@@ -10,7 +10,19 @@ The whole pipeline is local — no third-party services, no server-side keys.
 
 ## 1. Start collectivus with a proxy config
 
-Save this as `collectivus.json`:
+The fastest path is the interactive walkthrough — run `collectivus` with no
+arguments and answer the prompts (LLM gateway proxy → Anthropic → defaults
+→ install as daemon → attach Claude Code). It writes the config to
+`~/.hyp/collectivus.json`, recordings to `~/.hyp/collectivus/`, and (if you
+opt in) sets up the LaunchAgent / systemd unit and points Claude Code at
+the proxy:
+
+```bash
+npx collectivus
+```
+
+The rest of this doc shows the manual config equivalent. Save this as
+`collectivus.json`:
 
 ```json
 {

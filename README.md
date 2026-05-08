@@ -20,6 +20,21 @@ npm install collectivus
 
 ## Quick start: record claude-code
 
+The fastest path is the interactive walkthrough. Run `collectivus` with no
+arguments and it asks what to set up (LLM proxy / OTLP receiver / both),
+which provider to forward to, where to write recordings, and whether to
+install as a daemon and attach Claude Code:
+
+```bash
+npx collectivus
+```
+
+By default it writes the config to `~/.hyp/collectivus.json`, the sink to
+`~/.hyp/collectivus/`, and (if you opt in) installs a LaunchAgent / systemd
+user unit that boots at login.
+
+Or write a config by hand:
+
 ```bash
 # 1. Save examples/claude-code.json (proxy on 127.0.0.1:8787 → api.anthropic.com)
 npx collectivus --config examples/claude-code.json
@@ -58,7 +73,7 @@ Pass a JSON config with `--config <path>`. The schema:
 |-------|---------|
 | `otel`  | Enable the OTLP receiver. Omit to disable. |
 | `proxy` | Enable the LLM proxy. Omit to disable. Requires `sink`. |
-| `sink`  | Where the proxy writes `proxy.jsonl`. (OTLP output also lands under `sink.dir` when set.) |
+| `sink`  | Where the proxy writes `proxy.jsonl`. (OTLP output also lands under `sink.dir` when set.) The walkthrough defaults this to `~/.hyp/collectivus/`. |
 
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
@@ -200,12 +215,12 @@ collectivus install --config /path/to/collectivus.json
 # Configure Claude Code to use this proxy? [Y/n] y
 # ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
 # ✓ Claude Code attached (~/.claude/settings.json)
-# Logs: ~/Library/Logs/Collectivus/collectivus.log
+# Logs: ~/.hyp/collectivus/collectivus.log
 ```
 
 The LaunchAgent is set with `RunAtLoad=true` and `KeepAlive=true`, so the
 daemon starts at login and launchd restarts it if it exits. Logs land in
-`~/Library/Logs/Collectivus/`:
+`~/.hyp/collectivus/`:
 
 - `collectivus.log` — stdout
 - `collectivus.err.log` — stderr
@@ -226,7 +241,7 @@ configured with `Restart=always`, `RestartSec=5`, and
 `WantedBy=default.target` so systemd starts it at login and respawns it on
 exit. Logs are written via `StandardOutput=append:` /
 `StandardError=append:` to the directory you pass as `logDir` (the CLI
-defaults to `~/Library/Logs/Collectivus`, mirroring the macOS layout).
+defaults to `~/.hyp/collectivus`).
 
 > **Linger required for non-login boots.** User-level systemd services run
 > only while the user has a session. To keep the daemon up across reboots

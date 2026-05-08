@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { FileSink } from './file.js'
+import { FileSink } from '../../src/sinks/file.js'
 
 /** @type {string} */
 let tmpDir

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SseParser, isSseHeaders } from './sse.js'
+import { SseParser, isSseHeaders } from '../src/sse.js'
 
 describe('SseParser — single-chunk dispatch', () => {
   it('parses a basic event/data pair', () => {

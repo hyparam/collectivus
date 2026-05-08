@@ -3,9 +3,9 @@ import fs from 'node:fs'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
-import { Recorder, isSseHeaders } from './recorder.js'
-import { FileSink } from './sinks/file.js'
-import { Proxy } from './proxy.js'
+import { Recorder, isSseHeaders } from '../src/recorder.js'
+import { FileSink } from '../src/sinks/file.js'
+import { Proxy } from '../src/proxy.js'
 
 /**
  * @typedef {object} CollectingSink

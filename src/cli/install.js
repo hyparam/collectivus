@@ -3,6 +3,7 @@ import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
 import {
   LAUNCH_AGENT_LABEL,
+  daemonKindLabel,
   defaultLogDir,
   defaultPrompt,
   isNpxBinPath,
@@ -166,7 +167,7 @@ export async function runInstall(argv, hooks = {}) {
     return 1
   }
 
-  stdout.write(`✓ Daemon installed (LaunchAgent: ${LAUNCH_AGENT_LABEL})\n`)
+  stdout.write(`✓ Daemon installed (${daemonKindLabel()})\n`)
 
   /** @type {boolean} */
   let shouldAttach

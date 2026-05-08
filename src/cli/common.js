@@ -1,10 +1,24 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 export const LAUNCH_AGENT_LABEL = 'com.hyparam.collectivus'
 export const DEFAULT_PLIST_DIR_SEGMENTS = ['Library', 'LaunchAgents']
+
+/**
+ * Human-readable description of the daemon artifact for the running platform.
+ * Used in install/uninstall success messages so Linux output doesn't claim a
+ * "LaunchAgent" was touched when in fact a systemd user unit was.
+ *
+ * @param {NodeJS.Platform} [platform]
+ * @returns {string}
+ */
+export function daemonKindLabel(platform = process.platform) {
+  if (platform === 'linux') return `systemd unit: ${LAUNCH_AGENT_LABEL}.service`
+  return `LaunchAgent: ${LAUNCH_AGENT_LABEL}`
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const PACKAGE_PATH = path.join(here, '..', '..', 'package.json')

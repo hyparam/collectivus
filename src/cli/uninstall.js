@@ -1,6 +1,6 @@
 import process from 'node:process'
 import { detach as defaultDetach, isAttached as defaultIsAttached, defaultSettingsPath } from '../claude-code/settings.js'
-import { LAUNCH_AGENT_LABEL, defaultPrompt } from './common.js'
+import { LAUNCH_AGENT_LABEL, daemonKindLabel, defaultPrompt } from './common.js'
 import { uninstallDaemon } from '../daemon/index.js'
 
 const USAGE = `Usage:
@@ -87,7 +87,7 @@ export async function runUninstall(argv, hooks = {}) {
     stderr.write(`error: failed to uninstall daemon: ${formatError(err)}\n`)
     return 1
   }
-  stdout.write(`✓ Daemon removed (LaunchAgent: ${LAUNCH_AGENT_LABEL})\n`)
+  stdout.write(`✓ Daemon removed (${daemonKindLabel()})\n`)
 
   /** @type {boolean} */
   let shouldDetach

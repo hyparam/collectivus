@@ -229,7 +229,7 @@ daemon starts at login and launchd restarts it if it exits. Logs land in
 ```bash
 npm install -g collectivus
 collectivus install --config /path/to/collectivus.json
-# ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
+# ✓ Daemon installed (systemd unit: com.hyparam.collectivus.service)
 # ✓ Claude Code attached (~/.claude/settings.json)
 ```
 
@@ -341,7 +341,3 @@ that changed on disk between read and write.
 
 `settings.json` containing JSONC-style comments is rejected rather than
 silently rewritten as plain JSON.
-
-## License
-
-MIT

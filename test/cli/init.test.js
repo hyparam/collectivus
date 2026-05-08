@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { runInit } from '../../src/cli/init.js'
+import { loadConfig } from '../../src/config.js'
 
 /**
  * @import { CollectivusConfig } from '../../src/types.js'
@@ -194,15 +195,16 @@ describe('runInit', function() {
     expect(written.otel).toEqual({ listen: '0.0.0.0:4317' })
   })
 
-  it('custom upstream prompts for base URL and prefix', async function() {
+  it('custom upstream defaults the name to the derived host slug', async function() {
     const stdout = memo()
     const stderr = memo()
     const cfgPath = path.join(tmpDir, 'cfg.json')
-    const { prompt } = scriptedPrompt([
+    const { prompt, asked } = scriptedPrompt([
       '1',
       '4', // custom
       'https://api.example.com', // base URL
       '/v2/chat', // prefix
+      '', // accept the derived default name
       '', // default proxy listen
       '', // default sink
       cfgPath,
@@ -216,13 +218,98 @@ describe('runInit', function() {
       defaultConfigPath: absentDefaultCfg,
     })
     expect(code).toBe(0)
+    expect(asked.some(function(q) { return /Upstream name \[example\]/.test(q) })).toBe(true)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
     expect(written.version).toBe(1)
     expect(written.proxy.upstreams).toEqual([{
-      name: 'upstream',
+      name: 'example',
       base_url: 'https://api.example.com',
       match: { path_prefix: '/v2/chat' },
     }])
+  })
+
+  it('custom upstream accepts an explicit slug name', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1',
+      '4', // custom
+      'https://api.example.com',
+      '/v2/chat',
+      'my-llm-1', // explicit slug
+      '',
+      '',
+      cfgPath,
+      'y',
+      'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.proxy.upstreams[0].name).toBe('my-llm-1')
+  })
+
+  it('custom upstream rejects an invalid slug name', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const { prompt } = scriptedPrompt([
+      '1',
+      '4',
+      'https://api.example.com',
+      '/v2/chat',
+      'Bad Name', // invalid: capital + space
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/name must match \[a-z\]\[a-z0-9-\]\*/)
+  })
+
+  it.each([
+    ['anthropic', '1', { name: 'anthropic', base_url: 'https://api.anthropic.com', path_prefix: '/v1/messages' }],
+    ['openai', '2', { name: 'openai', base_url: 'https://api.openai.com', path_prefix: '/v1' }],
+    ['gemini', '3', { name: 'gemini', base_url: 'https://generativelanguage.googleapis.com', path_prefix: '/v1' }],
+  ])('preset %s round-trips through loadConfig', async function(_label, choice, expected) {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const sinkDir = path.join(tmpDir, 'sink')
+    const { prompt } = scriptedPrompt([
+      '1', // proxy only
+      choice, // preset choice
+      '', // default proxy listen
+      '', // default sink (resolves via defaultSinkDir override)
+      cfgPath,
+      'y',
+      'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultSinkDir: sinkDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    // The validator from co-zdn.7.1 must accept the generated config.
+    const loaded = loadConfig(cfgPath, { strict: true })
+    expect(loaded.version).toBe(1)
+    expect(loaded.proxy?.upstreams).toEqual([{
+      name: expected.name,
+      base_url: expected.base_url,
+      match: { path_prefix: expected.path_prefix },
+    }])
+    expect(loaded.sink).toEqual({ type: 'file', dir: sinkDir })
   })
 
   it('chains into runInstall with --yes when daemon + Claude Code accepted', async function() {

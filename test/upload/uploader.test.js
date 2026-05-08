@@ -224,6 +224,63 @@ describe('uploadPending', () => {
     expect(putAttempts).toBe(1)
     expect(results[0].uploaded).toBe(false)
     expect(results[0].error?.message).toMatch(/403/)
+    expect(results[0].retryable).toBe(false)
+  })
+
+  it('flags exhausted transient connector retries as retryable', async () => {
+    writeJsonl('svc-a', 'logs', yesterday, [
+      { serviceName: 'svc-a', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    const connector = {
+      scheme: 'flaky',
+      async putObject() {
+        const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 503'))
+        err.statusCode = 503
+        throw err
+      },
+      async headObject() { return null },
+    }
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async () => {} }
+    )
+    errSpy.mockRestore()
+
+    expect(results[0].uploaded).toBe(false)
+    expect(results[0].retryable).toBe(true)
+  })
+
+  it('does not flag non-connector errors as retryable', async () => {
+    // Make the "JSONL file" actually be a directory so readJsonlRows hits
+    // EISDIR — a non-connector error with no statusCode. Pre-fix, the
+    // outer catch ran isTransient on it and incorrectly flagged it
+    // retryable, putting the scheduler into a fast-retry loop.
+    const dir = path.join(outputDir, 'services', 'svc-bad')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.mkdirSync(path.join(dir, `logs-${yesterday}.jsonl`))
+
+    const connector = memoryConnector()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async () => {} }
+    )
+    errSpy.mockRestore()
+
+    expect(results).toHaveLength(1)
+    expect(results[0].uploaded).toBe(false)
+    expect(results[0].error).toBeDefined()
+    expect(results[0].retryable).toBe(false)
   })
 
   it('writes a ledger entry per uploaded file', async () => {

@@ -155,7 +155,8 @@ export async function uploadPending(options, connector, outputDir, today, deps =
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
       console.error(`[collectivus] upload failed for ${job.service}/${job.signal}/${job.date}: ${error.message}`)
-      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error, retryable: isTransient(error) })
+      const retryable = /** @type {{ transient?: unknown }} */ (error).transient === true
+      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error, retryable })
     }
   }
   return results
@@ -183,6 +184,13 @@ async function withRetry(fn, deps) {
       if (attempt === deps.maxAttempts - 1) break
       await deps.sleep(deps.initialBackoffMs * (4 ** attempt))
     }
+  }
+  // Exhausted retries on a transient connector error — tag it so the
+  // outer catch in uploadPending knows the scheduler should fast-retry.
+  // Errors thrown elsewhere in uploadJob (bad JSONL, encoding bugs, fs)
+  // are never tagged and therefore never classified as retryable.
+  if (lastErr && typeof lastErr === 'object') {
+    /** @type {{ transient?: boolean }} */ (lastErr).transient = true
   }
   throw lastErr
 }

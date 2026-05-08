@@ -48,24 +48,31 @@ const OTLP_NS_PER_MS = 1000000n
 const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
 
+/**
+ * @import { UploadOptions } from './upload/upload.d.ts'
+ */
+
 class Collector {
-  /** @param {{ port?: number, host?: string, outputDir?: string }} [options] */
+  /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
   constructor(options = {}) {
     this.port = options.port ?? 4318
     /** @type {string | undefined} */
     this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
+    this.uploadOptions = options.upload
     /** @type {import('node:http').Server | null} */
     this.server = null
+    /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | null} */
+    this.uploader = null
   }
 
-  start() {
+  async start() {
     ensureDir(this.outputDir)
 
     const server = createServer(this.handleData.bind(this))
     this.server = server
 
-    return new Promise((resolve, reject) => {
+    await new Promise((resolve, reject) => {
       /** @param {Error} err */
       function onError(err) {
         server.off('listening', onListening)
@@ -83,16 +90,28 @@ class Collector {
         server.listen(this.port)
       }
     })
+
+    if (this.uploadOptions) {
+      const { createUploader } = await import('./upload/index.js')
+      this.uploader = createUploader({
+        outputDir: this.outputDir,
+        options: this.uploadOptions,
+      })
+      await this.uploader.start()
+    }
   }
 
-  stop() {
-    return new Promise((resolve, reject) => {
+  async stop() {
+    if (this.uploader) {
+      await this.uploader.stop()
+      this.uploader = null
+    }
+    await new Promise((resolve, reject) => {
       const { server } = this
       if (!server) {
         resolve(undefined)
         return
       }
-
       server.close((err) => err ? reject(err) : resolve(undefined))
     })
   }

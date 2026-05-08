@@ -252,33 +252,67 @@ describe('run() — --config <path>', () => {
     expect(JSON.parse(stdout.value())).toEqual(cfg)
   })
 
-  it('upload key is parsed but no uploader is started in this phase', async () => {
-    // Schema accepts upload, but co-zdn.7.1 does not wire createUploader yet —
-    // running the CLI with `upload: { bucket }` should only emit listener
-    // lines (otel/proxy), never an upload start line. createUploader requires
-    // AWS_ACCESS_KEY_ID; the absence of an "AWS" stderr complaint here proves
-    // we never reached it.
+  it('starts the uploader when upload is configured and AWS creds are present', async () => {
     const sinkDir = path.join(tmpDir, 'data')
     const cfg = {
       version: 1,
       otel: { listen: '127.0.0.1:0' },
       sink: { type: 'file', dir: sinkDir },
-      upload: { bucket: 'irrelevant' },
+      upload: { bucket: 'b', prefix: 'collectivus', time: '03:14' },
     }
     const cfgPath = writeConfig(cfg)
     const stdout = memo()
     const stderr = memo()
     /** @type {(signal: string) => void} */
     let trigger = noop
-    const result = run(['--config', cfgPath], {}, {
+    // sinkDir/services does not exist → discoverJobs returns [] →
+    // uploader.start()'s catch-up tick is a no-op and never touches S3.
+    const env = { AWS_ACCESS_KEY_ID: 'test-id', AWS_SECRET_ACCESS_KEY: 'test-secret' }
+    const result = run(['--config', cfgPath], env, {
       stdout, stderr,
       onShutdownRequested: (handler) => { trigger = handler },
     })
-    await waitFor(() => stdout.value().includes('OTLP listener bound'))
+    await waitFor(() => stdout.value().includes('Uploader scheduled'))
     trigger('SIGTERM')
     expect(await result).toBe(0)
-    // Listener line only — no uploader start, no AWS-credential complaint.
-    expect(stdout.value()).not.toMatch(/upload(er)? (started|bound)/i)
+    expect(stdout.value()).toMatch(/Uploader scheduled for 03:14 UTC, target s3:\/\/b\/collectivus/)
+    expect(stderr.value()).not.toMatch(/AWS_ACCESS_KEY/)
+  })
+
+  it('exits 1 with a config error before binding any listener when AWS creds are missing', async () => {
+    const sinkDir = path.join(tmpDir, 'data')
+    const cfg = {
+      version: 1,
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: sinkDir },
+      upload: { bucket: 'b' },
+    }
+    const cfgPath = writeConfig(cfg)
+    const stdout = memo()
+    const stderr = memo()
+    // Empty env: no AWS creds in scope.
+    const code = await run(['--config', cfgPath], {}, { stdout, stderr })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(
+      /config error: upload\.bucket is set but AWS_ACCESS_KEY_ID \/ AWS_SECRET_ACCESS_KEY are not in the environment\./
+    )
+    // Boot must fail before the otel listener gets a chance to bind.
+    expect(stdout.value()).not.toMatch(/OTLP listener bound/)
+  })
+
+  it('skips the AWS env precheck for --print-config so config inspection still works without creds', async () => {
+    const cfg = {
+      version: 1,
+      otel: { listen: '0.0.0.0:4318' },
+      sink: { type: 'file', dir: '/tmp/x' },
+      upload: { bucket: 'b' },
+    }
+    const cfgPath = writeConfig(cfg)
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run(['--config', cfgPath, '--print-config'], {}, { stdout, stderr })
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout.value())).toEqual(cfg)
     expect(stderr.value()).not.toMatch(/AWS_ACCESS_KEY/)
   })
 

@@ -40,13 +40,13 @@ describe('parseAttachArgs', function() {
 
   it('parses --config <path>', function() {
     expect(parseAttachArgs(['--config', '/tmp/c.json'])).toMatchObject({
-      configPath: '/tmp/c.json', port: null, help: false, error: null,
+      configPath: '/tmp/c.json', help: false,
     })
   })
 
   it('parses --port <n>', function() {
     expect(parseAttachArgs(['--port', '8787'])).toMatchObject({
-      configPath: null, port: 8787, error: null,
+      port: 8787,
     })
   })
 

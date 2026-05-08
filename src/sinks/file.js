@@ -18,8 +18,8 @@ export class FileSink {
     this.dir = dir
     /** @type {string} */
     this.filePath = path.join(dir, 'proxy.jsonl')
-    /** @type {FileHandle | null} */
-    this.fh = null
+    /** @type {FileHandle | undefined} */
+    this.fh = undefined
     /** @type {Promise<void>} */
     this.queue = Promise.resolve()
     /** @type {boolean} */
@@ -60,9 +60,9 @@ export class FileSink {
     } catch {
       // surfaced to the caller of writeRow already
     }
-    if (this.fh !== null) {
+    if (this.fh !== undefined) {
       const { fh } = this
-      this.fh = null
+      this.fh = undefined
       try {
         await fh.sync()
       } finally {
@@ -78,7 +78,7 @@ export class FileSink {
  * @returns {Promise<void>}
  */
 async function writeLine(sink, line) {
-  if (sink.fh === null) {
+  if (sink.fh === undefined) {
     await fs.mkdir(sink.dir, { recursive: true })
     sink.fh = await fs.open(sink.filePath, 'a')
   }

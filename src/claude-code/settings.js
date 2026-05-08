@@ -85,7 +85,7 @@ export async function detach(opts = {}) {
   const marker = value._collectivus
   if (!isPlainObject(marker)) return { changed: false }
 
-  const markerPort = typeof marker.port === 'number' ? marker.port : null
+  const markerPort = typeof marker.port === 'number' ? marker.port : undefined
   delete value._collectivus
 
   /** @type {string | undefined} */
@@ -95,7 +95,7 @@ export async function detach(opts = {}) {
   if (isPlainObject(value.env)) {
     const { env } = value
     const current = env.ANTHROPIC_BASE_URL
-    if (markerPort !== null && current === `http://127.0.0.1:${markerPort}`) {
+    if (markerPort !== undefined && current === `http://127.0.0.1:${markerPort}`) {
       removed = current
       delete env.ANTHROPIC_BASE_URL
     } else if (typeof current === 'string') {
@@ -143,7 +143,7 @@ async function readSettings(settingsPath) {
     raw = await fs.readFile(settingsPath, 'utf8')
   } catch (err) {
     if (errCode(err) === 'ENOENT') {
-      return { value: {}, existed: false, mtimeMs: null }
+      return { value: {}, existed: false, mtimeMs: undefined }
     }
     throw new SettingsError(`failed to read ${settingsPath}: ${errMsg(err)}`, { cause: err })
   }
@@ -184,17 +184,17 @@ async function readSettings(settingsPath) {
 
 /**
  * Write `value` as pretty JSON to `filePath` atomically. If `expectedMtimeMs`
- * is non-null, refuses to overwrite when the file's mtime has moved since the
+ * is defined, refuses to overwrite when the file's mtime has moved since the
  * read (best-effort concurrent-edit detection). Cleans up the tmp file on
  * rename failure.
  *
  * @param {string} filePath
  * @param {unknown} value
- * @param {number | null} expectedMtimeMs
+ * @param {number | undefined} expectedMtimeMs
  * @returns {Promise<void>}
  */
 async function writeAtomic(filePath, value, expectedMtimeMs) {
-  if (expectedMtimeMs !== null) {
+  if (expectedMtimeMs !== undefined) {
     let current
     try {
       current = await fs.stat(filePath)
@@ -220,8 +220,8 @@ async function writeAtomic(filePath, value, expectedMtimeMs) {
   const body = JSON.stringify(value, null, 2) + '\n'
   const tmpPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
 
-  /** @type {FileHandle | null} */
-  let handle = null
+  /** @type {FileHandle | undefined} */
+  let handle
   try {
     handle = await fs.open(tmpPath, 'w', 0o600)
     await handle.writeFile(body, 'utf8')
@@ -320,12 +320,12 @@ function validateVersion(version) {
 
 /**
  * @param {unknown} err
- * @returns {string | null}
+ * @returns {string | undefined}
  */
 function errCode(err) {
-  if (!err || typeof err !== 'object' || !('code' in err)) return null
+  if (!err || typeof err !== 'object' || !('code' in err)) return undefined
   const { code } = /** @type {{ code: unknown }} */ (err)
-  return typeof code === 'string' ? code : null
+  return typeof code === 'string' ? code : undefined
 }
 
 /**

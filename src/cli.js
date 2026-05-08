@@ -24,8 +24,8 @@ const DRAIN_TIMEOUT_MS = 5000
  * @returns {ParseResult}
  */
 export function parseArgs(argv) {
-  /** @type {string | null} */
-  let configPath = null
+  /** @type {string | undefined} */
+  let configPath
   let printConfig = false
 
   for (let i = 0; i < argv.length; i++) {
@@ -50,7 +50,7 @@ export function parseArgs(argv) {
     return parseError(`unknown argument: ${arg}`)
   }
 
-  if (configPath === null) {
+  if (configPath === undefined) {
     return parseError('--config <path> is required')
   }
 
@@ -273,7 +273,7 @@ function parseListen(value) {
 }
 
 /**
- * @param {Server | null} server
+ * @param {Server | undefined} server
  * @param {string | undefined} configuredHost
  * @param {number} configuredPort
  * @returns {string}

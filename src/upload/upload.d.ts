@@ -5,8 +5,8 @@ export interface StorageConnector {
   readonly scheme: string
   /** PUT a single object. Idempotent — overwriting is fine. */
   putObject(key: string, body: Uint8Array, contentType?: string): Promise<void>
-  /** HEAD an object to check existence. Returns null if absent. */
-  headObject(key: string): Promise<{ size: number } | null>
+  /** HEAD an object to check existence. Returns undefined if absent. */
+  headObject(key: string): Promise<{ size: number } | undefined>
   close?(): Promise<void>
 }
 

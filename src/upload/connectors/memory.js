@@ -20,7 +20,7 @@ export function memoryConnector() {
     },
     async headObject(key) {
       const body = store.get(key)
-      if (!body) return null
+      if (!body) return undefined
       return { size: body.byteLength }
     },
   }

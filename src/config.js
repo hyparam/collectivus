@@ -35,7 +35,7 @@ export function loadConfig(configPath) {
   try {
     raw = fs.readFileSync(configPath, 'utf8')
   } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? err.code : null
+    const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined
     if (code === 'ENOENT') {
       throw new ConfigError(`config file not found: ${configPath}`)
     }

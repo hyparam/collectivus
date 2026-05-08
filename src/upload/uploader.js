@@ -85,7 +85,7 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
 
   // Fallback existence check protects us if the ledger was lost.
   const head = await withRetry(() => connector.headObject(key), resolved)
-  if (head !== null) {
+  if (head !== undefined) {
     const entry = {
       service: job.service,
       signal: job.signal,

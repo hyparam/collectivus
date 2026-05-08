@@ -46,10 +46,10 @@ export class Proxy {
     this.port = port
     /** @type {CompiledUpstream[]} */
     this.upstreams = compileUpstreams(config.upstreams)
-    /** @type {Recorder | null} */
-    this.recorder = options.recorder ?? null
-    /** @type {Server | null} */
-    this.server = null
+    /** @type {Recorder | undefined} */
+    this.recorder = options.recorder
+    /** @type {Server | undefined} */
+    this.server = undefined
   }
 
   /**
@@ -95,7 +95,7 @@ export class Proxy {
         if (err) {
           reject(err)
         } else {
-          this.server = null
+          this.server = undefined
           resolve(undefined)
         }
       })
@@ -163,7 +163,7 @@ function compileUpstreams(upstreams) {
 
 /**
  * @param {CompiledUpstream[]} upstreams
- * @param {Recorder | null} recorder
+ * @param {Recorder | undefined} recorder
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
@@ -194,7 +194,7 @@ function handleRequest(upstreams, recorder, req, res) {
       path: requestUrl,
       headers: req.headers,
     },
-  }) ?? null
+  })
 
   const upstreamReq = lib.request({
     method: req.method,
@@ -312,7 +312,7 @@ function finishSafely(exchange) {
  *
  * @param {CompiledUpstream[]} upstreams
  * @param {string} pathname
- * @returns {CompiledUpstream | null}
+ * @returns {CompiledUpstream | undefined}
  */
 function matchUpstream(upstreams, pathname) {
   for (const u of upstreams) {
@@ -321,7 +321,7 @@ function matchUpstream(upstreams, pathname) {
       return u
     }
   }
-  return null
+  return undefined
 }
 
 /**

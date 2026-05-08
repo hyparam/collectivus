@@ -66,14 +66,14 @@ export function defaultPlistPath(homeDir) {
 
 /**
  * Read an installed LaunchAgent plist and extract the fields that the
- * `status` command surfaces. Returns null when the plist file is missing.
+ * `status` command surfaces. Returns undefined when the plist file is missing.
  *
  * The plist is the one written by `buildPlist` in `src/daemon/macos.js`, so
  * the structure is predictable. Regex-based extraction is sufficient and
  * keeps us free of an XML parser dependency.
  *
  * @param {string} plistPath
- * @returns {InstalledPlistFields | null}
+ * @returns {InstalledPlistFields | undefined}
  */
 export function readInstalledPlist(plistPath) {
   /** @type {string} */
@@ -81,7 +81,7 @@ export function readInstalledPlist(plistPath) {
   try {
     xml = fs.readFileSync(plistPath, 'utf8')
   } catch (err) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return null
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
     throw err
   }
   return parsePlistFields(xml)
@@ -92,32 +92,32 @@ export function readInstalledPlist(plistPath) {
  * @returns {InstalledPlistFields}
  */
 function parsePlistFields(xml) {
-  /** @type {string|null} */
-  let configPath = null
+  /** @type {InstalledPlistFields} */
+  const fields = {}
   const arrayMatch = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(xml)
   if (arrayMatch) {
     const items = [...arrayMatch[1].matchAll(/<string>([^<]*)<\/string>/g)].map(function(m) {
       return unescapeXml(m[1])
     })
     const idx = items.indexOf('--config')
-    if (idx !== -1 && idx + 1 < items.length) configPath = items[idx + 1]
+    if (idx !== -1 && idx + 1 < items.length) fields.configPath = items[idx + 1]
   }
-  return {
-    configPath,
-    stdoutPath: extractStringForKey(xml, 'StandardOutPath'),
-    stderrPath: extractStringForKey(xml, 'StandardErrorPath'),
-  }
+  const stdoutPath = extractStringForKey(xml, 'StandardOutPath')
+  if (stdoutPath !== undefined) fields.stdoutPath = stdoutPath
+  const stderrPath = extractStringForKey(xml, 'StandardErrorPath')
+  if (stderrPath !== undefined) fields.stderrPath = stderrPath
+  return fields
 }
 
 /**
  * @param {string} xml
  * @param {string} key
- * @returns {string|null}
+ * @returns {string | undefined}
  */
 function extractStringForKey(xml, key) {
   const re = new RegExp(`<key>${key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}<\\/key>\\s*<string>([^<]*)<\\/string>`)
   const m = re.exec(xml)
-  return m ? unescapeXml(m[1]) : null
+  return m ? unescapeXml(m[1]) : undefined
 }
 
 /**

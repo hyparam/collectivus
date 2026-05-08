@@ -213,7 +213,7 @@ export async function uninstallLaunchAgent(options) {
     try {
       fs.unlinkSync(plistPath)
     } catch (err) {
-      const code = err && typeof err === 'object' && 'code' in err ? err.code : null
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined
       if (code !== 'ENOENT') throw err
     }
   }

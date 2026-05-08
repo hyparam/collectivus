@@ -37,7 +37,7 @@ export function s3Connector(options) {
         method: 'HEAD',
         key,
       })
-      if (res.statusCode === 404) return null
+      if (res.statusCode === 404) return undefined
       if (res.statusCode === 200) {
         const contentLength = res.headers['content-length']
         return { size: contentLength ? Number(contentLength) : 0 }

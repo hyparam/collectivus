@@ -24,11 +24,11 @@ export function parseUninstallArgs(argv) {
   let detach = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { detach, help: true, error: null }
+    if (arg === '--help' || arg === '-h') return { detach, help: true }
     if (arg === '--detach') { detach = true; continue }
     return { detach, help: false, error: `unknown argument: ${arg}` }
   }
-  return { detach, help: false, error: null }
+  return { detach, help: false }
 }
 
 /**

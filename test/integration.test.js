@@ -34,8 +34,8 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
   let upstreamHandler
   /** @type {{ method: string | undefined, url: string | undefined, headers: IncomingHttpHeaders, body: string }[]} */
   let upstreamRequests
-  /** @type {ChildProcessWithoutNullStreams | null} */
-  let child = null
+  /** @type {ChildProcessWithoutNullStreams | undefined} */
+  let child
 
   beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-int-'))
@@ -67,7 +67,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))])
       if (child.exitCode === null) child.kill('SIGKILL')
     }
-    child = null
+    child = undefined
     await new Promise((resolve) => upstream.close(() => resolve(undefined)))
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
@@ -158,7 +158,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(events.every((row) => row.exchange_id === exchangeId)).toBe(true)
 
     // 6. Final exchange row carries the request the client sent and the
-    //    upstream it was routed to. Body is null for SSE (per design — the
+    //    upstream it was routed to. Body is omitted for SSE (per design — the
     //    per-event rows carry the data instead).
     const exchange = exchanges[0]
     expect(exchange.upstream).toBe('anthropic')
@@ -166,9 +166,9 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(exchange.request.path).toBe('/v1/messages')
     expect(exchange.request.body).toBe(requestBody)
     expect(exchange.response.status).toBe(200)
-    expect(exchange.response.body).toBeNull()
+    expect(exchange.response.body).toBeUndefined()
     expect(exchange.stream_event_count).toBe(sseEvents.length)
-    expect(exchange.error).toBeNull()
+    expect(exchange.error).toBeUndefined()
 
     // 7. Redaction: x-api-key MUST be redacted, content-type MUST NOT be.
     //    Walk both casings since Node lowercases on the proxy side.
@@ -266,7 +266,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     child.kill('SIGTERM')
     const code = await exited
     expect(code).toBe(0)
-    child = null
+    child = undefined
   }
 })
 

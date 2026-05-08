@@ -86,12 +86,12 @@ export class Exchange {
     this.requestMethod = init.request.method
     /** @type {string | undefined} */
     this.requestPath = init.request.path
-    /** @type {ExchangeResponse | null} */
-    this.response = null
+    /** @type {ExchangeResponse | undefined} */
+    this.response = undefined
     /** @type {number} */
     this.streamEventCount = 0
-    /** @type {string | null} */
-    this.error = null
+    /** @type {string | undefined} */
+    this.error = undefined
     /** @type {boolean} */
     this.finished = false
     /** @type {SseParser} */
@@ -134,7 +134,7 @@ export class Exchange {
    */
   appendResponseChunk(chunk) {
     if (!this.response) return
-    if (this.response.body === null) return
+    if (this.response.body === undefined) return
     this.response.body += chunk.toString('utf8')
   }
 
@@ -146,7 +146,7 @@ export class Exchange {
    */
   markStreaming() {
     if (!this.response) return
-    this.response.body = null
+    this.response.body = undefined
   }
 
   /**

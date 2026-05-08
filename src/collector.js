@@ -20,10 +20,10 @@ export class Collector {
     this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
     this.uploadOptions = options.upload
-    /** @type {Server | null} */
-    this.server = null
-    /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | null} */
-    this.uploader = null
+    /** @type {Server | undefined} */
+    this.server = undefined
+    /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | undefined} */
+    this.uploader = undefined
   }
 
   async start() {
@@ -64,7 +64,7 @@ export class Collector {
   async stop() {
     if (this.uploader) {
       await this.uploader.stop()
-      this.uploader = null
+      this.uploader = undefined
     }
     await new Promise((resolve, reject) => {
       const { server } = this

@@ -21,10 +21,10 @@ Options:
 export function parseDetachArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { help: true, error: null }
+    if (arg === '--help' || arg === '-h') return { help: true }
     return { help: false, error: `unknown argument: ${arg}` }
   }
-  return { help: false, error: null }
+  return { help: false }
 }
 
 /**

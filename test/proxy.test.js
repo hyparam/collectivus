@@ -516,12 +516,12 @@ describe('Proxy — SSE pass-through', () => {
     const id = exchanges[0].exchange_id
     expect(events.every((row) => row.exchange_id === id)).toBe(true)
     expect(exchanges[0].stream_event_count).toBe(3)
-    expect(exchanges[0].response.body).toBeNull()
+    expect(exchanges[0].response.body).toBeUndefined()
   })
 
   it('records error: "client_aborted" and cancels the upstream when the client disconnects mid-stream', async () => {
-    /** @type {(() => void) | null} */
-    let upstreamReqClosed = null
+    /** @type {(() => void) | undefined} */
+    let upstreamReqClosed
     /** @type {Promise<void>} */
     const upstreamClosed = new Promise((resolve) => {
       upstreamReqClosed = () => resolve()

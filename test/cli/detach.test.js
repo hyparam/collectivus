@@ -26,7 +26,7 @@ afterEach(function() {
 
 describe('parseDetachArgs', function() {
   it('treats no args as default', function() {
-    expect(parseDetachArgs([])).toEqual({ help: false, error: null })
+    expect(parseDetachArgs([])).toEqual({ help: false })
   })
 
   it('returns help mode for --help', function() {

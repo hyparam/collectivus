@@ -212,7 +212,7 @@ describe('uploadPending', () => {
         err.statusCode = 403
         throw err
       },
-      async headObject() { return null },
+      async headObject() { return undefined },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -244,7 +244,7 @@ describe('uploadPending', () => {
         err.statusCode = 503
         throw err
       },
-      async headObject() { return null },
+      async headObject() { return undefined },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

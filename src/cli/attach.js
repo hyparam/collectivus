@@ -25,37 +25,50 @@ Exactly one of --config or --port is required.`
  * @returns {AttachParseResult}
  */
 export function parseAttachArgs(argv) {
-  /** @type {string|null} */
-  let configPath = null
-  /** @type {number|null} */
-  let port = null
+  /** @type {string | undefined} */
+  let configPath
+  /** @type {number | undefined} */
+  let port
+  /**
+   * @param {boolean} help
+   * @param {string} [error]
+   * @returns {AttachParseResult}
+   */
+  const result = (help, error) => {
+    /** @type {AttachParseResult} */
+    const r = { help }
+    if (configPath !== undefined) r.configPath = configPath
+    if (port !== undefined) r.port = port
+    if (error !== undefined) r.error = error
+    return r
+  }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return { configPath, port, help: true, error: null }
+    if (arg === '--help' || arg === '-h') return result(true)
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return { configPath, port, help: false, error: '--config requires a path' }
+      if (!value) return result(false, '--config requires a path')
       configPath = value
       continue
     }
     if (arg === '--port' || arg.startsWith('--port=')) {
       const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value) return { configPath, port, help: false, error: '--port requires a number' }
-      if (!/^\d+$/.test(value)) return { configPath, port, help: false, error: `--port: not a valid port (got "${value}")` }
+      if (!value) return result(false, '--port requires a number')
+      if (!/^\d+$/.test(value)) return result(false, `--port: not a valid port (got "${value}")`)
       const n = Number.parseInt(value, 10)
-      if (n < 1 || n > 65535) return { configPath, port, help: false, error: `--port: not a valid port (got "${value}")` }
+      if (n < 1 || n > 65535) return result(false, `--port: not a valid port (got "${value}")`)
       port = n
       continue
     }
-    return { configPath, port, help: false, error: `unknown argument: ${arg}` }
+    return result(false, `unknown argument: ${arg}`)
   }
-  if (configPath !== null && port !== null) {
-    return { configPath, port, help: false, error: '--config and --port are mutually exclusive' }
+  if (configPath !== undefined && port !== undefined) {
+    return result(false, '--config and --port are mutually exclusive')
   }
-  if (configPath === null && port === null) {
-    return { configPath, port, help: false, error: 'one of --config or --port is required' }
+  if (configPath === undefined && port === undefined) {
+    return result(false, 'one of --config or --port is required')
   }
-  return { configPath, port, help: false, error: null }
+  return result(false)
 }
 
 /**
@@ -87,9 +100,9 @@ export async function runAttach(argv, hooks = {}) {
 
   /** @type {number} */
   let port
-  if (parsed.port !== null) {
+  if (parsed.port !== undefined) {
     port = parsed.port
-  } else if (parsed.configPath !== null) {
+  } else if (parsed.configPath !== undefined) {
     /** @type {CollectivusConfig} */
     let config
     try {

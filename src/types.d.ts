@@ -37,8 +37,8 @@ export interface ExchangeResponse {
   status: number | undefined
   /** Response headers post-redaction. */
   headers: Record<string, string | string[] | undefined>
-  /** Response body for non-streaming responses; `null` for SSE (events recorded separately). */
-  body: string | null
+  /** Response body for non-streaming responses; `undefined` for SSE (events recorded separately). */
+  body: string | undefined
 }
 
 // ---------- File sink ----------
@@ -218,41 +218,41 @@ export interface ReadSettingsResult {
   value: Record<string, unknown>
   /** Whether the file was on disk. */
   existed: boolean
-  /** mtime captured at read time (null when the file did not exist). */
-  mtimeMs: number | null
+  /** mtime captured at read time (undefined when the file did not exist). */
+  mtimeMs: number | undefined
 }
 
 // ---------- CLI subcommand parse results / hooks ----------
 
 export interface AttachParseResult {
-  configPath: string | null
-  port: number | null
+  configPath?: string
+  port?: number
   help: boolean
-  error: string | null
+  error?: string
 }
 
 export interface DetachParseResult {
   help: boolean
-  error: string | null
+  error?: string
 }
 
 export interface StatusParseResult {
   help: boolean
-  error: string | null
+  error?: string
 }
 
 export interface InstallParseResult {
-  configPath: string | null
+  configPath?: string
   yes: boolean
   no: boolean
   help: boolean
-  error: string | null
+  error?: string
 }
 
 export interface UninstallParseResult {
   detach: boolean
   help: boolean
-  error: string | null
+  error?: string
 }
 
 export interface WriteStream {
@@ -284,9 +284,9 @@ export interface StatusHooks {
   launchAgentStatus?: (opts: MacosStatusOptions) => Promise<{ loaded: boolean, pid?: number }>
   isLaunchAgentInstalled?: (opts: { label: string, plistDir?: string }) => Promise<boolean>
   isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
-  readInstalledPlist?: (plistPath: string) => InstalledPlistFields | null
-  /** Override for raw read of settings.json (returns null on ENOENT). */
-  readSettingsRaw?: (p: string) => Promise<string | null>
+  readInstalledPlist?: (plistPath: string) => InstalledPlistFields | undefined
+  /** Override for raw read of settings.json (returns undefined on ENOENT). */
+  readSettingsRaw?: (p: string) => Promise<string | undefined>
 }
 
 export interface InstallHooks {
@@ -327,11 +327,11 @@ export interface UninstallHooks {
 
 export interface InstalledPlistFields {
   /** Path passed via `--config` in ProgramArguments. */
-  configPath: string | null
+  configPath?: string
   /** Value of `StandardOutPath`. */
-  stdoutPath: string | null
+  stdoutPath?: string
   /** Value of `StandardErrorPath`. */
-  stderrPath: string | null
+  stderrPath?: string
 }
 
 // ---------- Daemon: macOS LaunchAgent ----------

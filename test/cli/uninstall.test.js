@@ -65,7 +65,7 @@ function makeMocks(opts = {}) {
 
 describe('parseUninstallArgs', function() {
   it('treats no args as no-detach', function() {
-    expect(parseUninstallArgs([])).toEqual({ detach: false, help: false, error: null })
+    expect(parseUninstallArgs([])).toEqual({ detach: false, help: false })
   })
 
   it('parses --detach', function() {

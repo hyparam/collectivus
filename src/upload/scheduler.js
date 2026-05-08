@@ -33,8 +33,8 @@ export function createScheduler(options, deps = {}) {
 
   const [hh, mm] = parseTime(options.time)
 
-  /** @type {NodeJS.Timeout | number | null} */
-  let handle = null
+  /** @type {NodeJS.Timeout | number | undefined} */
+  let handle
   let stopped = false
   let lastRetry = false
   /** @type {Promise<void>} */
@@ -62,7 +62,7 @@ export function createScheduler(options, deps = {}) {
     if (lastRetry && retryDelayMs < delay) delay = retryDelayMs
     const capped = Math.min(delay, MAX_TIMEOUT)
     handle = setT(() => {
-      handle = null
+      handle = undefined
       if (stopped) return
       // If we capped the delay, just re-schedule without firing the tick.
       if (capped < delay) {
@@ -82,9 +82,9 @@ export function createScheduler(options, deps = {}) {
     },
     async stop() {
       stopped = true
-      if (handle !== null) {
+      if (handle !== undefined) {
         clearT(handle)
-        handle = null
+        handle = undefined
       }
       await chain
     },

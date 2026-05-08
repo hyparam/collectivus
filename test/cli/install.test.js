@@ -68,15 +68,15 @@ function makeMocks(opts = {}) {
 describe('parseInstallArgs', function() {
   it('returns error when no args', function() {
     const r = parseInstallArgs([])
-    expect(r.error).toBeNull()
-    expect(r.configPath).toBeNull()
+    expect(r.error).toBeUndefined()
+    expect(r.configPath).toBeUndefined()
     expect(r.yes).toBe(false)
     expect(r.no).toBe(false)
   })
 
   it('parses --config <path>', function() {
     expect(parseInstallArgs(['--config', '/tmp/c.json'])).toEqual({
-      configPath: '/tmp/c.json', yes: false, no: false, help: false, error: null,
+      configPath: '/tmp/c.json', yes: false, no: false, help: false,
     })
   })
 

@@ -42,7 +42,7 @@ describe('createUploader', () => {
       putObject() {
         return Promise.reject(Object.assign(new Error('s3 PUT returned 403'), { statusCode: 403 }))
       },
-      headObject() { return Promise.resolve(null) },
+      headObject() { return Promise.resolve(undefined) },
     }
 
     const timeoutSpy = vi.spyOn(globalThis, 'setTimeout')

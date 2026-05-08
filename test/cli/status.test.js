@@ -27,7 +27,7 @@ afterEach(function() {
 
 describe('parseStatusArgs', function() {
   it('treats no args as default', function() {
-    expect(parseStatusArgs([])).toEqual({ help: false, error: null })
+    expect(parseStatusArgs([])).toEqual({ help: false })
   })
 
   it('returns help mode for --help', function() {
@@ -66,8 +66,8 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.resolve(false) },
       launchAgentStatus() { return Promise.resolve({ loaded: false }) },
       isAttached() { return Promise.resolve(false) },
-      readInstalledPlist() { return null },
-      readSettingsRaw() { return Promise.resolve(null) },
+      readInstalledPlist() { return undefined },
+      readSettingsRaw() { return Promise.resolve(undefined) },
     })
     expect(code).toBe(0)
     const out = stdout.value()
@@ -94,7 +94,7 @@ describe('runStatus', function() {
           stderrPath: '/var/log/collectivus.err.log',
         }
       },
-      readSettingsRaw() { return Promise.resolve(null) },
+      readSettingsRaw() { return Promise.resolve(undefined) },
     })
     expect(code).toBe(0)
     const out = stdout.value()
@@ -114,14 +114,14 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.resolve(true) },
       launchAgentStatus() { return Promise.resolve({ loaded: true }) },
       isAttached() { return Promise.resolve(false) },
-      readInstalledPlist() { return { configPath: null, stdoutPath: null, stderrPath: null } },
-      readSettingsRaw() { return Promise.resolve(null) },
+      readInstalledPlist() { return {} },
+      readSettingsRaw() { return Promise.resolve(undefined) },
     })
     expect(code).toBe(0)
     expect(stdout.value()).toMatch(/loaded \(no PID/)
   })
 
-  it('falls back to default log paths when plist parsing returns nulls', async function() {
+  it('falls back to default log paths when plist fields are absent', async function() {
     const stdout = memo()
     const logDir = path.join(tmpDir, 'logs')
     const code = await runStatus([], {
@@ -132,8 +132,8 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.resolve(true) },
       launchAgentStatus() { return Promise.resolve({ loaded: true, pid: 1 }) },
       isAttached() { return Promise.resolve(false) },
-      readInstalledPlist() { return { configPath: null, stdoutPath: null, stderrPath: null } },
-      readSettingsRaw() { return Promise.resolve(null) },
+      readInstalledPlist() { return {} },
+      readSettingsRaw() { return Promise.resolve(undefined) },
     })
     expect(code).toBe(0)
     const out = stdout.value()
@@ -156,7 +156,7 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.resolve(false) },
       launchAgentStatus() { return Promise.resolve({ loaded: false }) },
       isAttached() { return Promise.resolve(true) },
-      readInstalledPlist() { return null },
+      readInstalledPlist() { return undefined },
     })
     expect(code).toBe(0)
     const out = stdout.value()
@@ -177,7 +177,7 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.resolve(false) },
       launchAgentStatus() { return Promise.resolve({ loaded: false }) },
       isAttached() { return Promise.reject(new SettingsError('malformed JSON')) },
-      readInstalledPlist() { return null },
+      readInstalledPlist() { return undefined },
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/failed to read.*malformed JSON/)
@@ -195,7 +195,7 @@ describe('runStatus', function() {
       isLaunchAgentInstalled() { return Promise.reject(new Error('disk explode')) },
       launchAgentStatus() { return Promise.resolve({ loaded: false }) },
       isAttached() { return Promise.resolve(false) },
-      readInstalledPlist() { return null },
+      readInstalledPlist() { return undefined },
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/failed to check daemon installation.*disk explode/)

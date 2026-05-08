@@ -76,7 +76,7 @@ describe('Recorder — non-streaming exchange', () => {
       body: '{"id":"msg_1"}',
     })
     expect(row.stream_event_count).toBe(0)
-    expect(row.error).toBeNull()
+    expect(row.error).toBeUndefined()
   })
 
   it('finish() is idempotent', async () => {
@@ -233,7 +233,7 @@ describe('Recorder — header redaction', () => {
 })
 
 describe('Recorder — streaming exchange', () => {
-  it('emits stream_event rows in order, then a final exchange row with body=null', async () => {
+  it('emits stream_event rows in order, then a final exchange row with body omitted', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
     const exchange = recorder.startExchange({
@@ -272,7 +272,7 @@ describe('Recorder — streaming exchange', () => {
     const final = sink.rows[3]
     expect(final.kind).toBe('exchange')
     expect(final.stream_event_count).toBe(3)
-    expect(final.response.body).toBeNull()
+    expect(final.response.body).toBeUndefined()
     expect(final.response.status).toBe(200)
     // each event row carries a monotonically non-decreasing t_ms relative to start
     for (let i = 0; i < events.length; i++) {
@@ -384,7 +384,7 @@ describe('Recorder — error paths', () => {
     expect(row.error).toBe('upstream timeout')
   })
 
-  it('captures error before response start (response stays null)', async () => {
+  it('captures error before response start (response stays undefined)', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
     const exchange = recorder.startExchange({
@@ -395,7 +395,7 @@ describe('Recorder — error paths', () => {
     exchange.setError(new Error('connect ECONNREFUSED'))
     await exchange.finish()
     const row = sink.rows[0]
-    expect(row.response).toBeNull()
+    expect(row.response).toBeUndefined()
     expect(row.error).toBe('connect ECONNREFUSED')
   })
 })
@@ -545,7 +545,7 @@ describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => 
     expect(row.response.status).toBe(200)
     expect(row.response.body).toBe(JSON.stringify({ echoed: payload }))
     expect(row.stream_event_count).toBe(0)
-    expect(row.error).toBeNull()
+    expect(row.error).toBeUndefined()
   })
 
   it('records SSE events as separate rows plus a final exchange row', async () => {
@@ -582,7 +582,7 @@ describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => 
     ])
     expect(finals).toHaveLength(1)
     expect(finals[0].stream_event_count).toBe(3)
-    expect(finals[0].response.body).toBeNull()
+    expect(finals[0].response.body).toBeUndefined()
     // All event rows share the same exchange_id with the final row.
     const id = finals[0].exchange_id
     expect(events.every((row) => row.exchange_id === id)).toBe(true)

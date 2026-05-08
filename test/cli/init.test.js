@@ -74,6 +74,7 @@ describe('runInit', function() {
       '1', // Anthropic
       '', // default proxy listen
       '', // default sink dir (resolves to the test override below)
+      '', // no S3 upload (default N)
       cfgPath, // save to tmp
       'y', // confirm write
       'n', // skip daemon install
@@ -105,6 +106,7 @@ describe('runInit', function() {
     })
     expect(written.proxy.redact_headers).toContain('x-api-key')
     expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
+    expect(written.upload).toBeUndefined()
     expect(written.otel).toBeUndefined()
     expect(stdout.value()).toMatch(/Wrote/)
   })
@@ -116,6 +118,7 @@ describe('runInit', function() {
     const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
     const { prompt, asked } = scriptedPrompt([
       '1', '1', '', '', // proxy / anthropic / default listen / default sink
+      '', // no S3 upload
       '', // accept default save path
       'y', // confirm write
       'n', // skip daemon
@@ -141,6 +144,7 @@ describe('runInit', function() {
       '2', // otel only
       '127.0.0.1:4318', // otel listen override
       path.join(tmpDir, 'data'), // sink dir
+      '', // no S3 upload
       cfgPath,
       '', // confirm write (default Y)
     ])
@@ -176,6 +180,7 @@ describe('runInit', function() {
       '127.0.0.1:9090', // proxy listen
       '0.0.0.0:4317', // otel listen
       '', // default sink
+      '', // no S3 upload
       cfgPath,
       'y',
       'n', // skip daemon
@@ -207,6 +212,7 @@ describe('runInit', function() {
       '', // accept the derived default name
       '', // default proxy listen
       '', // default sink
+      '', // no S3 upload
       cfgPath,
       'y',
       'n', // skip daemon
@@ -240,6 +246,7 @@ describe('runInit', function() {
       'my-llm-1', // explicit slug
       '',
       '',
+      '', // no S3 upload
       cfgPath,
       'y',
       'n',
@@ -289,6 +296,7 @@ describe('runInit', function() {
       choice, // preset choice
       '', // default proxy listen
       '', // default sink (resolves via defaultSinkDir override)
+      '', // no S3 upload
       cfgPath,
       'y',
       'n',
@@ -317,7 +325,7 @@ describe('runInit', function() {
     const stderr = memo()
     const cfgPath = path.join(tmpDir, 'collectivus.json')
     const { prompt } = scriptedPrompt([
-      '1', '1', '', '', cfgPath, 'y', // proxy / anthropic / defaults / write
+      '1', '1', '', '', '', cfgPath, 'y', // proxy / anthropic / defaults / no upload / write
       'y', // install daemon
       'y', // attach Claude Code
     ])
@@ -339,7 +347,7 @@ describe('runInit', function() {
     const stderr = memo()
     const cfgPath = path.join(tmpDir, 'cfg.json')
     const { prompt } = scriptedPrompt([
-      '1', '1', '', '', cfgPath, 'y',
+      '1', '1', '', '', '', cfgPath, 'y',
       'y',
       'n',
     ])
@@ -361,7 +369,7 @@ describe('runInit', function() {
     const stderr = memo()
     const cfgPath = path.join(tmpDir, 'cfg.json')
     const { prompt, asked } = scriptedPrompt([
-      '1', '1', '', '', cfgPath, 'y',
+      '1', '1', '', '', '', cfgPath, 'y',
     ])
     /** @type {string[][]} */
     const installCalls = []
@@ -382,7 +390,7 @@ describe('runInit', function() {
     const stderr = memo()
     const cfgPath = path.join(tmpDir, 'cfg.json')
     const { prompt } = scriptedPrompt([
-      '1', '1', '', '', cfgPath, 'n',
+      '1', '1', '', '', '', cfgPath, 'n',
     ])
     const code = await runInit({
       stdout, stderr, prompt,
@@ -493,6 +501,7 @@ describe('runInit', function() {
     const { prompt } = scriptedPrompt([
       'new', // reject reuse
       '1', '1', '', '', // proxy / anthropic / default listen / default sink
+      '', // no S3 upload
       newCfgPath, // save to a new path
       'y', // confirm write
       'n', // skip daemon
@@ -508,6 +517,246 @@ describe('runInit', function() {
     expect(fs.existsSync(newCfgPath)).toBe(true)
     const written = JSON.parse(fs.readFileSync(newCfgPath, 'utf8'))
     expect(written.proxy.listen).toBe('127.0.0.1:8787')
+  })
+
+  it('S3 upload yes-path with all defaults produces a valid upload block', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const sinkDir = path.join(tmpDir, 'sink')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '', // proxy / anthropic / default listen / default sink
+      'y', // upload? yes
+      'my-llm-logs', // bucket
+      '', // default region
+      '', // default prefix
+      '', // default time
+      '', // default signals
+      '', // empty endpoint (no MinIO)
+      cfgPath,
+      'y', // confirm write
+      'n', // skip daemon
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultSinkDir: sinkDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload).toEqual({
+      bucket: 'my-llm-logs',
+      region: 'us-east-1',
+      prefix: 'collectivus',
+      time: '00:10',
+      signals: ['logs', 'traces', 'metrics'],
+    })
+    // Validator from co-zdn.7.1 must accept the generated config (round-trip).
+    const loaded = loadConfig(cfgPath, { strict: true })
+    expect(loaded.upload?.bucket).toBe('my-llm-logs')
+    // Closing summary surfaces the env-var requirement when upload is set.
+    expect(stdout.value()).toMatch(/Upload requires AWS_ACCESS_KEY_ID/)
+  })
+
+  it('S3 upload accepts custom region, prefix, time, signal subset, and MinIO endpoint', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '', // proxy / anthropic / defaults
+      'yes', // upload
+      'long-term-storage',
+      'eu-west-1',
+      '/team-a/llm/', // prefix with surrounding slashes (should be stripped)
+      '03:30',
+      'logs, traces', // subset, with whitespace
+      'https://minio.example.com:9000',
+      cfgPath,
+      'y',
+      'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload).toEqual({
+      bucket: 'long-term-storage',
+      region: 'eu-west-1',
+      prefix: 'team-a/llm',
+      time: '03:30',
+      signals: ['logs', 'traces'],
+      endpoint: 'https://minio.example.com:9000',
+    })
+    // Validator must accept it.
+    expect(() => loadConfig(cfgPath, { strict: true })).not.toThrow()
+  })
+
+  it('S3 upload re-prompts on invalid bucket name', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '',
+      'y',
+      '', // empty bucket → reject
+      'My_Bucket', // uppercase + underscore → reject
+      'ab', // too short → reject
+      'good-bucket', // accepted
+      '', '', '', '', '', // remaining defaults / empty endpoint
+      cfgPath, 'y', 'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload.bucket).toBe('good-bucket')
+    // Each rejection must surface the spec-mandated error message.
+    expect(stderr.value().match(/bucket name must be 3–63 chars/g) ?? []).toHaveLength(3)
+  })
+
+  it('S3 upload re-prompts on invalid time', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '',
+      'y',
+      'mybucket',
+      '', // region
+      '', // prefix
+      '24:00', // out of range (hours 00..23)
+      '9:00', // missing leading zero on hour
+      '03:30', // valid
+      '', '', // signals / endpoint
+      cfgPath, 'y', 'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload.time).toBe('03:30')
+    expect(stderr.value()).toMatch(/time must be HH:MM/)
+  })
+
+  it('S3 upload re-prompts on invalid signal name', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '',
+      'y',
+      'mybucket',
+      '', '', '', // region / prefix / time
+      'logs,events', // 'events' isn't allowed
+      'logs', // accepted
+      '', // endpoint
+      cfgPath, 'y', 'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload.signals).toEqual(['logs'])
+    expect(stderr.value()).toMatch(/signals must be a comma-separated subset/)
+  })
+
+  it('S3 upload re-prompts on unparseable endpoint URL', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '',
+      'y',
+      'mybucket',
+      '', '', '', '',
+      'not a url', // reject
+      'https://s3.example.com', // accept
+      cfgPath, 'y', 'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload.endpoint).toBe('https://s3.example.com')
+    expect(stderr.value()).toMatch(/endpoint must be a valid URL/)
+  })
+
+  it('declining S3 upload omits the upload block and skips the env-var notice', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'cfg.json')
+    const { prompt } = scriptedPrompt([
+      '1', '1', '', '',
+      'n', // explicit no
+      cfgPath, 'y', 'n',
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: absentDefaultCfg,
+    })
+    expect(code).toBe(0)
+    const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    expect(written.upload).toBeUndefined()
+    expect(stdout.value()).not.toMatch(/Upload requires/)
+  })
+
+  it('printConfigSummary renders an upload line for an existing config with upload', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const cfgPath = path.join(tmpDir, 'existing.json')
+    /** @type {CollectivusConfig} */
+    const existing = {
+      version: 1,
+      proxy: {
+        listen: '127.0.0.1:8787',
+        upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } }],
+      },
+      sink: { type: 'file', dir: path.join(tmpDir, 'sink') },
+      upload: {
+        bucket: 'my-llm-logs',
+        prefix: 'collectivus',
+        region: 'us-east-1',
+        time: '00:10',
+        signals: ['logs', 'traces', 'metrics'],
+      },
+    }
+    const { prompt } = scriptedPrompt([
+      'use', // reuse existing
+      'n', // decline daemon install
+    ])
+    const code = await runInit({
+      stdout, stderr, prompt,
+      platform: 'darwin',
+      cwd: tmpDir,
+      defaultConfigPath: cfgPath,
+      readConfig() { return existing },
+    })
+    expect(code).toBe(0)
+    expect(stdout.value()).toMatch(/upload: s3:\/\/my-llm-logs\/collectivus daily at 00:10 UTC/)
   })
 
   it('reusing an otel-only config skips the daemon prompt', async function() {

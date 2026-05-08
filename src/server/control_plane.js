@@ -1,11 +1,29 @@
 import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
-import { createBearerAuth } from './auth.js'
+import { createBearerAuth, getClaims } from './auth.js'
+import {
+  BootstrapStore,
+  DEFAULT_JWT_TTL_SECONDS,
+  SlidingWindowRateLimiter,
+  issueFromBootstrap,
+  signJwt,
+} from './identity.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
  * @import { ServerConfig } from '../types.js'
  */
+
+/** Maximum bytes accepted in an identity request body. */
+const MAX_BODY_BYTES = 4 * 1024
+
+/** Bootstrap rate limit: 5 requests per 60s per source IP. */
+const BOOTSTRAP_RATE_WINDOW_MS = 60_000
+const BOOTSTRAP_RATE_MAX = 5
+
+/** Refresh rate limit: 1 request per 60s per gateway. */
+const REFRESH_RATE_WINDOW_MS = 60_000
+const REFRESH_RATE_MAX = 1
 
 /**
  * Server-mode control-plane HTTP listener. Mounts the v0 identity endpoints
@@ -13,13 +31,17 @@ import { createBearerAuth } from './auth.js'
  * probe. Future epics (B config vending, C log ingest) will mount additional
  * endpoints on this same listener — keep new routes inside `handleRequest`
  * rather than spawning another HTTP server.
- *
- * Identity endpoint bodies are placeholders in A.2 — they return 501 so
- * clients see "wired but not implemented" rather than 404. A.3 fills them in.
  */
 export class ControlPlane {
-  /** @param {ServerConfig} config */
-  constructor(config) {
+  /**
+   * @param {ServerConfig} config
+   * @param {{ bootstrapStore?: BootstrapStore, now?: () => number }} [opts]
+   *   Test hooks. `bootstrapStore` overrides the file-backed store derived
+   *   from `config.identity_issuer.bootstrap_store_path`. `now` is injected
+   *   into the JWT signer/verifier and the rate limiters so tests can drive
+   *   token expiry and rate-limit windows.
+   */
+  constructor(config, opts = {}) {
     /** @type {ServerConfig} */
     this.config = config
     const { host, port } = parseListen(config.control_plane_listen)
@@ -29,8 +51,32 @@ export class ControlPlane {
     this.port = port
     /** @type {Server | undefined} */
     this.server = undefined
+    /** @type {() => number} */
+    this.now = opts.now ?? Date.now
     /** @type {(req: IncomingMessage, res: ServerResponse) => boolean} */
-    this.authorize = createBearerAuth(config.identity_issuer)
+    this.authorize = createBearerAuth(config.identity_issuer, { now: this.now })
+
+    /** @type {BootstrapStore | undefined} */
+    this.bootstrapStore = opts.bootstrapStore
+    if (!this.bootstrapStore && config.identity_issuer.bootstrap_store_path) {
+      this.bootstrapStore = new BootstrapStore({
+        path: config.identity_issuer.bootstrap_store_path,
+        now: this.now,
+      })
+    }
+
+    /** @type {SlidingWindowRateLimiter} */
+    this.bootstrapLimiter = new SlidingWindowRateLimiter({
+      windowMs: BOOTSTRAP_RATE_WINDOW_MS,
+      max: BOOTSTRAP_RATE_MAX,
+      now: this.now,
+    })
+    /** @type {SlidingWindowRateLimiter} */
+    this.refreshLimiter = new SlidingWindowRateLimiter({
+      windowMs: REFRESH_RATE_WINDOW_MS,
+      max: REFRESH_RATE_MAX,
+      now: this.now,
+    })
   }
 
   /**
@@ -99,20 +145,94 @@ export class ControlPlane {
 
     if (path === '/v1/identity/bootstrap') {
       if (method !== 'POST') return writeError(res, 405, 'method not allowed')
-      // No auth: the bootstrap token in the body IS the credential. A.3 implements.
-      writeJson(res, 501, { error: 'not implemented', endpoint: 'bootstrap' })
+      this.handleBootstrap(req, res)
       return
     }
 
     if (path === '/v1/identity/refresh') {
       if (method !== 'POST') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
-      // A.3 implements.
-      writeJson(res, 501, { error: 'not implemented', endpoint: 'refresh' })
+      this.handleRefresh(req, res)
       return
     }
 
     writeError(res, 404, 'not found')
+  }
+
+  /**
+   * Handle `POST /v1/identity/bootstrap`. Per-IP rate limit is enforced
+   * before body parsing so an attacker with a known IP can't exhaust memory
+   * by hammering with large bodies.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @returns {void}
+   */
+  handleBootstrap(req, res) {
+    const ip = clientIp(req)
+    const limit = this.bootstrapLimiter.check(ip)
+    if (!limit.allowed) return writeRateLimited(res, limit.retryAfterMs)
+
+    const store = this.bootstrapStore
+    if (!store) {
+      // Server is configured without a bootstrap store — refresh works,
+      // but new gateway enrollment is intentionally disabled.
+      writeJson(res, 503, { error: 'bootstrap not provisioned' })
+      return
+    }
+
+    readJsonBody(req, MAX_BODY_BYTES).then((body) => {
+      if (body.error) return writeError(res, body.status, body.error)
+      const parsed = body.value
+      if (!isPlainObject(parsed) || typeof parsed.bootstrap_token !== 'string') {
+        return writeError(res, 400, 'bootstrap_token is required')
+      }
+      const token = parsed.bootstrap_token
+      if (token.length === 0) return writeError(res, 400, 'bootstrap_token is required')
+
+      const result = issueFromBootstrap(token, store, this.config.identity_issuer, { now: this.now })
+      if (result.ok === false) {
+        // All consume failures map to 401 — a leaked store should not leak
+        // *which* tokens are known/already-used/expired via status code
+        // differentiation.
+        const { reason } = result
+        return writeJson(res, 401, { error: 'invalid bootstrap token', reason })
+      }
+      writeJson(res, 200, { jwt: result.jwt, expires_at: result.expiresAt })
+    }).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      writeError(res, 500, `bootstrap failed: ${msg}`)
+    })
+  }
+
+  /**
+   * Handle `POST /v1/identity/refresh`. Caller must already be authenticated
+   * via `this.authorize`.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @returns {void}
+   */
+  handleRefresh(req, res) {
+    const claims = getClaims(req)
+    if (!claims) {
+      // Defense in depth — auth middleware wrote 401 already on failure;
+      // reaching here without claims means something is wired wrong.
+      return writeError(res, 500, 'auth claims missing after authorize')
+    }
+    const limit = this.refreshLimiter.check(claims.sub)
+    if (!limit.allowed) return writeRateLimited(res, limit.retryAfterMs)
+
+    const issuer = this.config.identity_issuer
+    const ttlSeconds = issuer.jwt_ttl_seconds ?? DEFAULT_JWT_TTL_SECONDS
+    const jwt = signJwt({
+      gatewayId: claims.sub,
+      ttlSeconds,
+      secret: issuer.secret,
+      now: this.now,
+    })
+    const expiresAt = Math.floor(this.now() / 1000) + ttlSeconds
+    writeJson(res, 200, { jwt, expires_at: expiresAt })
   }
 }
 
@@ -150,6 +270,105 @@ function parseListen(value) {
 }
 
 /**
+ * Read the request body as JSON, capped at `maxBytes`. Returns a discriminated
+ * `{ value, error }` so callers can map errors to status codes without
+ * differentiating `try/catch` flow.
+ *
+ * Body-size enforcement is two-layered: when `Content-Length` is present and
+ * already exceeds the limit, we resolve immediately without reading. When the
+ * header is absent (chunked transfer) or lies, we accumulate up to `maxBytes`
+ * and abort. We do NOT destroy the socket on overflow — destroying mid-request
+ * prevents the caller from writing a 413 response back. We instead drop
+ * incoming chunks until the client finishes uploading, then resolve.
+ *
+ * @param {IncomingMessage} req
+ * @param {number} maxBytes
+ * @returns {Promise<{ value: unknown, status: 200, error?: undefined } | { value?: undefined, status: 400 | 413, error: string }>}
+ */
+function readJsonBody(req, maxBytes) {
+  return new Promise((resolve) => {
+    const contentLength = parseContentLength(req.headers['content-length'])
+    if (contentLength !== undefined && contentLength > maxBytes) {
+      // We can short-circuit before reading a single byte. The client may
+      // continue sending until it sees the response, but the kernel buffers
+      // are bounded.
+      resolve({ status: 413, error: 'request body too large' })
+      return
+    }
+    /** @type {Buffer[]} */
+    const chunks = []
+    let size = 0
+    let overflowed = false
+    let resolved = false
+    /** @param {{ status: 200, value: unknown } | { status: 400 | 413, error: string }} v */
+    function done(v) {
+      if (resolved) return
+      resolved = true
+      resolve(v)
+    }
+    req.on('data', (chunk) => {
+      if (overflowed) return
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += buf.length
+      if (size > maxBytes) {
+        overflowed = true
+        chunks.length = 0
+        return
+      }
+      chunks.push(buf)
+    })
+    req.on('end', () => {
+      if (overflowed) {
+        done({ status: 413, error: 'request body too large' })
+        return
+      }
+      const raw = Buffer.concat(chunks).toString('utf8')
+      if (raw.length === 0) {
+        done({ status: 400, error: 'empty request body' })
+        return
+      }
+      try {
+        done({ status: 200, value: JSON.parse(raw) })
+      } catch {
+        done({ status: 400, error: 'invalid JSON body' })
+      }
+    })
+    req.on('error', (err) => {
+      done({ status: 400, error: `request error: ${err.message}` })
+    })
+  })
+}
+
+/**
+ * Parse a `Content-Length` header value. Returns `undefined` for missing,
+ * malformed, or negative values — caller should fall through to streaming
+ * accumulation in those cases.
+ *
+ * @param {string | string[] | undefined} value
+ * @returns {number | undefined}
+ */
+function parseContentLength(value) {
+  if (typeof value !== 'string') return undefined
+  const n = Number.parseInt(value, 10)
+  if (!Number.isFinite(n) || n < 0 || String(n) !== value.trim()) return undefined
+  return n
+}
+
+/**
+ * Determine the client IP for rate-limiting. v0 honors only the socket-level
+ * remote address — we do not parse `X-Forwarded-For` because any deployment
+ * with a trusted reverse proxy should be configured at that proxy. Trusting
+ * the header without an explicit allow-list lets a single attacker rotate
+ * IPs cheaply and bypass the per-IP limit.
+ *
+ * @param {IncomingMessage} req
+ * @returns {string}
+ */
+function clientIp(req) {
+  return req.socket.remoteAddress ?? 'unknown'
+}
+
+/**
  * @param {ServerResponse} res
  * @param {number} status
  * @param {object} body
@@ -166,4 +385,25 @@ function writeJson(res, status, body) {
  */
 function writeError(res, status, message) {
   writeJson(res, status, { error: message })
+}
+
+/**
+ * @param {ServerResponse} res
+ * @param {number} retryAfterMs
+ */
+function writeRateLimited(res, retryAfterMs) {
+  const retryAfterSec = Math.max(1, Math.ceil(retryAfterMs / 1000))
+  res.writeHead(429, {
+    'content-type': 'application/json',
+    'retry-after': String(retryAfterSec),
+  })
+  res.end(JSON.stringify({ error: 'rate limited', retry_after_seconds: retryAfterSec }))
+}
+
+/**
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown>}
+ */
+function isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
 }

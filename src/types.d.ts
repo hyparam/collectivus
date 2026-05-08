@@ -131,7 +131,45 @@ export interface IdentityIssuerConfig {
   jwt_ttl_seconds?: number
   /** TTL applied to operator-provisioned bootstrap tokens. */
   bootstrap_ttl_seconds?: number
+  /**
+   * Filesystem path to the bootstrap-token store. Required when the server
+   * should accept `POST /v1/identity/bootstrap` — when omitted, the bootstrap
+   * endpoint returns 503 (refresh and ordinary auth still work).
+   */
+  bootstrap_store_path?: string
 }
+
+/** Standard claims this server emits and accepts on control-plane JWTs. */
+export interface JwtClaims {
+  /** Subject — the gateway identity this token represents. */
+  sub: string
+  /** Issued-at, seconds since the unix epoch. */
+  iat: number
+  /** Expiration, seconds since the unix epoch. */
+  exp: number
+}
+
+/** Result of `verifyJwt`. */
+export type JwtVerifyResult =
+  | { valid: true, claims: JwtClaims }
+  | { valid: false, error: 'malformed' | 'bad_signature' | 'expired' | 'iat_in_future' }
+
+/** A persisted bootstrap-token record. The plaintext token is never stored. */
+export interface BootstrapRecord {
+  /** sha256 hex of the plaintext bootstrap token. */
+  tokenHash: string
+  /** Gateway identity this token will mint a JWT for. */
+  gatewayId: string
+  /** Expiration, seconds since the unix epoch. */
+  expiresAt: number
+  /** Whether the token has already been redeemed. */
+  used: boolean
+}
+
+/** Result of `issueFromBootstrap`. */
+export type IssueFromBootstrapResult =
+  | { ok: true, jwt: string, expiresAt: number, gatewayId: string }
+  | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }
 
 export interface ServerConfig {
   /** host:port for the control-plane HTTP listener (separate from OTLP/proxy). */

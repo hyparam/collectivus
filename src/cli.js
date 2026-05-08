@@ -13,6 +13,7 @@ import { FileSink } from './sinks/file.js'
 const USAGE = `Usage:
   collectivus --config <path>                  Run with config file
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
+  collectivus --config <path> --strict         Reject unknown top-level config keys
   collectivus --help                           Show this help`
 
 const DRAIN_TIMEOUT_MS = 5000
@@ -27,6 +28,7 @@ export function parseArgs(argv) {
   /** @type {string | undefined} */
   let configPath
   let printConfig = false
+  let strict = false
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -47,6 +49,11 @@ export function parseArgs(argv) {
       continue
     }
 
+    if (arg === '--strict') {
+      strict = true
+      continue
+    }
+
     return parseError(`unknown argument: ${arg}`)
   }
 
@@ -54,7 +61,7 @@ export function parseArgs(argv) {
     return parseError('--config <path> is required')
   }
 
-  return { mode: 'config', configPath, printConfig }
+  return { mode: 'config', configPath, printConfig, strict }
 }
 
 /**
@@ -112,7 +119,7 @@ export async function run(argv, _env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfig(parsed.configPath)
+    config = loadConfig(parsed.configPath, { strict: parsed.strict, stderr })
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)
@@ -138,8 +145,11 @@ function buildConfigListeners(config) {
   const factories = []
 
   if (config.otel) {
+    if (!config.sink) {
+      throw new Error('otel is configured but sink is missing')
+    }
     const { listen } = config.otel
-    const outputDir = config.sink?.dir ?? './otel-data'
+    const outputDir = config.sink.dir
     factories.push(async () => {
       const { host, port } = parseListen(listen)
       const collector = new Collector({ host, port, outputDir })

@@ -6,7 +6,7 @@ import { ConfigError } from '../../src/config.js'
 import { parseAttachArgs, runAttach } from '../../src/cli/attach.js'
 
 /**
- * @import { AttachOptions } from '../../src/types.js'
+ * @import { AttachOptions, CollectivusConfig } from '../../src/types.js'
  */
 
 /**
@@ -106,7 +106,8 @@ describe('runAttach', function() {
   it('--config: derives port from proxy.listen', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfg = { proxy: { listen: '0.0.0.0:8765', upstreams: {} } }
+    /** @type {CollectivusConfig} */
+    const cfg = { version: 1, proxy: { listen: '0.0.0.0:8765', upstreams: [] } }
     /** @type {Array<AttachOptions>} */
     const calls = []
     const code = await runAttach(['--config', '/tmp/x'], {
@@ -135,7 +136,11 @@ describe('runAttach', function() {
     const stderr = memo()
     const code = await runAttach(['--config', '/tmp/x'], {
       stdout: memo(), stderr,
-      loadConfig() { return { otel: { listen: '0.0.0.0:4318' } } },
+      loadConfig() {
+        /** @type {CollectivusConfig} */
+        const cfg = { version: 1, otel: { listen: '0.0.0.0:4318' } }
+        return cfg
+      },
       attach() { return Promise.resolve({ changed: true }) },
     })
     expect(code).toBe(1)

@@ -26,14 +26,16 @@ The rest of this doc shows the manual config equivalent. Save this as
 
 ```json
 {
+  "version": 1,
   "proxy": {
     "listen": "127.0.0.1:8787",
-    "upstreams": {
-      "anthropic": {
+    "upstreams": [
+      {
+        "name": "anthropic",
         "base_url": "https://api.anthropic.com",
         "match": { "path_prefix": "/v1/messages" }
       }
-    },
+    ],
     "redact_headers": [
       "authorization",
       "x-api-key",
@@ -156,8 +158,9 @@ signals from one binary:
 
 ```json
 {
+  "version": 1,
   "otel": { "listen": "0.0.0.0:4318" },
-  "proxy": { "listen": "127.0.0.1:8787", "upstreams": { … } },
+  "proxy": { "listen": "127.0.0.1:8787", "upstreams": [ … ] },
   "sink": { "type": "file", "dir": "./collectivus-data" }
 }
 ```

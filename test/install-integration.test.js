@@ -70,11 +70,12 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     }, null, 2))
 
     fs.writeFileSync(configPath, JSON.stringify({
+      version: 1,
       proxy: {
         listen: '127.0.0.1:8787',
-        upstreams: {
-          anthropic: { base_url: 'https://api.anthropic.com', match: { path_prefix: '/' } },
-        },
+        upstreams: [
+          { name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/' } },
+        ],
       },
       sink: { type: 'file', dir: path.join(tmpHome, 'sink') },
     }, null, 2))

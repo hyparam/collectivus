@@ -58,19 +58,25 @@ describe('parseArgs', () => {
 
   it('parses --config <path>', () => {
     expect(parseArgs(['--config', '/tmp/c.json'])).toEqual({
-      mode: 'config', configPath: '/tmp/c.json', printConfig: false,
+      mode: 'config', configPath: '/tmp/c.json', printConfig: false, strict: false,
     })
   })
 
   it('parses --config=<path>', () => {
     expect(parseArgs(['--config=/tmp/c.json'])).toEqual({
-      mode: 'config', configPath: '/tmp/c.json', printConfig: false,
+      mode: 'config', configPath: '/tmp/c.json', printConfig: false, strict: false,
     })
   })
 
   it('parses --config <path> --print-config', () => {
     expect(parseArgs(['--config', '/tmp/c.json', '--print-config'])).toEqual({
-      mode: 'config', configPath: '/tmp/c.json', printConfig: true,
+      mode: 'config', configPath: '/tmp/c.json', printConfig: true, strict: false,
+    })
+  })
+
+  it('parses --config <path> --strict', () => {
+    expect(parseArgs(['--config', '/tmp/c.json', '--strict'])).toEqual({
+      mode: 'config', configPath: '/tmp/c.json', printConfig: false, strict: true,
     })
   })
 
@@ -189,16 +195,55 @@ describe('run() — --config <path>', () => {
   })
 
   it('returns 1 on invalid config schema', async () => {
-    const cfgPath = writeConfig({ mystery: 1 })
+    const cfgPath = writeConfig({ version: 1, mystery: 1 })
+    const stdout = memo()
+    const stderr = memo()
+    // --strict promotes the unknown-key warning to an error.
+    const code = await run(['--config', cfgPath, '--strict'], {}, { stdout, stderr })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/config error.*unknown key "mystery"/)
+  })
+
+  it('warns but proceeds on unknown top-level key without --strict', async () => {
+    const cfg = {
+      version: 1,
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+      mystery: 'kept',
+    }
+    const cfgPath = writeConfig(cfg)
+    const stdout = memo()
+    const stderr = memo()
+    /** @type {(signal: string) => void} */
+    let trigger = noop
+    const result = run(['--config', cfgPath], {}, {
+      stdout, stderr,
+      onShutdownRequested: (handler) => { trigger = handler },
+    })
+    await waitFor(() => stdout.value().includes('OTLP listener bound'))
+    trigger('SIGTERM')
+    expect(await result).toBe(0)
+    expect(stderr.value()).toMatch(/warning: unknown config key "mystery" ignored/)
+  })
+
+  it('returns 1 on a v0 config (missing version field)', async () => {
+    const cfg = { otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp' } }
+    const cfgPath = writeConfig(cfg)
     const stdout = memo()
     const stderr = memo()
     const code = await run(['--config', cfgPath], {}, { stdout, stderr })
     expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/config error/)
+    expect(stderr.value()).toMatch(/config error.*missing "version" field/)
+    expect(stderr.value()).toMatch(/requires version: 1/)
   })
 
-  it('--print-config loads and prints, exits 0', async () => {
-    const cfg = { otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } }
+  it('--print-config round-trips a v1 config unchanged', async () => {
+    const cfg = {
+      version: 1,
+      otel: { listen: '0.0.0.0:4318' },
+      sink: { type: 'file', dir: '/tmp/x' },
+      upload: { bucket: 'b' },
+    }
     const cfgPath = writeConfig(cfg)
     const stdout = memo()
     const stderr = memo()
@@ -207,9 +252,39 @@ describe('run() — --config <path>', () => {
     expect(JSON.parse(stdout.value())).toEqual(cfg)
   })
 
+  it('upload key is parsed but no uploader is started in this phase', async () => {
+    // Schema accepts upload, but co-zdn.7.1 does not wire createUploader yet —
+    // running the CLI with `upload: { bucket }` should only emit listener
+    // lines (otel/proxy), never an upload start line. createUploader requires
+    // AWS_ACCESS_KEY_ID; the absence of an "AWS" stderr complaint here proves
+    // we never reached it.
+    const sinkDir = path.join(tmpDir, 'data')
+    const cfg = {
+      version: 1,
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: sinkDir },
+      upload: { bucket: 'irrelevant' },
+    }
+    const cfgPath = writeConfig(cfg)
+    const stdout = memo()
+    const stderr = memo()
+    /** @type {(signal: string) => void} */
+    let trigger = noop
+    const result = run(['--config', cfgPath], {}, {
+      stdout, stderr,
+      onShutdownRequested: (handler) => { trigger = handler },
+    })
+    await waitFor(() => stdout.value().includes('OTLP listener bound'))
+    trigger('SIGTERM')
+    expect(await result).toBe(0)
+    // Listener line only — no uploader start, no AWS-credential complaint.
+    expect(stdout.value()).not.toMatch(/upload(er)? (started|bound)/i)
+    expect(stderr.value()).not.toMatch(/AWS_ACCESS_KEY/)
+  })
+
   it('starts otel listener from config and exits cleanly on shutdown', async () => {
     const sinkDir = path.join(tmpDir, 'data')
-    const cfg = { otel: { listen: '127.0.0.1:0' }, sink: { type: 'file', dir: sinkDir } }
+    const cfg = { version: 1, otel: { listen: '127.0.0.1:0' }, sink: { type: 'file', dir: sinkDir } }
     const cfgPath = writeConfig(cfg)
     const stdout = memo()
     const stderr = memo()
@@ -232,10 +307,11 @@ describe('run() — --config <path>', () => {
 
   it('starts both otel and proxy listeners when both are configured', async () => {
     const cfg = {
+      version: 1,
       otel: { listen: '127.0.0.1:0' },
       proxy: {
         listen: '127.0.0.1:0',
-        upstreams: { a: { base_url: 'https://x.test', match: { path_prefix: '/v1' } } },
+        upstreams: [{ name: 'a', base_url: 'https://x.test', match: { path_prefix: '/v1' } }],
       },
       sink: { type: 'file', dir: path.join(tmpDir, 'data') },
     }
@@ -257,7 +333,7 @@ describe('run() — --config <path>', () => {
   })
 
   it('returns 1 when config has no enabled listeners', async () => {
-    const cfgPath = writeConfig({})
+    const cfgPath = writeConfig({ version: 1 })
     const stdout = memo()
     const stderr = memo()
     const code = await run(['--config', cfgPath], {}, { stdout, stderr })
@@ -276,6 +352,7 @@ describe('run() — --config <path>', () => {
     if (!addr || typeof addr === 'string') throw new Error('no address')
     try {
       const cfg = {
+        version: 1,
         otel: { listen: `127.0.0.1:${addr.port}` },
         sink: { type: 'file', dir: path.join(tmpDir, 'data') },
       }
@@ -309,6 +386,7 @@ describe('CLI signal handling (spawned)', () => {
     const cfgPath = path.join(tmp, 'config.json')
     const sinkDir = path.join(tmp, 'data')
     fs.writeFileSync(cfgPath, JSON.stringify({
+      version: 1,
       otel: { listen: '127.0.0.1:0' },
       sink: { type: 'file', dir: sinkDir },
     }))
@@ -332,6 +410,7 @@ describe('CLI signal handling (spawned)', () => {
     const cfgPath = path.join(tmp, 'config.json')
     const sinkDir = path.join(tmp, 'data')
     fs.writeFileSync(cfgPath, JSON.stringify({
+      version: 1,
       otel: { listen: '127.0.0.1:0' },
       sink: { type: 'file', dir: sinkDir },
     }))

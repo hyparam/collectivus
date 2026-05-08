@@ -462,7 +462,10 @@ describe('runInit', function() {
     expect(asked.filter(function(q) { return q === 'Provider [1]: ' })).toHaveLength(3)
     const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
     const openai = written.proxy.upstreams.find(
-      /** @param {{ name: string }} u */
+      /**
+       * @param {{ name: string }} u
+       * @returns {boolean}
+       */
       function(u) { return u.name === 'openai' }
     )
     expect(openai.base_url).toBe('https://api.openai.com')

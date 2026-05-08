@@ -178,6 +178,9 @@ export function readDouble(reader) {
  */
 export function readBytes(reader) {
   const length = readVarint(reader)
+  if (reader.offset + length > reader.view.byteLength) {
+    throw new Error('protobuf: length-delimited field extends past buffer')
+  }
   const bytes = new Uint8Array(reader.view.buffer, reader.view.byteOffset + reader.offset, length)
   reader.offset += length
   return bytes
@@ -197,6 +200,9 @@ export function skipField(reader, wireType) {
     reader.offset += 8
   } else if (wireType === WIRE_LEN) {
     const length = readVarint(reader)
+    if (reader.offset + length > reader.view.byteLength) {
+      throw new Error('protobuf: length-delimited field extends past buffer')
+    }
     reader.offset += length
   } else if (wireType === WIRE_I32) {
     reader.offset += 4

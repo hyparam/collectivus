@@ -176,6 +176,20 @@ export interface ServerConfig {
   control_plane_listen: string
   /** JWT issuer settings for the control-plane. */
   identity_issuer: IdentityIssuerConfig
+  /**
+   * Filesystem root for server-side state (per-gateway config registry,
+   * future log-ingest spool, etc). Defaults to `~/.hyp/collectivus/server-data`
+   * when omitted.
+   */
+  data_dir?: string
+}
+
+/** A per-gateway config entry held by the server-side registry. */
+export interface ConfigRegistryEntry {
+  /** The gateway-shaped CollectivusConfig persisted for this gateway. */
+  config: CollectivusConfig
+  /** SHA-256 hex of the canonical JSON serialization of `config`. */
+  etag: string
 }
 
 export interface CentralServerIdentityConfig {

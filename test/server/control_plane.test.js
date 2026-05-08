@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { run } from '../../src/cli.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
+import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
 /**
  * @import { ServerConfig } from '../../src/types.js'
@@ -16,6 +17,18 @@ function serverConfig() {
   return {
     control_plane_listen: '127.0.0.1:0',
     identity_issuer: { secret: PLACEHOLDER_SECRET },
+  }
+}
+
+/**
+ * @param {number} initialMs
+ * @returns {{ now: () => number, advance: (ms: number) => void }}
+ */
+function fakeClock(initialMs) {
+  let t = initialMs
+  return {
+    now: () => t,
+    advance: (ms) => { t += ms },
   }
 }
 
@@ -90,12 +103,15 @@ describe('ControlPlane class', () => {
   })
 
   describe('POST /v1/identity/bootstrap (no auth)', () => {
-    it('returns 501 placeholder without requiring Authorization', async () => {
+    it('returns 503 when no bootstrap store is configured (no body required)', async () => {
+      // The default test config omits bootstrap_store_path, so the bootstrap
+      // endpoint is intentionally disabled — refresh and ordinary auth still
+      // work. handleBootstrap rejects before parsing the body, so an empty
+      // POST reaches the 503 branch instead of "empty request body".
       const res = await fetch(`${baseUrl}/v1/identity/bootstrap`, { method: 'POST' })
-      expect(res.status).toBe(501)
+      expect(res.status).toBe(503)
       const body = await res.json()
-      expect(body.error).toBe('not implemented')
-      expect(body.endpoint).toBe('bootstrap')
+      expect(body.error).toBe('bootstrap not provisioned')
     })
 
     it('returns 405 on non-POST methods', async () => {
@@ -128,15 +144,16 @@ describe('ControlPlane class', () => {
       expect(res.status).toBe(401)
     })
 
-    it('returns 501 placeholder when Bearer token is present (A.3 will verify)', async () => {
+    it('returns 401 when Bearer token is not a valid JWT', async () => {
+      // A.3 verifies the JWT — a non-JWT bearer string can no longer reach
+      // the handler. Detailed JWT-shape coverage lives in auth.test.js.
       const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
         method: 'POST',
         headers: { authorization: 'Bearer placeholder-token' },
       })
-      expect(res.status).toBe(501)
+      expect(res.status).toBe(401)
       const body = await res.json()
-      expect(body.error).toBe('not implemented')
-      expect(body.endpoint).toBe('refresh')
+      expect(body.error).toBe('unauthorized')
     })
 
     it('returns 405 on non-POST methods', async () => {
@@ -162,6 +179,192 @@ describe('ControlPlane class', () => {
   it('stop() is idempotent — calling twice does not reject', async () => {
     await plane.stop()
     await plane.stop()
+  })
+})
+
+describe('Identity flow end-to-end (HTTP)', () => {
+  /** @type {string} */
+  let dir
+  /** @type {ControlPlane | undefined} */
+  let plane
+  /** @type {string} */
+  let baseUrl
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cp-id-'))
+  })
+  afterEach(async () => {
+    if (plane) await plane.stop()
+    plane = undefined
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  /**
+   * Spin up a control plane backed by a real BootstrapStore at `dir`.
+   *
+   * @param {{ clock?: { now: () => number } }} [opts]
+   * @returns {Promise<{ store: BootstrapStore, plane: ControlPlane }>}
+   */
+  async function bootPlane(opts = {}) {
+    const storePath = path.join(dir, 'bootstrap.json')
+    const store = new BootstrapStore({ path: storePath, now: opts.clock?.now })
+    plane = new ControlPlane(
+      {
+        control_plane_listen: '127.0.0.1:0',
+        identity_issuer: { secret: PLACEHOLDER_SECRET, bootstrap_store_path: storePath },
+      },
+      { bootstrapStore: store, now: opts.clock?.now }
+    )
+    await plane.start()
+    const addr = plane.server?.address()
+    if (!addr || typeof addr === 'string') throw new Error('no address')
+    baseUrl = `http://127.0.0.1:${addr.port}`
+    return { store, plane }
+  }
+
+  it('exchanges a bootstrap token for a usable JWT exactly once', async () => {
+    const { store } = await bootPlane()
+    const { token } = store.register({ gatewayId: 'gw-1', ttlSeconds: 60 })
+
+    const ok = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrap_token: token }),
+    })
+    expect(ok.status).toBe(200)
+    const body = await ok.json()
+    expect(typeof body.jwt).toBe('string')
+    expect(typeof body.expires_at).toBe('number')
+
+    const verified = verifyJwt(body.jwt, PLACEHOLDER_SECRET)
+    expect(verified.valid).toBe(true)
+    if (!verified.valid) throw new Error('unreachable')
+    expect(verified.claims.sub).toBe('gw-1')
+
+    // Replay must fail with 401.
+    const replay = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrap_token: token }),
+    })
+    expect(replay.status).toBe(401)
+  })
+
+  it('rejects bootstrap requests with a missing/invalid body', async () => {
+    await bootPlane()
+    const empty = await fetch(`${baseUrl}/v1/identity/bootstrap`, { method: 'POST' })
+    expect(empty.status).toBe(400)
+
+    const bad = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'not-json',
+    })
+    expect(bad.status).toBe(400)
+
+    const wrongShape = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ wrong: 'field' }),
+    })
+    expect(wrongShape.status).toBe(400)
+  })
+
+  it('rejects unknown bootstrap tokens with 401', async () => {
+    await bootPlane()
+    const res = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrap_token: 'not-a-real-token' }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('refresh issues a new JWT for an authenticated gateway', async () => {
+    await bootPlane()
+    const jwt = signJwt({ gatewayId: 'gw-7', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+    const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(typeof body.jwt).toBe('string')
+    expect(body.jwt).not.toBe(jwt)
+    const verified = verifyJwt(body.jwt, PLACEHOLDER_SECRET)
+    expect(verified.valid).toBe(true)
+    if (!verified.valid) throw new Error('unreachable')
+    expect(verified.claims.sub).toBe('gw-7')
+  })
+
+  it('rejects refresh with an expired JWT', async () => {
+    const clock = fakeClock(1_700_000_000_000)
+    await bootPlane({ clock })
+    const jwt = signJwt({ gatewayId: 'gw', ttlSeconds: 60, secret: PLACEHOLDER_SECRET, now: clock.now })
+    clock.advance(61_000)
+    const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('rate-limits bootstrap to 5 requests/min/IP', async () => {
+    const clock = fakeClock(1_700_000_000_000)
+    await bootPlane({ clock })
+    // 5 requests with bogus tokens — each is 401 but counts toward the limit.
+    for (let i = 0; i < 5; i++) {
+      const r = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ bootstrap_token: 'nope' }),
+      })
+      expect(r.status).toBe(401)
+    }
+    // The 6th in the same window must be 429.
+    const limited = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrap_token: 'nope' }),
+    })
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).toMatch(/^\d+$/)
+  })
+
+  it('rate-limits refresh to 1 request/min/gateway', async () => {
+    const clock = fakeClock(1_700_000_000_000)
+    await bootPlane({ clock })
+    const jwt = signJwt({ gatewayId: 'gw', ttlSeconds: 600, secret: PLACEHOLDER_SECRET, now: clock.now })
+    const first = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(first.status).toBe(200)
+
+    const second = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(second.status).toBe(429)
+
+    // Move the clock past the window — refresh works again.
+    clock.advance(60_001)
+    const third = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(third.status).toBe(200)
+  })
+
+  it('rejects bootstrap bodies larger than 4KiB', async () => {
+    await bootPlane()
+    const big = 'x'.repeat(5 * 1024)
+    const res = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ bootstrap_token: big }),
+    })
+    expect(res.status).toBe(413)
   })
 })
 

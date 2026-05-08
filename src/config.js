@@ -30,7 +30,7 @@ const ALLOWED_UPLOAD_KEYS = new Set([
 ])
 const ALLOWED_SERVER_KEYS = new Set(['control_plane_listen', 'identity_issuer'])
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
-  'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds',
+  'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
 const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
@@ -241,6 +241,9 @@ function validateIdentityIssuer(issuer) {
   }
   if (issuer.bootstrap_ttl_seconds !== undefined) {
     assertPositiveInteger(issuer.bootstrap_ttl_seconds, '/server/identity_issuer/bootstrap_ttl_seconds')
+  }
+  if (issuer.bootstrap_store_path !== undefined) {
+    assertNonEmptyString(issuer.bootstrap_store_path, '/server/identity_issuer/bootstrap_store_path')
   }
 }
 

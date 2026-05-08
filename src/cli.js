@@ -180,10 +180,13 @@ function buildConfigListeners(config, ctx) {
       const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
       return {
         description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/proxy.jsonl`,
-        // Stop accepting new connections, then flush+close the sink so the
-        // final exchange row of any in-flight request lands before exit.
+        // Stop accepting new connections, drain any in-flight exchanges (their
+        // finalization can be async — e.g. a gzip decoder still flushing the
+        // tail of an SSE stream), then flush+close the sink so the final
+        // `exchange` row lands before exit.
         stop: async () => {
           await proxy.stop()
+          await recorder.drain()
           await sink.close()
         },
       }

@@ -35,6 +35,8 @@ export class Recorder {
     this.sink = options.sink
     /** @type {Set<string>} */
     this.redactSet = buildRedactSet(options.redactHeaders)
+    /** @type {Set<Exchange>} */
+    this.active = new Set()
   }
 
   /**
@@ -49,7 +51,37 @@ export class Recorder {
    * @returns {Exchange}
    */
   startExchange(init) {
-    return new Exchange(this, init)
+    const exchange = new Exchange(this, init)
+    this.active.add(exchange)
+    return exchange
+  }
+
+  /**
+   * Wait for in-flight exchanges to finalize. Called during shutdown so async
+   * finalization paths — e.g. a gzip decoder still flushing decompressed SSE
+   * bytes after the upstream connection closed — get a chance to write their
+   * `exchange` row before the sink closes. Any exchange still pending after
+   * the timeout is force-finalized so its row is not lost.
+   *
+   * @param {number} [timeoutMs]
+   * @returns {Promise<void>}
+   */
+  async drain(timeoutMs = 5000) {
+    if (this.active.size === 0) return
+    const settled = Promise.all(
+      [...this.active].map((e) => e.finishedSignal.catch(() => {}))
+    )
+    /** @type {Promise<'timeout'>} */
+    const timeout = new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), timeoutMs)
+      if (typeof t.unref === 'function') t.unref()
+    })
+    const outcome = await Promise.race([settled.then(() => 'done'), timeout])
+    if (outcome === 'timeout') {
+      for (const exchange of [...this.active]) {
+        await exchange.finish().catch(() => {})
+      }
+    }
   }
 }
 
@@ -96,6 +128,12 @@ export class Exchange {
     this.finished = false
     /** @type {SseParser} */
     this.sseParser = new SseParser()
+    /** @type {() => void} */
+    this._resolveFinished = () => {}
+    /** @type {Promise<void>} */
+    this.finishedSignal = new Promise((resolve) => {
+      this._resolveFinished = resolve
+    })
   }
 
   /**
@@ -202,6 +240,7 @@ export class Exchange {
   async finish() {
     if (this.finished) return
     this.finished = true
+    this.recorder.active.delete(this)
 
     const tsEndMs = Date.now()
     const requestBody = Buffer.concat(this.requestChunks).toString('utf8')
@@ -224,7 +263,11 @@ export class Exchange {
       stream_event_count: this.streamEventCount,
       error: this.error,
     }
-    await this.recorder.sink.writeRow(row)
+    try {
+      await this.recorder.sink.writeRow(row)
+    } finally {
+      this._resolveFinished()
+    }
   }
 }
 

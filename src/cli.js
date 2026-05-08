@@ -4,6 +4,7 @@ import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
+import { ControlPlane } from './server/control_plane.js'
 import { FileSink } from './sinks/file.js'
 import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
@@ -236,6 +237,26 @@ function buildConfigListeners(config, ctx) {
       return {
         description: `Uploader scheduled for ${time} UTC, target s3://${uploadConfig.bucket}/${prefix}`,
         stop: () => uploader.stop(),
+      }
+    })
+  }
+
+  // role: server brings up the control-plane HTTP listener (identity,
+  // future config-vending, future log ingest). Only `server` triggers it —
+  // `gateway` is a client of this listener and `standalone` doesn't use it.
+  // The validator guarantees `config.server` is set iff role === 'server'.
+  if (config.role === 'server') {
+    const serverConfig = config.server
+    if (!serverConfig) {
+      throw new Error('role: server requires server block (validator should have caught this)')
+    }
+    factories.push(async () => {
+      const controlPlane = new ControlPlane(serverConfig)
+      await controlPlane.start()
+      const effective = effectiveBinding(controlPlane.server, controlPlane.host, controlPlane.port)
+      return {
+        description: `Control-plane listener bound on ${effective}`,
+        stop: () => controlPlane.stop(),
       }
     })
   }

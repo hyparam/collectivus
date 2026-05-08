@@ -171,6 +171,20 @@ export type IssueFromBootstrapResult =
   | { ok: true, jwt: string, expiresAt: number, gatewayId: string }
   | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }
 
+/**
+ * Gateway-side persisted identity. Written by `IdentityClient` after a
+ * successful `bootstrap` or `refresh`, read on subsequent gateway start so
+ * the JWT survives process restarts.
+ */
+export interface PersistedIdentity {
+  /** The control-plane JWT this gateway uses for every authenticated call. */
+  jwt: string
+  /** Expiration of `jwt`, seconds since the unix epoch. */
+  expires_at: number
+  /** Gateway identity claim (`sub`) recovered from the JWT at issue time. */
+  gateway_id: string
+}
+
 export interface ServerConfig {
   /** host:port for the control-plane HTTP listener (separate from OTLP/proxy). */
   control_plane_listen: string

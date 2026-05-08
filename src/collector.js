@@ -53,9 +53,11 @@ const MAX_DATE_MS = 8640000000000000n
  */
 
 class Collector {
-  /** @param {{ port?: number, outputDir?: string, upload?: UploadOptions }} [options] */
+  /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
   constructor(options = {}) {
     this.port = options.port ?? 4318
+    /** @type {string | undefined} */
+    this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
     this.uploadOptions = options.upload
     /** @type {import('node:http').Server | null} */
@@ -70,8 +72,23 @@ class Collector {
     const server = createServer(this.handleData.bind(this))
     this.server = server
 
-    await new Promise((resolve) => {
-      server.listen(this.port, () => resolve(undefined))
+    await new Promise((resolve, reject) => {
+      /** @param {Error} err */
+      function onError(err) {
+        server.off('listening', onListening)
+        reject(err)
+      }
+      function onListening() {
+        server.off('error', onError)
+        resolve(undefined)
+      }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      if (this.host !== undefined) {
+        server.listen(this.port, this.host)
+      } else {
+        server.listen(this.port)
+      }
     })
 
     if (this.uploadOptions) {

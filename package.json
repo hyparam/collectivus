@@ -1,7 +1,7 @@
 {
   "name": "collectivus",
   "version": "1.1.0",
-  "description": "Zero-dependency OTLP/HTTP collector that writes to JSONL files",
+  "description": "OTLP collector and pass-through LLM proxy that records every request and response to JSONL",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -32,7 +32,11 @@
     "collector",
     "traces",
     "metrics",
-    "logs"
+    "logs",
+    "anthropic",
+    "claude",
+    "llm-proxy",
+    "claude-code"
   ],
   "license": "MIT"
 }

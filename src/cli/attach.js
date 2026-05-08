@@ -25,50 +25,38 @@ Exactly one of --config or --port is required.`
  * @returns {AttachParseResult}
  */
 export function parseAttachArgs(argv) {
-  /** @type {string | undefined} */
-  let configPath
-  /** @type {number | undefined} */
-  let port
-  /**
-   * @param {boolean} help
-   * @param {string} [error]
-   * @returns {AttachParseResult}
-   */
-  const result = (help, error) => {
-    /** @type {AttachParseResult} */
-    const r = { help }
-    if (configPath !== undefined) r.configPath = configPath
-    if (port !== undefined) r.port = port
-    if (error !== undefined) r.error = error
-    return r
-  }
+  /** @type {AttachParseResult} */
+  const r = { help: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return result(true)
+    if (arg === '--help' || arg === '-h') {
+      r.help = true
+      return r
+    }
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return result(false, '--config requires a path')
-      configPath = value
+      if (!value) { r.error = '--config requires a path'; return r }
+      r.configPath = value
       continue
     }
     if (arg === '--port' || arg.startsWith('--port=')) {
       const value = arg === '--port' ? argv[++i] : arg.slice('--port='.length)
-      if (!value) return result(false, '--port requires a number')
-      if (!/^\d+$/.test(value)) return result(false, `--port: not a valid port (got "${value}")`)
+      if (!value) { r.error = '--port requires a number'; return r }
+      if (!/^\d+$/.test(value)) { r.error = `--port: not a valid port (got "${value}")`; return r }
       const n = Number.parseInt(value, 10)
-      if (n < 1 || n > 65535) return result(false, `--port: not a valid port (got "${value}")`)
-      port = n
+      if (n < 1 || n > 65535) { r.error = `--port: not a valid port (got "${value}")`; return r }
+      r.port = n
       continue
     }
-    return result(false, `unknown argument: ${arg}`)
+    r.error = `unknown argument: ${arg}`
+    return r
   }
-  if (configPath !== undefined && port !== undefined) {
-    return result(false, '--config and --port are mutually exclusive')
+  if (r.configPath !== undefined && r.port !== undefined) {
+    r.error = '--config and --port are mutually exclusive'
+  } else if (r.configPath === undefined && r.port === undefined) {
+    r.error = 'one of --config or --port is required'
   }
-  if (configPath === undefined && port === undefined) {
-    return result(false, 'one of --config or --port is required')
-  }
-  return result(false)
+  return r
 }
 
 /**

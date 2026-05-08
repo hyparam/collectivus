@@ -32,39 +32,29 @@ Options:
  * @returns {InstallParseResult}
  */
 export function parseInstallArgs(argv) {
-  /** @type {string | undefined} */
-  let configPath
-  let yes = false
-  let no = false
-  /**
-   * @param {boolean} help
-   * @param {string} [error]
-   * @returns {InstallParseResult}
-   */
-  const result = (help, error) => {
-    /** @type {InstallParseResult} */
-    const r = { yes, no, help }
-    if (configPath !== undefined) r.configPath = configPath
-    if (error !== undefined) r.error = error
-    return r
-  }
+  /** @type {InstallParseResult} */
+  const r = { yes: false, no: false, help: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
-    if (arg === '--help' || arg === '-h') return result(true)
-    if (arg === '--yes' || arg === '-y') { yes = true; continue }
-    if (arg === '--no' || arg === '-n') { no = true; continue }
+    if (arg === '--help' || arg === '-h') {
+      r.help = true
+      return r
+    }
+    if (arg === '--yes' || arg === '-y') { r.yes = true; continue }
+    if (arg === '--no' || arg === '-n') { r.no = true; continue }
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return result(false, '--config requires a path')
-      configPath = value
+      if (!value) { r.error = '--config requires a path'; return r }
+      r.configPath = value
       continue
     }
-    return result(false, `unknown argument: ${arg}`)
+    r.error = `unknown argument: ${arg}`
+    return r
   }
-  if (yes && no) {
-    return result(false, '--yes and --no are mutually exclusive')
+  if (r.yes && r.no) {
+    r.error = '--yes and --no are mutually exclusive'
   }
-  return result(false)
+  return r
 }
 
 /**

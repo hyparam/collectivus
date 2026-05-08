@@ -117,9 +117,48 @@ export interface UploadConfig {
   endpoint?: string
 }
 
+/**
+ * Operating mode for this collectivus instance. `standalone` (default when
+ * `role` is absent) preserves single-binary behavior. `server` and `gateway`
+ * activate the central-server / local-gateway split introduced by Epic A.
+ */
+export type CollectivusRole = 'server' | 'gateway' | 'standalone'
+
+export interface IdentityIssuerConfig {
+  /** HMAC secret used to sign control-plane JWTs. Must be ≥32 chars. */
+  secret: string
+  /** TTL applied to issued gateway JWTs. */
+  jwt_ttl_seconds?: number
+  /** TTL applied to operator-provisioned bootstrap tokens. */
+  bootstrap_ttl_seconds?: number
+}
+
+export interface ServerConfig {
+  /** host:port for the control-plane HTTP listener (separate from OTLP/proxy). */
+  control_plane_listen: string
+  /** JWT issuer settings for the control-plane. */
+  identity_issuer: IdentityIssuerConfig
+}
+
+export interface CentralServerIdentityConfig {
+  /** Operator-provisioned bootstrap token, exchanged on first start. */
+  bootstrap_token?: string
+  /** Filesystem path where the long-lived JWT is persisted. */
+  persisted_path?: string
+}
+
+export interface CentralServerConfig {
+  /** Base URL of the central control-plane server. */
+  url: string
+  /** Identity material used by the gateway to authenticate. */
+  identity: CentralServerIdentityConfig
+}
+
 export interface CollectivusConfig {
   /** Schema version. Always 1 in this binary. */
   version: 1
+  /** Operating mode. Defaults to `standalone` when omitted. */
+  role?: CollectivusRole
   /** OTLP receiver. Omit to disable. */
   otel?: OtelConfig
   /** Proxy listener. Omit to disable. */
@@ -128,6 +167,10 @@ export interface CollectivusConfig {
   sink?: FileSinkConfig
   /** Reserved upload section. Schema-validated only; uploader wires up later. */
   upload?: UploadConfig
+  /** Server-mode (control-plane) settings. Required iff `role === 'server'`. */
+  server?: ServerConfig
+  /** Gateway-mode central-server settings. Required iff `role === 'gateway'`. */
+  central_server?: CentralServerConfig
 }
 
 // ---------- Collector / OTLP normalization ----------

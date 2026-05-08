@@ -19,15 +19,25 @@ export class ConfigError extends Error {
   }
 }
 
-const ALLOWED_TOP_KEYS = new Set(['version', 'otel', 'proxy', 'sink', 'upload'])
+const ALLOWED_TOP_KEYS = new Set([
+  'version', 'role', 'otel', 'proxy', 'sink', 'upload', 'server', 'central_server',
+])
 const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
 const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
 const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
+const ALLOWED_SERVER_KEYS = new Set(['control_plane_listen', 'identity_issuer'])
+const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
+  'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds',
+])
+const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity'])
+const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
+const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
 const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
+const IDENTITY_SECRET_MIN_LENGTH = 32
 
 /**
  * Load and validate a collectivus JSON config file.
@@ -130,6 +140,137 @@ function validateConfig(cfg, opts) {
   }
   if (cfg.sink !== undefined) validateSink(cfg.sink)
   if (cfg.upload !== undefined) validateUpload(cfg.upload)
+  validateRole(cfg)
+}
+
+/**
+ * Validate `role` and the role-bound `server` / `central_server` blocks.
+ *
+ * The role-↔-block contract is enforced here rather than inside the per-block
+ * validators because the constraints are cross-field (a `server` block alone
+ * is not enough to know whether it's allowed; we need `role` too). An absent
+ * `role` is treated as `standalone`.
+ *
+ * @param {Record<string, unknown>} cfg
+ */
+function validateRole(cfg) {
+  const role = cfg.role === undefined ? 'standalone' : cfg.role
+  if (typeof role !== 'string' || !ALLOWED_ROLES.has(role)) {
+    throw new ConfigError(
+      'must be one of "server", "gateway", "standalone"',
+      { pointer: '/role' }
+    )
+  }
+  if (role === 'server') {
+    if (cfg.server === undefined) {
+      throw new ConfigError(
+        'server block is required when role is "server"',
+        { pointer: '/server' }
+      )
+    }
+    if (cfg.central_server !== undefined) {
+      throw new ConfigError(
+        'central_server is not permitted when role is "server"',
+        { pointer: '/central_server' }
+      )
+    }
+    validateServer(cfg.server)
+  } else if (role === 'gateway') {
+    if (cfg.central_server === undefined) {
+      throw new ConfigError(
+        'central_server block is required when role is "gateway"',
+        { pointer: '/central_server' }
+      )
+    }
+    if (cfg.server !== undefined) {
+      throw new ConfigError(
+        'server is not permitted when role is "gateway"',
+        { pointer: '/server' }
+      )
+    }
+    validateCentralServer(cfg.central_server)
+  } else {
+    if (cfg.server !== undefined) {
+      throw new ConfigError(
+        'server is only permitted when role is "server"',
+        { pointer: '/server' }
+      )
+    }
+    if (cfg.central_server !== undefined) {
+      throw new ConfigError(
+        'central_server is only permitted when role is "gateway"',
+        { pointer: '/central_server' }
+      )
+    }
+  }
+}
+
+/** @param {unknown} server */
+function validateServer(server) {
+  assertObject(server, '/server')
+  assertOnlyKeys(server, ALLOWED_SERVER_KEYS, '/server')
+  if (server.control_plane_listen === undefined) {
+    throw new ConfigError(
+      'control_plane_listen is required',
+      { pointer: '/server/control_plane_listen' }
+    )
+  }
+  assertHostPort(server.control_plane_listen, '/server/control_plane_listen')
+  if (server.identity_issuer === undefined) {
+    throw new ConfigError(
+      'identity_issuer is required',
+      { pointer: '/server/identity_issuer' }
+    )
+  }
+  validateIdentityIssuer(server.identity_issuer)
+}
+
+/** @param {unknown} issuer */
+function validateIdentityIssuer(issuer) {
+  assertObject(issuer, '/server/identity_issuer')
+  assertOnlyKeys(issuer, ALLOWED_IDENTITY_ISSUER_KEYS, '/server/identity_issuer')
+  assertNonEmptyString(issuer.secret, '/server/identity_issuer/secret')
+  if (issuer.secret.length < IDENTITY_SECRET_MIN_LENGTH) {
+    throw new ConfigError(
+      `must be at least ${IDENTITY_SECRET_MIN_LENGTH} characters`,
+      { pointer: '/server/identity_issuer/secret' }
+    )
+  }
+  if (issuer.jwt_ttl_seconds !== undefined) {
+    assertPositiveInteger(issuer.jwt_ttl_seconds, '/server/identity_issuer/jwt_ttl_seconds')
+  }
+  if (issuer.bootstrap_ttl_seconds !== undefined) {
+    assertPositiveInteger(issuer.bootstrap_ttl_seconds, '/server/identity_issuer/bootstrap_ttl_seconds')
+  }
+}
+
+/** @param {unknown} cs */
+function validateCentralServer(cs) {
+  assertObject(cs, '/central_server')
+  assertOnlyKeys(cs, ALLOWED_CENTRAL_SERVER_KEYS, '/central_server')
+  if (cs.url === undefined) {
+    throw new ConfigError('url is required', { pointer: '/central_server/url' })
+  }
+  assertParseableUrl(cs.url, '/central_server/url')
+  if (cs.identity === undefined) {
+    throw new ConfigError(
+      'identity is required',
+      { pointer: '/central_server/identity' }
+    )
+  }
+  validateCentralIdentity(cs.identity)
+}
+
+/** @param {unknown} identity */
+function validateCentralIdentity(identity) {
+  assertObject(identity, '/central_server/identity')
+  assertOnlyKeys(identity, ALLOWED_CENTRAL_IDENTITY_KEYS, '/central_server/identity')
+  if (identity.bootstrap_token !== undefined) {
+    assertNonEmptyString(identity.bootstrap_token, '/central_server/identity/bootstrap_token')
+  }
+  if (identity.persisted_path !== undefined) {
+    assertNonEmptyString(identity.persisted_path, '/central_server/identity/persisted_path')
+  }
 }
 
 /** @param {unknown} otel */
@@ -311,5 +452,56 @@ function warnUnknownTopKeys(obj, stderr) {
 function assertNonEmptyString(value, pointer) {
   if (typeof value !== 'string' || value.length === 0) {
     throw new ConfigError('must be a non-empty string', { pointer })
+  }
+}
+
+/**
+ * Mirrors the listen-address parsing in `proxy.js`: a non-empty string with a
+ * colon, a valid 0..65535 port, and a non-empty host (IPv6 literals may be
+ * wrapped in `[]`). Validation only — the value is bound to a server later.
+ *
+ * @param {unknown} value
+ * @param {string} pointer
+ */
+function assertHostPort(value, pointer) {
+  assertNonEmptyString(value, pointer)
+  const idx = value.lastIndexOf(':')
+  if (idx === -1) {
+    throw new ConfigError('must be host:port', { pointer })
+  }
+  const portStr = value.slice(idx + 1)
+  const port = Number.parseInt(portStr, 10)
+  if (Number.isNaN(port) || port < 0 || port > 65535 || String(port) !== portStr) {
+    throw new ConfigError('invalid port in host:port', { pointer })
+  }
+  const rawHost = value.slice(0, idx)
+  const host = rawHost.startsWith('[') && rawHost.endsWith(']')
+    ? rawHost.slice(1, -1)
+    : rawHost
+  if (host.length === 0) {
+    throw new ConfigError('missing host in host:port', { pointer })
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} pointer
+ */
+function assertParseableUrl(value, pointer) {
+  assertNonEmptyString(value, pointer)
+  try {
+    new URL(value)
+  } catch {
+    throw new ConfigError('must be a parseable URL', { pointer })
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} pointer
+ */
+function assertPositiveInteger(value, pointer) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new ConfigError('must be a positive integer', { pointer })
   }
 }

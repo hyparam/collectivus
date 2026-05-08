@@ -58,7 +58,7 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-int-'))
     plistPath = path.join(tmpHome, 'Library', 'LaunchAgents', 'com.hyparam.collectivus.plist')
     settingsPath = path.join(tmpHome, '.claude', 'settings.json')
-    logDir = path.join(tmpHome, 'Library', 'Logs', 'Collectivus')
+    logDir = path.join(tmpHome, '.hyp', 'collectivus')
     configPath = path.join(tmpHome, 'collectivus.json')
 
     // Pre-existing settings.json with unrelated keys we expect to survive.

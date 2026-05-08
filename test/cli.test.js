@@ -130,6 +130,36 @@ describe('run() — help and arg errors', () => {
   })
 })
 
+describe('run() — walkthrough dispatch', () => {
+  it('routes empty argv on a TTY into the init walkthrough', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    let initCalls = 0
+    const code = await run([], {}, {
+      stdout, stderr,
+      isTTY: true,
+      runInit: () => { initCalls++; return Promise.resolve(0) },
+    })
+    expect(code).toBe(0)
+    expect(initCalls).toBe(1)
+    expect(stderr.value()).toBe('')
+  })
+
+  it('falls through to the --config error when not a TTY', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    let initCalls = 0
+    const code = await run([], {}, {
+      stdout, stderr,
+      isTTY: false,
+      runInit: () => { initCalls++; return Promise.resolve(0) },
+    })
+    expect(code).toBe(2)
+    expect(initCalls).toBe(0)
+    expect(stderr.value()).toMatch(/--config <path> is required/)
+  })
+})
+
 describe('run() — --config <path>', () => {
   /** @type {string} */
   let tmpDir

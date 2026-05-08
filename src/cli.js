@@ -78,6 +78,8 @@ function parseError(message) {
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
  *   onShutdownRequested?: (handler: (signal: string) => void) => void,
+ *   isTTY?: boolean,
+ *   runInit?: () => Promise<number>,
  * }} [hooks]
  * @returns {Promise<number>}
  */
@@ -85,6 +87,16 @@ export async function run(argv, _env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
+  const isTTY = hooks.isTTY ?? Boolean(process.stdin.isTTY)
+
+  // Bare `collectivus` on a real terminal launches the interactive walkthrough
+  // that builds a config. Non-TTY (CI / piped stdin) keeps the existing
+  // "--config required" error so scripts that depend on the exit code aren't
+  // silently turned into a hung readline.
+  if (argv.length === 0 && isTTY) {
+    const runInitFn = hooks.runInit ?? (await import('./cli/init.js')).runInit
+    return runInitFn()
+  }
 
   const parsed = parseArgs(argv)
 

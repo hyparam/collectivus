@@ -289,6 +289,27 @@ export interface StatusHooks {
   readSettingsRaw?: (p: string) => Promise<string | undefined>
 }
 
+export interface InitHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override the readline prompt. */
+  prompt?: (question: string) => Promise<string>
+  /** Override file write. */
+  writeFile?: (path: string, contents: string) => void
+  /** Override the read used to detect an existing config at the default path. */
+  readConfig?: (path: string) => CollectivusConfig | undefined
+  /** Override `collectivus install` chain entry. */
+  runInstall?: (args: string[]) => Promise<number>
+  /** Override `process.platform`. */
+  platform?: NodeJS.Platform
+  /** Override `process.cwd()`. */
+  cwd?: string
+  /** Override the default `~/.hyp/collectivus.json` save path. */
+  defaultConfigPath?: string
+  /** Override the default `~/.hyp/collectivus` sink directory. */
+  defaultSinkDir?: string
+}
+
 export interface InstallHooks {
   stdout?: WriteStream
   stderr?: WriteStream
@@ -296,7 +317,7 @@ export interface InstallHooks {
   binPath?: string
   /** Override for the version recorded in the marker. */
   version?: string
-  /** Override for `~/Library/Logs/Collectivus`. */
+  /** Override for `~/.hyp/collectivus`. */
   logDir?: string
   /** Forwarded to installDaemon (`~/Library/LaunchAgents` override). */
   plistDir?: string

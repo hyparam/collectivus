@@ -45,13 +45,13 @@ export function readPackageVersion() {
 }
 
 /**
- * Default directory for daemon log files: `~/Library/Logs/Collectivus`.
+ * Default directory for daemon log files: `~/.hyp/collectivus`.
  *
  * @param {string} [homeDir] Override for tests.
  * @returns {string}
  */
 export function defaultLogDir(homeDir) {
-  return path.join(homeDir ?? os.homedir(), 'Library', 'Logs', 'Collectivus')
+  return path.join(homeDir ?? os.homedir(), '.hyp', 'collectivus')
 }
 
 /**

@@ -149,6 +149,22 @@ export interface HelpResult {
   mode: 'help'
 }
 
+export interface ExportParseResult {
+  help: boolean
+  error?: string
+  configPath?: string
+  outDir?: string
+  date?: string
+  service?: string
+  signal?: 'logs' | 'traces' | 'metrics'
+}
+
+export interface ExportHooks {
+  stdout?: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  loadConfig?: (path: string) => CollectivusConfig
+}
+
 export interface VersionResult {
   mode: 'version'
 }

@@ -93,6 +93,17 @@ describe('SseParser — partial chunks across packet boundaries', () => {
       { event: 'emoji', data: 'hello 🚀 world' },
     ])
   })
+
+  it('preserves utf-8 multi-byte characters split across Buffer chunks', () => {
+    const p = new SseParser()
+    const payload = 'event: emoji\ndata: hello 🚀 world\n\n'
+    const bytes = Buffer.from(payload, 'utf8')
+    const emojiStart = bytes.indexOf(Buffer.from('🚀', 'utf8'))
+    expect(p.feed(bytes.subarray(0, emojiStart + 1))).toEqual([])
+    expect(p.feed(bytes.subarray(emojiStart + 1))).toEqual([
+      { event: 'emoji', data: 'hello 🚀 world' },
+    ])
+  })
 })
 
 describe('SseParser — separators and line endings', () => {

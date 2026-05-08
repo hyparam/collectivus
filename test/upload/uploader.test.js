@@ -124,7 +124,11 @@ describe('uploadPending', () => {
         await memory.putObject(key, body, contentType)
       },
       headObject(key) {
-        if (key.includes('svc-bad')) return Promise.reject(new Error('s3 HEAD returned 503'))
+        if (key.includes('svc-bad')) {
+          const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 HEAD returned 503'))
+          err.statusCode = 503
+          return Promise.reject(err)
+        }
         return memory.headObject(key)
       },
     }
@@ -134,7 +138,8 @@ describe('uploadPending', () => {
       { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
       connector,
       outputDir,
-      today
+      today,
+      { sleep: async () => {} }
     )
     errSpy.mockRestore()
 
@@ -147,6 +152,135 @@ describe('uploadPending', () => {
     expect([...memory.store.keys()]).toEqual([
       `collectivus/svc-good/logs/date=${yesterday}/data.parquet`,
     ])
+  })
+
+  it('retries transient connector failures with backoff and succeeds', async () => {
+    writeJsonl('svc-a', 'logs', yesterday, [
+      { serviceName: 'svc-a', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    const memory = memoryConnector()
+    let putAttempts = 0
+    /** @type {number[]} */
+    const sleeps = []
+    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    const connector = {
+      scheme: 'flaky',
+      async putObject(key, body, contentType) {
+        putAttempts++
+        if (putAttempts < 3) {
+          const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 503'))
+          err.statusCode = 503
+          throw err
+        }
+        await memory.putObject(key, body, contentType)
+      },
+      headObject(key) { return memory.headObject(key) },
+    }
+
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async (ms) => { sleeps.push(ms) }, initialBackoffMs: 1000 }
+    )
+
+    expect(putAttempts).toBe(3)
+    expect(sleeps).toEqual([1000, 4000])
+    expect(results).toHaveLength(1)
+    expect(results[0].uploaded).toBe(true)
+    expect(memory.store.size).toBe(1)
+  })
+
+  it('does not retry on permanent (4xx) connector errors', async () => {
+    writeJsonl('svc-a', 'logs', yesterday, [
+      { serviceName: 'svc-a', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    let putAttempts = 0
+    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    const connector = {
+      scheme: 'flaky',
+      async putObject() {
+        putAttempts++
+        const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 403'))
+        err.statusCode = 403
+        throw err
+      },
+      async headObject() { return null },
+    }
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async () => {} }
+    )
+    errSpy.mockRestore()
+
+    expect(putAttempts).toBe(1)
+    expect(results[0].uploaded).toBe(false)
+    expect(results[0].error?.message).toMatch(/403/)
+    expect(results[0].retryable).toBe(false)
+  })
+
+  it('flags exhausted transient connector retries as retryable', async () => {
+    writeJsonl('svc-a', 'logs', yesterday, [
+      { serviceName: 'svc-a', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    /** @type {import('../../src/upload/upload.d.ts').StorageConnector} */
+    const connector = {
+      scheme: 'flaky',
+      async putObject() {
+        const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 503'))
+        err.statusCode = 503
+        throw err
+      },
+      async headObject() { return null },
+    }
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async () => {} }
+    )
+    errSpy.mockRestore()
+
+    expect(results[0].uploaded).toBe(false)
+    expect(results[0].retryable).toBe(true)
+  })
+
+  it('does not flag non-connector errors as retryable', async () => {
+    // Make the "JSONL file" actually be a directory so readJsonlRows hits
+    // EISDIR — a non-connector error with no statusCode. Pre-fix, the
+    // outer catch ran isTransient on it and incorrectly flagged it
+    // retryable, putting the scheduler into a fast-retry loop.
+    const dir = path.join(outputDir, 'services', 'svc-bad')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.mkdirSync(path.join(dir, `logs-${yesterday}.jsonl`))
+
+    const connector = memoryConnector()
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      { sleep: async () => {} }
+    )
+    errSpy.mockRestore()
+
+    expect(results).toHaveLength(1)
+    expect(results[0].uploaded).toBe(false)
+    expect(results[0].error).toBeDefined()
+    expect(results[0].retryable).toBe(false)
   })
 
   it('writes a ledger entry per uploaded file', async () => {

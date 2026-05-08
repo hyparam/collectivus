@@ -51,7 +51,7 @@ export function s3Connector(options) {
         const contentLength = res.headers['content-length']
         return { size: contentLength ? Number(contentLength) : 0 }
       }
-      throw new Error(`s3 HEAD ${options.bucket}/${key} returned ${res.statusCode}`)
+      throw s3Error(`s3 HEAD ${options.bucket}/${key} returned ${res.statusCode}`, res.statusCode)
     },
   }
 }
@@ -154,7 +154,7 @@ function s3Request(options) {
         const buf = Buffer.concat(chunks)
         const statusCode = res.statusCode ?? 0
         if (method !== 'HEAD' && (statusCode < 200 || statusCode >= 300)) {
-          reject(new Error(`s3 ${method} ${bucket}/${key} returned ${statusCode}: ${buf.toString('utf8')}`))
+          reject(s3Error(`s3 ${method} ${bucket}/${key} returned ${statusCode}: ${buf.toString('utf8')}`, statusCode))
           return
         }
         resolve({ statusCode, headers: res.headers, body: buf })
@@ -167,6 +167,22 @@ function s3Request(options) {
     }
     req.end()
   })
+}
+
+/**
+ * Build an Error tagged with the HTTP statusCode so the upload retry
+ * helper can distinguish transient (5xx, 429) from permanent (4xx).
+ *
+ * @param {string} message
+ * @param {number | undefined} statusCode
+ * @returns {Error}
+ */
+function s3Error(message, statusCode) {
+  const err = new Error(message)
+  if (typeof statusCode === 'number') {
+    /** @type {Error & { statusCode?: number }} */ (err).statusCode = statusCode
+  }
+  return err
 }
 
 /**

@@ -5,11 +5,14 @@ import { rowsToParquet } from './parquet.js'
 import { readJsonlRows } from './reader.js'
 
 /**
- * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadJob } from './upload.d.ts'
+ * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
  */
 
 const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
 const FILE_PATTERN = /^(logs|traces|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/
+
+const DEFAULT_MAX_ATTEMPTS = 3
+const DEFAULT_INITIAL_BACKOFF_MS = 1000
 
 /**
  * Find every (service, signal, date) JSONL file under `<outputDir>/services/`
@@ -61,24 +64,27 @@ export function discoverJobs(outputDir, today, options) {
 /**
  * Upload one (service, signal, date) JSONL file as a Parquet object.
  * Idempotent: skips if the ledger or a HEAD on the destination shows the
- * upload already happened.
+ * upload already happened. Connector calls are retried with exponential
+ * backoff on transient failures (network errors, 5xx, 429).
  *
  * @param {UploadJob} job
  * @param {ResolvedUploadOptions} options
  * @param {StorageConnector} connector
  * @param {string} outputDir
  * @param {Set<string>} committed In-memory ledger snapshot (mutated on success).
+ * @param {UploadDeps} [deps]
  * @returns {Promise<{ uploaded: boolean, key: string, rows: number, size: number }>}
  */
-export async function uploadJob(job, options, connector, outputDir, committed) {
+export async function uploadJob(job, options, connector, outputDir, committed, deps = {}) {
   const key = objectKey(options.prefix, job)
+  const resolved = resolveDeps(deps)
 
   if (isCommitted(committed, job.service, job.signal, job.date)) {
     return { uploaded: false, key, rows: 0, size: 0 }
   }
 
   // Fallback existence check protects us if the ledger was lost.
-  const head = await connector.headObject(key)
+  const head = await withRetry(() => connector.headObject(key), resolved)
   if (head !== null) {
     const entry = {
       service: job.service,
@@ -105,7 +111,7 @@ export async function uploadJob(job, options, connector, outputDir, committed) {
   }
 
   const parquet = await rowsToParquet(job.signal, rows)
-  await connector.putObject(key, parquet, 'application/octet-stream')
+  await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
 
   const entry = {
     service: job.service,
@@ -125,32 +131,101 @@ export async function uploadJob(job, options, connector, outputDir, committed) {
 
 /**
  * Upload every eligible job — used both by the daily timer and by
- * startup catch-up. Per-job failures (transient 5xx, permanent 4xx,
+ * startup catch-up. Each job's connector calls are retried with
+ * backoff; per-job failures (exhausted retries, permanent 4xx,
  * malformed JSONL, etc.) are logged and isolated so one bad file does
- * not abort the whole run; the next tick will retry the failed jobs.
+ * not abort the whole run, and the next tick will try again.
  *
  * @param {ResolvedUploadOptions} options
  * @param {StorageConnector} connector
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
- * @returns {Promise<Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>>}
+ * @param {UploadDeps} [deps]
+ * @returns {Promise<UploadResult[]>}
  */
-export async function uploadPending(options, connector, outputDir, today) {
+export async function uploadPending(options, connector, outputDir, today, deps = {}) {
   const committed = readLedger(outputDir)
   const jobs = discoverJobs(outputDir, today, options)
-  /** @type {Array<{ job: UploadJob, uploaded: boolean, key: string, rows: number, size: number, error?: Error }>} */
+  /** @type {UploadResult[]} */
   const results = []
   for (const job of jobs) {
     try {
-      const result = await uploadJob(job, options, connector, outputDir, committed)
+      const result = await uploadJob(job, options, connector, outputDir, committed, deps)
       results.push({ job, ...result })
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
       console.error(`[collectivus] upload failed for ${job.service}/${job.signal}/${job.date}: ${error.message}`)
-      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error })
+      const retryable = /** @type {{ transient?: unknown }} */ (error).transient === true
+      results.push({ job, uploaded: false, key: '', rows: 0, size: 0, error, retryable })
     }
   }
   return results
+}
+
+/**
+ * Retry a connector op on transient failures with exponential backoff.
+ * An error is treated as transient unless it carries a non-429 4xx
+ * `statusCode` — network errors, 5xx, and 429 are retried; permanent
+ * 4xx (auth, malformed request) bail immediately.
+ *
+ * @template T
+ * @param {() => Promise<T>} fn
+ * @param {Required<UploadDeps>} deps
+ * @returns {Promise<T>}
+ */
+async function withRetry(fn, deps) {
+  let lastErr
+  for (let attempt = 0; attempt < deps.maxAttempts; attempt++) {
+    try {
+      return await fn()
+    } catch (err) {
+      lastErr = err
+      if (!isTransient(err)) throw err
+      if (attempt === deps.maxAttempts - 1) break
+      await deps.sleep(deps.initialBackoffMs * (4 ** attempt))
+    }
+  }
+  // Exhausted retries on a transient connector error — tag it so the
+  // outer catch in uploadPending knows the scheduler should fast-retry.
+  // Errors thrown elsewhere in uploadJob (bad JSONL, encoding bugs, fs)
+  // are never tagged and therefore never classified as retryable.
+  if (lastErr && typeof lastErr === 'object') {
+    /** @type {{ transient?: boolean }} */ (lastErr).transient = true
+  }
+  throw lastErr
+}
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isTransient(err) {
+  const status = /** @type {{ statusCode?: unknown }} */ (err)?.statusCode
+  if (typeof status === 'number') {
+    if (status === 429) return true
+    return status >= 500 && status < 600
+  }
+  return true
+}
+
+/**
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * @param {UploadDeps} deps
+ * @returns {Required<UploadDeps>}
+ */
+function resolveDeps(deps) {
+  return {
+    maxAttempts: deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    initialBackoffMs: deps.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS,
+    sleep: deps.sleep ?? defaultSleep,
+  }
 }
 
 /**

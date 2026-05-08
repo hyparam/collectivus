@@ -8,7 +8,7 @@ import { uploadPending } from './uploader.js'
 
 const DEFAULT_TIME = '00:10'
 const DEFAULT_PREFIX = 'collectivus'
-const DEFAULT_CATCHUP_DAYS = 7
+const DEFAULT_CATCHUP_DAYS = 30
 /** @type {ReadonlyArray<Signal>} */
 const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
 
@@ -32,7 +32,8 @@ export function createUploader(args) {
     time: options.time,
     tick: async () => {
       const today = todayUtc(new Date())
-      await uploadPending(options, connector, args.outputDir, today)
+      const results = await uploadPending(options, connector, args.outputDir, today)
+      return { retry: results.some((r) => r.retryable === true) }
     },
   })
 

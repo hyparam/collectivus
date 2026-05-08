@@ -47,3 +47,22 @@ export interface UploadJob {
   date: string
   jsonlPath: string
 }
+
+export interface UploadResult {
+  job: UploadJob
+  uploaded: boolean
+  key: string
+  rows: number
+  size: number
+  error?: Error
+  retryable?: boolean
+}
+
+export interface UploadDeps {
+  /** Max attempts per connector call (HEAD/PUT). Default 3. */
+  maxAttempts?: number
+  /** Backoff before the second attempt; later attempts back off 4x. Default 1000ms. */
+  initialBackoffMs?: number
+  /** Sleep override — tests pass `() => Promise.resolve()` to skip the wait. */
+  sleep?: (ms: number) => Promise<void>
+}

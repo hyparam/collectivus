@@ -268,6 +268,45 @@ export interface ReadSettingsResult {
   mtimeMs: number | undefined
 }
 
+// ---------- Codex settings ----------
+
+export interface CodexAttachOptions {
+  /** TCP port (1..65535) the local proxy listens on. */
+  port: number
+  /** Non-empty version string recorded in managed comments. */
+  version: string
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
+export interface CodexAttachResult {
+  /** Always true; attach always (re)writes the managed config. */
+  changed: true
+  /** Previous root `model_provider`, if one existed before collectivus attached. */
+  prevValue?: string
+}
+
+export interface CodexDetachOptions {
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
+export interface CodexDetachResult {
+  /** True if the file was modified, false when no managed block was present. */
+  changed: boolean
+  /** The managed provider base_url that was removed. */
+  removed?: string
+  /** Previous root `model_provider` restored from the managed marker, if any. */
+  restoredValue?: string
+  /** Set when a user-edited root model_provider was left in place. */
+  warning?: string
+}
+
+export interface CodexIsAttachedOptions {
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
 // ---------- CLI subcommand parse results / hooks ----------
 
 export interface AttachParseResult {

@@ -327,12 +327,20 @@ export interface StatusHooks {
   plistPath?: string
   logDir?: string
   settingsPath?: string
+  /** Default config path used when the LaunchAgent plist doesn't supply one. */
+  configPath?: string
   launchAgentStatus?: (opts: MacosStatusOptions) => Promise<{ loaded: boolean, pid?: number }>
   isLaunchAgentInstalled?: (opts: { label: string, plistDir?: string }) => Promise<boolean>
   isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
   readInstalledPlist?: (plistPath: string) => InstalledPlistFields | undefined
   /** Override for raw read of settings.json (returns undefined on ENOENT). */
   readSettingsRaw?: (p: string) => Promise<string | undefined>
+  /** Load and validate a config; throws on parse/validation errors. */
+  loadConfig?: (path: string) => CollectivusConfig
+  /** Stat a file; resolve to undefined when missing. */
+  statFile?: (p: string) => Promise<{ size: number, mtimeMs: number } | undefined>
+  /** Count `*.jsonl` files under `dir` (recursive). Undefined when dir is missing. */
+  countSinkFiles?: (dir: string) => Promise<number | undefined>
 }
 
 export interface InitHooks {

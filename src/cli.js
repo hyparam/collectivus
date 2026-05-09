@@ -18,7 +18,16 @@ const USAGE = `Usage:
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
   collectivus --config <path> --strict         Reject unknown top-level config keys
   collectivus --help                           Show this help
-  collectivus --version                        Print program version`
+  collectivus --version                        Print program version
+
+Commands:
+  collectivus install [--config <path>]        Install the background daemon
+  collectivus uninstall [--detach]             Remove the daemon (and detach Claude Code)
+  collectivus attach [--config <path>] [--port <n>]
+                                               Point Claude Code at the local proxy
+  collectivus detach                           Restore Claude Code's settings.json
+  collectivus status                           Report daemon, config, recordings, attach state
+  collectivus export --config <path> [...]     Convert recorded JSONL to Parquet`
 
 const DRAIN_TIMEOUT_MS = 5000
 const SELF_UPDATE_TIME_UTC = '03:00'

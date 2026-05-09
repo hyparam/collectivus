@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
-import { defaultPrompt, isNpxBinPath } from './common.js'
+import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
  * @import { CollectivusConfig, InitHooks, OtelConfig, ProxyConfig, UploadConfig } from '../types.js'
@@ -67,19 +67,6 @@ const BANNER = [
   '  ══════════════════════',
   ' ════════════════════════',
 ].join('\n') + '\n'
-
-/**
- * `~/.hyp/collectivus.json` is the convention for collectivus config: it lives
- * alongside the daemon's log directory at `~/.hyp/collectivus/` and survives
- * `rm -rf` of the working directory the user happened to be in when they ran
- * the walkthrough.
- *
- * @param {string} [homeDir]
- * @returns {string}
- */
-function defaultConfigPath(homeDir) {
-  return path.join(homeDir ?? os.homedir(), '.hyp', 'collectivus.json')
-}
 
 /**
  * `~/.hyp/collectivus/` is the same tree the daemon writes logs into, so a

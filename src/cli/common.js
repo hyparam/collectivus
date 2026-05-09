@@ -55,6 +55,19 @@ export function defaultLogDir(homeDir) {
 }
 
 /**
+ * Default config save path: `~/.hyp/collectivus.json`. Lives alongside the
+ * daemon log directory at `~/.hyp/collectivus/` and is the path the
+ * interactive walkthrough writes to and the `status` command falls back to
+ * when no LaunchAgent is installed.
+ *
+ * @param {string} [homeDir] Override for tests.
+ * @returns {string}
+ */
+export function defaultConfigPath(homeDir) {
+  return path.join(homeDir ?? os.homedir(), '.hyp', 'collectivus.json')
+}
+
+/**
  * Default LaunchAgent plist path: `~/Library/LaunchAgents/com.hyparam.collectivus.plist`.
  *
  * @param {string} [homeDir] Override for tests.

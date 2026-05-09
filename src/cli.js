@@ -21,7 +21,18 @@ const USAGE = `Usage:
   collectivus --config <path> --print-config   Load config, print resolved JSON, exit
   collectivus --config <path> --strict         Reject unknown top-level config keys
   collectivus --help                           Show this help
-  collectivus --version                        Print program version`
+  collectivus --version                        Print program version
+
+Subcommands:
+  collectivus install [--config <path>] [--yes|--no]   Install the launch agent
+  collectivus uninstall [--detach]                     Remove the launch agent
+  collectivus attach   --config <path>                 Attach Claude Code settings
+  collectivus detach                                   Revert Claude Code settings
+  collectivus status                                   Show install + attach state
+  collectivus config <set|get|list|delete|bootstrap-token> ...
+                                                       Operator CLI for per-gateway configs
+
+Run \`collectivus <subcommand> --help\` for subcommand-specific options.`
 
 const DRAIN_TIMEOUT_MS = 5000
 const SELF_UPDATE_TIME_UTC = '03:00'

@@ -281,6 +281,30 @@ export class BootstrapStore {
   }
 
   /**
+   * Drop every unused bootstrap token whose `gatewayId` matches `gatewayId`.
+   * Returns the count removed. Used tokens are left in place so the audit
+   * trail (and the `already_used` reason on replay) survives a revoke. The
+   * operator CLI calls this when retiring a stuck enrollment.
+   *
+   * @param {string} gatewayId
+   * @returns {number}
+   */
+  revokeUnusedForGateway(gatewayId) {
+    if (typeof gatewayId !== 'string' || gatewayId.length === 0) {
+      throw new Error('BootstrapStore.revokeUnusedForGateway: gatewayId is required')
+    }
+    /** @type {string[]} */
+    const toDelete = []
+    for (const [hash, record] of this.records) {
+      if (record.gatewayId === gatewayId && !record.used) toDelete.push(hash)
+    }
+    if (toDelete.length === 0) return 0
+    for (const hash of toDelete) this.records.delete(hash)
+    this.flush()
+    return toDelete.length
+  }
+
+  /**
    * Number of records currently held. Test-only.
    *
    * @returns {number}

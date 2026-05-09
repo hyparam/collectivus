@@ -53,6 +53,12 @@ describe('bin/cli.js — subcommand dispatch', function() {
     expect(r.stdout).toMatch(/Usage:\s+collectivus status/)
   })
 
+  it('dispatches `config --help`', async function() {
+    const r = await runCli(['config', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+collectivus config set/)
+  })
+
   it('passes subcommand args through (install with no --config)', async function() {
     const r = await runCli(['install'])
     expect(r.exitCode).toBe(2)

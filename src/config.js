@@ -34,7 +34,7 @@ const ALLOWED_SERVER_KEYS = new Set([
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
-const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity'])
+const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
 const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
 const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
@@ -289,6 +289,17 @@ function validateCentralServer(cs) {
     )
   }
   validateCentralIdentity(cs.identity)
+  if (cs.poll_interval_seconds !== undefined) {
+    if (typeof cs.poll_interval_seconds !== 'number'
+        || !Number.isInteger(cs.poll_interval_seconds)
+        || cs.poll_interval_seconds < 5
+        || cs.poll_interval_seconds > 3600) {
+      throw new ConfigError(
+        'must be an integer between 5 and 3600',
+        { pointer: '/central_server/poll_interval_seconds' }
+      )
+    }
+  }
 }
 
 /** @param {unknown} identity */

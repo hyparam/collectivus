@@ -2,6 +2,7 @@ import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
+import { ConfigClient } from './gateway/config_client.js'
 import { IdentityClient } from './gateway/identity.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
@@ -164,6 +165,8 @@ export async function run(argv, env, hooks = {}) {
   // for future epics (B config vending, C log shipping) to consume.
   /** @type {IdentityClient | undefined} */
   let identityClient
+  /** @type {ConfigClient | undefined} */
+  let configClient
   if (config.role === 'gateway') {
     if (!config.central_server) {
       stderr.write('config error: role: gateway requires a central_server block (validator should have caught this).\n')
@@ -178,10 +181,16 @@ export async function run(argv, env, hooks = {}) {
       stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
+    // ConfigClient runs in the background. It is a normal listener — wired
+    // into stopAll via buildConfigListeners — so a SIGTERM stops the poll
+    // timer the same way it stops the proxy. Construct here (after identity
+    // has succeeded) rather than inside the factory so it's available to
+    // any future listener that wants to subscribe to `config-changed`.
+    configClient = new ConfigClient(config.central_server, identityClient, { stderr })
   }
 
   return runLifecycle(
-    buildConfigListeners(config, { env, stderr, identityClient }),
+    buildConfigListeners(config, { env, stderr, identityClient, configClient }),
     stdout,
     stderr,
     onShutdownRequested
@@ -194,13 +203,16 @@ export async function run(argv, env, hooks = {}) {
  *   env?: NodeJS.ProcessEnv,
  *   stderr: { write: (s: string) => void },
  *   identityClient?: IdentityClient,
+ *   configClient?: ConfigClient,
  * }} ctx
  *   `env` is forwarded to the uploader so its connector reads creds from the
  *   same env we pre-flighted in `run()`. `stderr` is consumed by the
  *   self-update factory for warning output. `identityClient` is set when
  *   `config.role === 'gateway'` and `run()` has already acquired the JWT;
  *   future epics (B config vending, C log shipping) will read this off `ctx`
- *   to authenticate to the central server.
+ *   to authenticate to the central server. `configClient` is the gateway's
+ *   background config-pull loop; B.4 will subscribe to its `config-changed`
+ *   event for hot reload.
  * @returns {ListenerFactory[]}
  */
 function buildConfigListeners(config, ctx) {
@@ -293,6 +305,28 @@ function buildConfigListeners(config, ctx) {
       return {
         description: `Control-plane listener bound on ${effective}`,
         stop: () => controlPlane.stop(),
+      }
+    })
+  }
+
+  // Background config-pull loop runs alongside the proxy/otel listeners on
+  // gateways. We register it here so its lifetime is tied to the same
+  // start/stop machinery — a SIGTERM stops the timer cleanly without leaving
+  // an orphaned setTimeout in the event loop. B.4 will subscribe to
+  // `config-changed` for hot reload; for now the event simply fires and is
+  // observed in tests.
+  if (config.role === 'gateway' && ctx.configClient) {
+    const configClient = ctx.configClient
+    const url = config.central_server?.url ?? 'central server'
+    const poll = configClient.pollIntervalSeconds
+    factories.push(async () => {
+      configClient.start()
+      return {
+        description: `Config poll loop active (${url} every ${poll}s)`,
+        stop: async () => {
+          configClient.stop()
+          await configClient.whenIdle()
+        },
       }
     })
   }

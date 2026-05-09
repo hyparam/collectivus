@@ -229,6 +229,45 @@ export interface IngestResponse {
   error?: string
 }
 
+/**
+ * Subset of `IdentityClient` that `ShippingSink` actually needs. Declared
+ * structurally so tests can supply a small fake without re-implementing the
+ * full identity lifecycle, mirroring the `IdentitySource` pattern used by
+ * `ConfigClient`.
+ */
+export interface ShippingSinkIdentitySource {
+  /** Resolve to the current bearer JWT, refreshing in-place if near expiry. */
+  getCurrentJwt(): Promise<string>
+  /** Force a refresh against the central server. */
+  refresh(): Promise<void>
+}
+
+/** Per-signal flush thresholds for `ShippingSink`. */
+export interface ShippingSinkBatchOptions {
+  /** Maximum rows per batch before a flush. Default 1000. */
+  maxRows?: number
+  /** Maximum bytes per batch (NDJSON, including newlines) before a flush. Default 1048576 (1 MB). */
+  maxBytes?: number
+  /** Maximum seconds the oldest row may sit in a batch before a flush. Default 5. */
+  maxSeconds?: number
+}
+
+/** Construction options for `ShippingSink`. */
+export interface ShippingSinkOptions {
+  /** Base URL of the central control-plane server (same as `central_server.url`). */
+  centralUrl: string
+  /** Identity source providing JWTs and refresh — typically the gateway's `IdentityClient`. */
+  identityClient: ShippingSinkIdentitySource
+  /**
+   * Signal label embedded in the ingest URL (`/v1/ingest/<signal>`). Default
+   * `proxy`, matching the only existing `Sink` consumer (the recorder). Future
+   * multi-signal variants will override per-instance or route per-row.
+   */
+  signal?: IngestSignal
+  /** Batching thresholds. Defaults match the bead spec (1000 / 1 MB / 5 s). */
+  batch?: ShippingSinkBatchOptions
+}
+
 export interface CentralServerIdentityConfig {
   /** Operator-provisioned bootstrap token, exchanged on first start. */
   bootstrap_token?: string

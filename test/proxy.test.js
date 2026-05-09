@@ -437,6 +437,9 @@ describe('Proxy — SSE pass-through', () => {
   })
 
   afterEach(async () => {
+    // Force-close keep-alive sockets that the fetch client left in its pool;
+    // otherwise stop() waits ~3s for them to time out idle.
+    proxy.server?.closeAllConnections()
     await proxy.stop()
     await closeServer(upstream.server)
   })

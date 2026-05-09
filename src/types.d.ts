@@ -203,6 +203,39 @@ export interface ServerConfig {
    * `~/.hyp/collectivus/server-data/ingested`.
    */
   sink_dir?: string
+  /** Backpressure / disk I/O throttle settings for the ingest endpoint. */
+  ingest?: IngestThrottleConfig
+}
+
+/**
+ * Server-side ingest throttle settings. All fields are optional and fall back
+ * to defaults that match the spec in epic C.2: 50000 pending rows, 80%
+ * high-water mark, 5s `Retry-After`, no disk-rate ceiling.
+ */
+export interface IngestThrottleConfig {
+  /**
+   * Maximum rows queued for fsync before the endpoint starts emitting
+   * backpressure. A request that arrives while the queue is at or past this
+   * value is rejected with 503. Default 50000.
+   */
+  max_pending_rows?: number
+  /**
+   * Percentage of `max_pending_rows` at which the endpoint starts emitting
+   * 429 with `Retry-After`. Must be 1..100. Default 80.
+   */
+  high_water_pct?: number
+  /**
+   * Value emitted in the `Retry-After` response header when backpressure
+   * triggers. Must be a positive integer (whole seconds). Default 5.
+   */
+  retry_after_seconds?: number
+  /**
+   * Per-process disk-write ceiling, in bytes per second. Implemented as a
+   * 1-second token bucket: bursts up to `max_bytes_per_second` are allowed,
+   * sustained throughput is capped at the same value. Omit (the default) to
+   * disable disk-rate throttling entirely.
+   */
+  max_bytes_per_second?: number
 }
 
 /** A per-gateway config entry held by the server-side registry. */

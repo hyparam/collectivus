@@ -276,18 +276,39 @@ function buildConfigListeners(config, ctx) {
   }
 
   if (config.upload) {
-    if (!config.sink) {
+    const isServerDrain = config.role === 'server'
+    if (!isServerDrain && !config.sink) {
       throw new Error('upload is configured but sink is missing')
     }
+    if (isServerDrain && !config.server) {
+      // The validator should have caught this; treat as a wiring bug.
+      throw new Error('role: server requires server block')
+    }
     const uploadConfig = config.upload
-    const sinkDir = config.sink.dir
+    const standaloneSinkDir = config.sink?.dir
+    const serverSinkDirOverride = isServerDrain ? config.server?.sink_dir : undefined
     // Lazy import keeps the SigV4 / parquet code off the hot path for
     // installs that don't enable upload.
     factories.push(async () => {
       const { createUploader } = await import('./upload/index.js')
+      /** @type {string} */
+      let outputDir
+      /** @type {ReadonlyArray<string> | undefined} */
+      let partitionDimensions
+      if (isServerDrain) {
+        // Server-mode drain reads from the multi-tenant ingest spool
+        // (`<sink_dir>/<gateway_id>/<signal>/<date>.jsonl`) written by
+        // src/server/ingest.js, so the partition layout matches what the
+        // ingest endpoint wrote — including no `service` directory level.
+        const { defaultSinkDir } = await import('./server/ingest.js')
+        outputDir = serverSinkDirOverride ?? defaultSinkDir()
+        partitionDimensions = ['gateway_id', 'signal']
+      } else {
+        outputDir = /** @type {string} */ (standaloneSinkDir)
+      }
       const uploader = createUploader({
-        outputDir: sinkDir,
-        options: uploadConfig,
+        outputDir,
+        options: { ...uploadConfig, partitionDimensions },
         env: ctx.env,
       })
       await uploader.start()

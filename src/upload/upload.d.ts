@@ -18,6 +18,15 @@ export interface UploadOptions {
   catchupDays?: number
   region?: string
   endpoint?: string
+  /**
+   * Names of the directory partition levels under `outputDir`, in order.
+   * Default `['service', 'signal']` preserves the legacy standalone layout
+   * `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Server-mode
+   * (parquet drain over the multi-tenant ingest spool) passes
+   * `['gateway_id', 'signal']` to walk
+   * `<outputDir>/<gateway_id>/<signal>/<date>.jsonl`.
+   */
+  partitionDimensions?: ReadonlyArray<string>
 }
 
 export interface ResolvedUploadOptions {
@@ -28,10 +37,17 @@ export interface ResolvedUploadOptions {
   catchupDays: number
   region: string
   endpoint?: string
+  partitionDimensions: ReadonlyArray<string>
 }
 
 export interface LedgerEntry {
-  service: string
+  /**
+   * Partition values for this entry's job, keyed by partition dimension
+   * name (e.g. `{service:'svc-a',signal:'logs'}` for standalone, or
+   * `{gateway_id:'gw-1',signal:'logs'}` for server). Always includes
+   * `signal`; other keys depend on the configured partition dimensions.
+   */
+  partitions: Readonly<Record<string, string>>
   signal: Signal
   date: string
   status: 'committed'
@@ -39,13 +55,32 @@ export interface LedgerEntry {
   size: number
   rows: number
   committedAt: string
+  /**
+   * @deprecated Convenience copy of `partitions.service` retained so
+   * ledger lines written before the multi-tenant refactor can still be
+   * read. New writes set this only when `partitions.service` exists.
+   */
+  service?: string
 }
 
 export interface UploadJob {
-  service: string
+  /**
+   * Partition values for this job, keyed by dimension name. Always
+   * includes `signal`; other keys depend on the configured partition
+   * dimensions (e.g. `service` for standalone, `gateway_id` for server).
+   */
+  partitions: Readonly<Record<string, string>>
   signal: Signal
   date: string
   jsonlPath: string
+  /**
+   * @deprecated Convenience copy of `partitions.service` populated by
+   * the legacy standalone walker for backward compatibility with code
+   * that read `job.service` directly. Absent when `service` is not a
+   * configured partition dimension. New code should read
+   * `partitions.service`.
+   */
+  service?: string
 }
 
 export interface UploadResult {

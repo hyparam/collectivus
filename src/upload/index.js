@@ -11,6 +11,8 @@ const DEFAULT_PREFIX = 'collectivus'
 const DEFAULT_CATCHUP_DAYS = 30
 /** @type {ReadonlyArray<Signal>} */
 const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
+/** @type {ReadonlyArray<string>} */
+const DEFAULT_PARTITION_DIMENSIONS = ['service', 'signal']
 
 /**
  * Wire together a connector, an uploader, and a scheduler. Returns
@@ -61,6 +63,7 @@ function resolve(options) {
     catchupDays: options.catchupDays ?? DEFAULT_CATCHUP_DAYS,
     region: options.region ?? '',
     endpoint: options.endpoint,
+    partitionDimensions: options.partitionDimensions ?? DEFAULT_PARTITION_DIMENSIONS,
   }
 }
 

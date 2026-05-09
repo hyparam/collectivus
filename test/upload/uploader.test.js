@@ -50,7 +50,7 @@ describe('uploadPending', () => {
 
     const connector = memoryConnector()
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today
@@ -81,7 +81,7 @@ describe('uploadPending', () => {
 
     const connector = memoryConnector()
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today
@@ -101,7 +101,7 @@ describe('uploadPending', () => {
 
     const connector = memoryConnector()
     await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today
@@ -139,7 +139,7 @@ describe('uploadPending', () => {
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today,
@@ -183,7 +183,7 @@ describe('uploadPending', () => {
     }
 
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today,
@@ -217,7 +217,7 @@ describe('uploadPending', () => {
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today,
@@ -249,7 +249,7 @@ describe('uploadPending', () => {
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today,
@@ -273,7 +273,7 @@ describe('uploadPending', () => {
     const connector = memoryConnector()
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const results = await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today,
@@ -294,7 +294,7 @@ describe('uploadPending', () => {
 
     const connector = memoryConnector()
     await uploadPending(
-      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1' },
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['logs', 'traces', 'metrics'], catchupDays: 7, region: 'us-east-1', partitionDimensions: ['service', 'signal'] },
       connector,
       outputDir,
       today

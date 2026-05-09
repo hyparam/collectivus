@@ -25,6 +25,7 @@ const baseOptions = /** @type {const} */ ({
   signals: /** @type {ReadonlyArray<'logs' | 'traces' | 'metrics'>} */ (['logs', 'traces', 'metrics']),
   catchupDays: 7,
   region: 'us-east-1',
+  partitionDimensions: /** @type {ReadonlyArray<string>} */ (['service', 'signal']),
 })
 
 /**

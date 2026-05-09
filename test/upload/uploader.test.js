@@ -312,3 +312,117 @@ describe('uploadPending', () => {
     expect(entry.size).toBeGreaterThan(0)
   })
 })
+
+describe('uploadPending (server-mode partition)', () => {
+  /**
+   * Mirror what the server NDJSON ingest endpoint writes:
+   * `<outputDir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+   *
+   * @param {string} gatewayId
+   * @param {'logs' | 'traces' | 'metrics'} signal
+   * @param {string} date
+   * @param {object[]} rows
+   */
+  function writeIngested(gatewayId, signal, date, rows) {
+    const dir = path.join(outputDir, gatewayId, signal)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, `${date}.jsonl`),
+      rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
+    )
+  }
+
+  it('uploads one parquet per gateway-signal-day with a gateway-prefixed object key', async () => {
+    writeIngested('gw-prod-1', 'logs', yesterday, [
+      { serviceName: 'svc-x', body: 'a', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+    writeIngested('gw-prod-2', 'logs', yesterday, [
+      { serviceName: 'svc-y', body: 'b', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    const connector = memoryConnector()
+    const results = await uploadPending(
+      {
+        bucket: 'b',
+        prefix: 'collectivus',
+        time: '00:10',
+        signals: ['logs', 'traces', 'metrics'],
+        catchupDays: 7,
+        region: 'us-east-1',
+        partitionDimensions: ['gateway_id', 'signal'],
+      },
+      connector,
+      outputDir,
+      today
+    )
+
+    expect(results).toHaveLength(2)
+    expect(results.every((r) => r.uploaded)).toBe(true)
+    expect([...connector.store.keys()].sort()).toEqual([
+      `collectivus/gw-prod-1/logs/date=${yesterday}/data.parquet`,
+      `collectivus/gw-prod-2/logs/date=${yesterday}/data.parquet`,
+    ])
+  })
+
+  it('skips empty gateway directories silently', async () => {
+    fs.mkdirSync(path.join(outputDir, 'gw-empty'), { recursive: true })
+    fs.mkdirSync(path.join(outputDir, 'gw-half', 'logs'), { recursive: true })
+    writeIngested('gw-real', 'logs', yesterday, [
+      { serviceName: 'svc-x', body: 'r', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    const connector = memoryConnector()
+    const results = await uploadPending(
+      {
+        bucket: 'b',
+        prefix: 'collectivus',
+        time: '00:10',
+        signals: ['logs', 'traces', 'metrics'],
+        catchupDays: 7,
+        region: 'us-east-1',
+        partitionDimensions: ['gateway_id', 'signal'],
+      },
+      connector,
+      outputDir,
+      today
+    )
+
+    expect(results).toHaveLength(1)
+    expect(results[0].uploaded).toBe(true)
+    expect([...connector.store.keys()]).toEqual([
+      `collectivus/gw-real/logs/date=${yesterday}/data.parquet`,
+    ])
+  })
+
+  it('keeps gateway_id on each job for downstream callers (ledger, logs)', async () => {
+    writeIngested('gw-x', 'logs', yesterday, [
+      { serviceName: 'svc', body: '1', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+
+    const connector = memoryConnector()
+    const results = await uploadPending(
+      {
+        bucket: 'b',
+        prefix: 'collectivus',
+        time: '00:10',
+        signals: ['logs', 'traces', 'metrics'],
+        catchupDays: 7,
+        region: 'us-east-1',
+        partitionDimensions: ['gateway_id', 'signal'],
+      },
+      connector,
+      outputDir,
+      today
+    )
+
+    expect(results[0].job.partition).toEqual({ gateway_id: 'gw-x', signal: 'logs' })
+    // First-dimension value is mirrored to `service` so the ledger/key/log
+    // code can keep treating the (service, signal, date) triple as unique.
+    expect(results[0].job.service).toBe('gw-x')
+
+    const ledgerText = fs.readFileSync(path.join(outputDir, '.upload-ledger.jsonl'), 'utf8')
+    const entry = JSON.parse(ledgerText.trim())
+    expect(entry.service).toBe('gw-x')
+    expect(entry.signal).toBe('logs')
+  })
+})

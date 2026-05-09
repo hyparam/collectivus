@@ -11,6 +11,15 @@ const DEFAULT_PREFIX = 'collectivus'
 const DEFAULT_CATCHUP_DAYS = 30
 /** @type {ReadonlyArray<Signal>} */
 const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
+/**
+ * Standalone (recorder + OTLP collector) writes
+ * `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Server mode
+ * (parquet drain over the multi-tenant ingest spool) overrides this
+ * with `['gateway_id', 'signal']` — see `cli.js`.
+ *
+ * @type {ReadonlyArray<string>}
+ */
+const DEFAULT_PARTITION_DIMENSIONS = ['service', 'signal']
 
 /**
  * Wire together a connector, an uploader, and a scheduler. Returns
@@ -53,6 +62,10 @@ export function createUploader(args) {
  */
 function resolve(options) {
   if (!options.bucket) throw new Error('upload.bucket is required')
+  const partitionDimensions = options.partitionDimensions ?? DEFAULT_PARTITION_DIMENSIONS
+  if (!partitionDimensions.includes('signal')) {
+    throw new Error(`upload.partitionDimensions must include 'signal'; got ${JSON.stringify(partitionDimensions)}`)
+  }
   return {
     bucket: options.bucket,
     prefix: options.prefix ?? DEFAULT_PREFIX,
@@ -61,6 +74,7 @@ function resolve(options) {
     catchupDays: options.catchupDays ?? DEFAULT_CATCHUP_DAYS,
     region: options.region ?? '',
     endpoint: options.endpoint,
+    partitionDimensions,
   }
 }
 

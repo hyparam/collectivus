@@ -18,6 +18,17 @@ export interface UploadOptions {
   catchupDays?: number
   region?: string
   endpoint?: string
+  /**
+   * Directory partition levels under `outputDir`, in order. Default
+   * `['service', 'signal']` walks the legacy standalone layout
+   * `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Server mode
+   * (parquet drain over the multi-tenant ingest spool) passes
+   * `['gateway_id', 'signal']` to walk
+   * `<outputDir>/<gateway_id>/<signal>/<date>.jsonl`. Each row read from
+   * a partitioned file gains a `_partition` field whose keys mirror the
+   * configured dimensions.
+   */
+  partitionDimensions?: ReadonlyArray<string>
 }
 
 export interface ResolvedUploadOptions {
@@ -28,6 +39,14 @@ export interface ResolvedUploadOptions {
   catchupDays: number
   region: string
   endpoint?: string
+  /**
+   * Optional on the resolved type so existing tests that build options
+   * inline (skipping `createUploader.resolve()`) keep typechecking.
+   * `discoverJobs` treats an absent value as the legacy two-level
+   * `['service', 'signal']` standalone layout — the same default
+   * `resolve()` applies for the public surface.
+   */
+  partitionDimensions?: ReadonlyArray<string>
 }
 
 export interface LedgerEntry {
@@ -42,10 +61,25 @@ export interface LedgerEntry {
 }
 
 export interface UploadJob {
+  /**
+   * First partition value for this job. For the legacy standalone layout
+   * this is the service name; for server mode it is the gateway_id. The
+   * field is kept under the `service` name so the ledger key, object
+   * key, and log lines built from `(service, signal, date)` triples
+   * continue to identify a job uniquely without a structural change.
+   */
   service: string
   signal: Signal
   date: string
   jsonlPath: string
+  /**
+   * Full partition map, keyed by dimension name. Always includes the
+   * dimensions configured on `ResolvedUploadOptions.partitionDimensions`
+   * (e.g. `{ service, signal }` for standalone or
+   * `{ gateway_id, signal }` for server). Tagged onto every row read
+   * from this job's JSONL file as `_partition`.
+   */
+  partition: Readonly<Record<string, string>>
 }
 
 export interface UploadResult {

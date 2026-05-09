@@ -312,6 +312,7 @@ export interface CodexIsAttachedOptions {
 export interface AttachParseResult {
   configPath?: string
   port?: number
+  client?: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -348,8 +349,14 @@ export interface AttachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
   version?: string
+  /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for attachClaude. */
   attach?: (opts: AttachOptions) => Promise<AttachResult>
+  attachClaude?: (opts: AttachOptions) => Promise<AttachResult>
+  attachCodex?: (opts: CodexAttachOptions) => Promise<CodexAttachResult>
   loadConfig?: (path: string) => CollectivusConfig
 }
 

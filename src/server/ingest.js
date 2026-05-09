@@ -190,6 +190,7 @@ export class Ingest {
       return
     }
     /** @type {IngestSignal} */
+    // eslint-disable-next-line no-extra-parens -- JSDoc cast needs the parens
     const signal = /** @type {IngestSignal} */ (signalParam)
 
     const claims = getClaims(req)
@@ -295,6 +296,7 @@ export class Ingest {
           gatewayId,
           signal,
           batchBytes: cost,
+          // eslint-disable-next-line no-extra-parens -- JSDoc cast needs the parens
           maxBytesPerSecond: /** @type {number} */ (this.maxBytesPerSecond),
         })
         writeBackpressure(res, 429, 'ingest disk-rate throttled', this.retryAfterSeconds)

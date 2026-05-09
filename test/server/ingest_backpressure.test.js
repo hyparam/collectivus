@@ -29,6 +29,7 @@ function serverConfig(opts) {
 
 /**
  * @param {number} initialMs
+ * @returns {{ now: () => number, advance: (ms: number) => void, set: (ms: number) => void }}
  */
 function fakeClock(initialMs) {
   let t = initialMs
@@ -53,6 +54,15 @@ function ndjson(rows) {
  * `appendBatch` adds a `release()` to `releases`; the harness drains them
  * automatically in `afterEach` so a test that throws mid-flight doesn't
  * leak a never-resolving HTTP request and stall `plane.stop()`.
+ *
+ * @returns {{ boot: (opts?: { ingest?: IngestThrottleConfig, holdWrites?: boolean, gatewayId?: string }) => Promise<{
+ *   jwt: string,
+ *   clock: ReturnType<typeof fakeClock>,
+ *   baseUrl: string,
+ *   ingest: import('../../src/server/ingest.js').Ingest,
+ *   releaseAll: () => void,
+ *   getDir: () => string,
+ * }> }}
  */
 function makeHarness() {
   /** @type {string} */
@@ -79,6 +89,14 @@ function makeHarness() {
 
   /**
    * @param {{ ingest?: IngestThrottleConfig, holdWrites?: boolean, gatewayId?: string }} [opts]
+   * @returns {Promise<{
+   *   jwt: string,
+   *   clock: ReturnType<typeof fakeClock>,
+   *   baseUrl: string,
+   *   ingest: import('../../src/server/ingest.js').Ingest,
+   *   releaseAll: () => void,
+   *   getDir: () => string,
+   * }>}
    */
   async function boot(opts = {}) {
     const gatewayId = opts.gatewayId ?? 'gw-1'
@@ -218,7 +236,7 @@ describe('Ingest pending-row backpressure', () => {
     await fillRes
     expect(ingest.pendingRows).toBe(0)
     // `delete` on the own-property stub falls back to Ingest.prototype.appendBatch.
-    delete /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (ingest)).appendBatch
+    delete /** @type {Record<string, unknown>} */ /** @type {unknown} */ ingest.appendBatch
 
     // A fresh request now lands normally. The stat counter must NOT have
     // ticked again — the very point of the drain.
@@ -246,7 +264,7 @@ describe('Ingest pending-row backpressure', () => {
       })
       const cp = new ControlPlane(
         serverConfig({ sinkDir: dir }),
-        { now: clock.now, ingest },
+        { now: clock.now, ingest }
       )
       await cp.start()
       try {
@@ -329,7 +347,7 @@ describe('Ingest disk-rate throttle', () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 64 } }),
-      { now: clock.now },
+      { now: clock.now }
     )
     await plane.start()
     const addr = plane.server?.address()
@@ -358,7 +376,7 @@ describe('Ingest disk-rate throttle', () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 300 } }),
-      { now: clock.now },
+      { now: clock.now }
     )
     await plane.start()
     const addr = plane.server?.address()
@@ -367,11 +385,14 @@ describe('Ingest disk-rate throttle', () => {
     const jwt = signJwt({ gatewayId: 'gw-1', ttlSeconds: 3600, secret: SECRET, now: clock.now })
 
     const row = { msg: 'hello' }
-    const post = () => fetch(`${baseUrl}/v1/ingest/logs`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/x-ndjson' },
-      body: ndjson([row]),
-    })
+    /** @returns {Promise<Response>} */
+    function post() {
+      return fetch(`${baseUrl}/v1/ingest/logs`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/x-ndjson' },
+        body: ndjson([row]),
+      })
+    }
 
     // The clock isn't advancing inside this loop, so the bucket only refills
     // by the real-wall-clock delta between requests. With a 300-byte ceiling
@@ -417,7 +438,7 @@ describe('Ingest disk-rate throttle', () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 100 } }),
-      { now: clock.now },
+      { now: clock.now }
     )
     await plane.start()
     const addr = plane.server?.address()

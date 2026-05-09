@@ -93,6 +93,12 @@ export class ControlPlane {
     this.ingest = opts.ingest ?? new Ingest({
       sinkDir: config.sink_dir ?? defaultSinkDir(),
       now: this.now,
+      // Forward the optional ingest throttle config; each `undefined` falls
+      // through to the spec-mandated default inside `Ingest`.
+      maxPendingRows: config.ingest?.max_pending_rows,
+      highWaterPct: config.ingest?.high_water_pct,
+      retryAfterSeconds: config.ingest?.retry_after_seconds,
+      maxBytesPerSecond: config.ingest?.max_bytes_per_second,
     })
   }
 

@@ -7,9 +7,19 @@ import { IdentityClient } from './gateway/identity.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { ControlPlane } from './server/control_plane.js'
+import { defaultSinkDir as defaultIngestSinkDir } from './server/ingest.js'
 import { FileSink } from './sinks/file.js'
 import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
+
+/**
+ * Partition layout the server-mode parquet drain walks. Matches the path
+ * the NDJSON ingest endpoint writes:
+ * `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+ *
+ * @type {ReadonlyArray<string>}
+ */
+const SERVER_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 
 /**
  * @import { Server } from 'node:http'
@@ -276,18 +286,36 @@ function buildConfigListeners(config, ctx) {
   }
 
   if (config.upload) {
-    if (!config.sink) {
-      throw new Error('upload is configured but sink is missing')
-    }
     const uploadConfig = config.upload
-    const sinkDir = config.sink.dir
+    // Server mode drains the multi-tenant ingest spool (`sink_dir`)
+    // partitioned by `gateway_id`/`signal`. Standalone keeps the
+    // single-tenant `services/<service>/<signal>-<date>.jsonl` layout.
+    let outputDir
+    /** @type {ReadonlyArray<string> | undefined} */
+    let partitionDimensions
+    if (config.role === 'server') {
+      const serverConfig = config.server
+      if (!serverConfig) {
+        throw new Error('role: server requires server block (validator should have caught this)')
+      }
+      outputDir = serverConfig.sink_dir ?? defaultIngestSinkDir()
+      partitionDimensions = SERVER_PARTITION_DIMENSIONS
+    } else {
+      if (!config.sink) {
+        throw new Error('upload is configured but sink is missing')
+      }
+      outputDir = config.sink.dir
+    }
+    const resolvedOutputDir = outputDir
     // Lazy import keeps the SigV4 / parquet code off the hot path for
     // installs that don't enable upload.
     factories.push(async () => {
       const { createUploader } = await import('./upload/index.js')
       const uploader = createUploader({
-        outputDir: sinkDir,
-        options: uploadConfig,
+        outputDir: resolvedOutputDir,
+        options: partitionDimensions
+          ? { ...uploadConfig, partitionDimensions }
+          : uploadConfig,
         env: ctx.env,
       })
       await uploader.start()

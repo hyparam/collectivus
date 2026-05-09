@@ -271,6 +271,57 @@ describe('BootstrapStore', () => {
   it('throws on missing path', () => {
     expect(() => new BootstrapStore(/** @type {any} */ ({}))).toThrow()
   })
+
+  describe('revokeUnusedForGateway', () => {
+    it('drops unused tokens for the target gateway and persists the change', () => {
+      const store = new BootstrapStore({ path: storePath })
+      const a1 = store.register({ gatewayId: 'gw-A', ttlSeconds: 60 })
+      const a2 = store.register({ gatewayId: 'gw-A', ttlSeconds: 60 })
+      const b1 = store.register({ gatewayId: 'gw-B', ttlSeconds: 60 })
+      expect(store.size()).toBe(3)
+
+      const removed = store.revokeUnusedForGateway('gw-A')
+      expect(removed).toBe(2)
+      expect(store.size()).toBe(1)
+
+      // Tokens A.1 + A.2 are no longer redeemable; B.1 still is.
+      expect(expectConsumeFail(store.tryConsume(a1.token)).reason).toBe('unknown_token')
+      expect(expectConsumeFail(store.tryConsume(a2.token)).reason).toBe('unknown_token')
+      expect(expectConsumeOk(store.tryConsume(b1.token)).gatewayId).toBe('gw-B')
+
+      // Revocation persisted across reload.
+      const reloaded = new BootstrapStore({ path: storePath })
+      expect(reloaded.size()).toBe(1)
+    })
+
+    it('preserves used tokens so audit replay still reports already_used', () => {
+      const store = new BootstrapStore({ path: storePath })
+      const { token } = store.register({ gatewayId: 'gw', ttlSeconds: 60 })
+      expectConsumeOk(store.tryConsume(token))
+      expect(store.size()).toBe(1)
+
+      expect(store.revokeUnusedForGateway('gw')).toBe(0)
+      expect(store.size()).toBe(1)
+      expect(expectConsumeFail(store.tryConsume(token)).reason).toBe('already_used')
+    })
+
+    it('returns 0 and skips disk write when nothing matches', () => {
+      const store = new BootstrapStore({ path: storePath })
+      store.register({ gatewayId: 'gw-A', ttlSeconds: 60 })
+      const beforeMtime = fs.statSync(storePath).mtimeMs
+      // Wait a tick so a write would visibly bump mtime if it happened.
+      const before = Date.now()
+      while (Date.now() === before) { /* spin briefly */ }
+
+      expect(store.revokeUnusedForGateway('gw-OTHER')).toBe(0)
+      expect(fs.statSync(storePath).mtimeMs).toBe(beforeMtime)
+    })
+
+    it('rejects empty gatewayId', () => {
+      const store = new BootstrapStore({ path: storePath })
+      expect(() => store.revokeUnusedForGateway('')).toThrow()
+    })
+  })
 })
 
 describe('issueFromBootstrap', () => {

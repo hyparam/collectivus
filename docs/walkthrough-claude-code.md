@@ -170,6 +170,48 @@ signals from one binary:
 The OTLP receiver writes to `<dir>/{traces,metrics,logs}/…` exactly as before;
 the proxy writes to `<dir>/proxy.jsonl`.
 
+## Multi-host: gateway pulling its config from a central server
+
+The flow above runs collectivus standalone — a single host that owns its own
+config and recordings. For fleets, you can split it: one host runs `role:
+server` and vendors per-gateway configs over the control-plane API; each
+gateway runs `role: gateway` and pulls its config from the server.
+
+Pick this when you want centralised config management across many hosts (one
+operator updates `gw-prod-1.json` on the server; the gateway picks up the
+change within `poll_interval_seconds` and hot-reloads only the changed
+listener) or when you want every gateway's recordings to land in a single S3
+archive without per-host AWS credentials.
+
+The interactive walkthrough exposes both sides:
+
+```bash
+npx collectivus
+# What would you like collectivus to do?
+#   ...
+#   4) Gateway (multi-host deployment)
+#   5) Server (central control plane)
+```
+
+Option 5 prompts for the control-plane listen address, server data directory
+(default `~/.hyp/collectivus/server-data`), an HMAC secret for signing JWTs,
+and an optional S3 upload block — then prints the operator commands you need
+to run next:
+
+```bash
+collectivus config bootstrap-token issue gw-prod-1 --server-config server.json
+collectivus config set gw-prod-1 --server-config server.json --file gw-prod-1.json
+```
+
+Option 4 prompts for the central-server URL and `poll_interval_seconds`
+(default 30) and writes a `role: gateway` config. The bootstrap token is NOT
+collected at the prompt — pasting it into readline puts it in shell history.
+Edit `central_server.identity.bootstrap_token` in the saved config by hand
+after the operator hands you the token.
+
+See the [Config vending](../README.md#config-vending-multi-host-deployments)
+section of the README for the full operator workflow and the on-disk schema.
+
 ## Archiving recordings to S3
 
 The interactive walkthrough (`npx collectivus` with no args) includes an

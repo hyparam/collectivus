@@ -22,6 +22,11 @@ const MAX_INGEST_BODY_BYTES = 16 * 1024 * 1024
 /** Allowed signal kinds on `POST /v1/ingest/:signal`. */
 const SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 
+/** Default backpressure thresholds, mirroring the C.2 spec. */
+const DEFAULT_MAX_PENDING_ROWS = 50_000
+const DEFAULT_HIGH_WATER_PCT = 80
+const DEFAULT_RETRY_AFTER_SECONDS = 5
+
 /**
  * Defense-in-depth pattern for `gateway_id` taken from `claims.sub` before
  * it's joined into a filesystem path. Operators register gateway IDs at
@@ -51,10 +56,27 @@ export function defaultSinkDir() {
  * the row without trusting any client-supplied fields. The gateway_id comes
  * from the JWT claim, never the request body — a JWT for gateway A cannot
  * be used to ship rows tagged as gateway B.
+ *
+ * ## Backpressure (epic C.2)
+ *
+ * The endpoint emits 429 with `Retry-After` once the in-flight pending-row
+ * count crosses `maxPendingRows * highWaterPct%`, and 503 (with the same
+ * `Retry-After`) once it hits `maxPendingRows`. A separate token-bucket
+ * cap on bytes-per-second triggers the same 429 path when configured. All
+ * three rejections cover the full batch — the gateway batcher (C.3) retries
+ * the entire NDJSON payload after the suggested delay.
  */
 export class Ingest {
   /**
-   * @param {{ sinkDir: string, now?: () => number }} opts
+   * @param {{
+   *   sinkDir: string,
+   *   now?: () => number,
+   *   maxPendingRows?: number,
+   *   highWaterPct?: number,
+   *   retryAfterSeconds?: number,
+   *   maxBytesPerSecond?: number,
+   *   onThrottle?: (info: ThrottleEvent) => void,
+   * }} opts
    */
   constructor(opts) {
     if (typeof opts?.sinkDir !== 'string' || opts.sinkDir.length === 0) {
@@ -64,6 +86,82 @@ export class Ingest {
     this.sinkDir = opts.sinkDir
     /** @type {() => number} */
     this.now = opts.now ?? Date.now
+
+    /** @type {number} */
+    this.maxPendingRows = opts.maxPendingRows ?? DEFAULT_MAX_PENDING_ROWS
+    if (!Number.isInteger(this.maxPendingRows) || this.maxPendingRows < 1) {
+      throw new Error('Ingest: maxPendingRows must be a positive integer')
+    }
+    /** @type {number} */
+    this.highWaterPct = opts.highWaterPct ?? DEFAULT_HIGH_WATER_PCT
+    if (!Number.isInteger(this.highWaterPct)
+        || this.highWaterPct < 1
+        || this.highWaterPct > 100) {
+      throw new Error('Ingest: highWaterPct must be an integer in [1,100]')
+    }
+    /** @type {number} */
+    this.retryAfterSeconds = opts.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS
+    if (!Number.isInteger(this.retryAfterSeconds) || this.retryAfterSeconds < 1) {
+      throw new Error('Ingest: retryAfterSeconds must be a positive integer')
+    }
+    /** @type {number | undefined} */
+    this.maxBytesPerSecond = opts.maxBytesPerSecond
+    if (this.maxBytesPerSecond !== undefined
+        && (!Number.isInteger(this.maxBytesPerSecond) || this.maxBytesPerSecond < 1)) {
+      throw new Error('Ingest: maxBytesPerSecond must be a positive integer when set')
+    }
+
+    /**
+     * High-water row threshold, pre-computed because it's read on every
+     * request and the inputs never change after construction.
+     * @type {number}
+     */
+    this.highWaterRows = Math.floor(this.maxPendingRows * this.highWaterPct / 100)
+
+    /**
+     * Token bucket for the disk-rate ceiling. Capacity equals
+     * `maxBytesPerSecond` (one second of headroom) and the refill rate is
+     * the same value per second — bursts up to one second's worth are
+     * allowed, sustained throughput is capped at the configured ceiling.
+     * `undefined` means rate-limiting is disabled.
+     * @type {TokenBucket | undefined}
+     */
+    this.byteBudget = this.maxBytesPerSecond === undefined
+      ? undefined
+      : new TokenBucket({
+        capacity: this.maxBytesPerSecond,
+        refillPerSecond: this.maxBytesPerSecond,
+        now: this.now,
+      })
+
+    /**
+     * Rows currently sitting in the per-file write chains, awaiting fsync.
+     * Incremented when a batch joins its chain, decremented when its
+     * `writeOnce` resolves (success or failure).
+     * @type {number}
+     */
+    this.pendingRows = 0
+
+    /**
+     * Per-rejection-kind counters. Surfaced for ops scrapers and the test
+     * suite — both want to assert backpressure triggered for the right
+     * reason.
+     * @type {{ pendingHighWater: number, pendingAtCapacity: number, byteRate: number }}
+     */
+    this.throttleStats = {
+      pendingHighWater: 0,
+      pendingAtCapacity: 0,
+      byteRate: 0,
+    }
+
+    /**
+     * Per-event hook fired alongside each backpressure rejection. Defaults
+     * to a stderr line that ops can grep for; tests can swap in a capturing
+     * function (or a no-op) to keep test output quiet.
+     * @type {(info: ThrottleEvent) => void}
+     */
+    this.onThrottle = opts.onThrottle ?? defaultOnThrottle
+
     /**
      * Per-file write chains. Concurrent batches that target the same
      * (gateway, signal, day) file are queued so we never interleave two
@@ -92,6 +190,7 @@ export class Ingest {
       return
     }
     /** @type {IngestSignal} */
+    // eslint-disable-next-line no-extra-parens -- JSDoc cast needs the parens
     const signal = /** @type {IngestSignal} */ (signalParam)
 
     const claims = getClaims(req)
@@ -113,6 +212,33 @@ export class Ingest {
     const ct = parseContentType(req.headers['content-type'])
     if (ct !== 'application/x-ndjson' && ct !== 'application/jsonl') {
       writeError(res, 415, 'expected application/x-ndjson or application/jsonl')
+      return
+    }
+
+    // Pending-row backpressure runs BEFORE we read the body so a saturated
+    // server doesn't waste bandwidth pulling NDJSON it's about to reject.
+    if (this.pendingRows >= this.maxPendingRows) {
+      this.throttleStats.pendingAtCapacity += 1
+      this.fireThrottle({
+        kind: 'capacity',
+        gatewayId,
+        signal,
+        pendingRows: this.pendingRows,
+        maxPendingRows: this.maxPendingRows,
+      })
+      writeBackpressure(res, 503, 'ingest at capacity', this.retryAfterSeconds)
+      return
+    }
+    if (this.pendingRows >= this.highWaterRows) {
+      this.throttleStats.pendingHighWater += 1
+      this.fireThrottle({
+        kind: 'high_water',
+        gatewayId,
+        signal,
+        pendingRows: this.pendingRows,
+        highWaterRows: this.highWaterRows,
+      })
+      writeBackpressure(res, 429, 'ingest backpressure', this.retryAfterSeconds)
       return
     }
 
@@ -158,6 +284,26 @@ export class Ingest {
       tagged.push(JSON.stringify(parsed))
     }
 
+    // Disk-rate throttle runs after parsing so we know the actual on-disk
+    // byte count (NDJSON, including newlines). Zero-row batches skip this
+    // — they don't touch disk and shouldn't drain the budget.
+    if (tagged.length > 0 && this.byteBudget !== undefined) {
+      const cost = computeBatchBytes(tagged)
+      if (!this.byteBudget.tryConsume(cost)) {
+        this.throttleStats.byteRate += 1
+        this.fireThrottle({
+          kind: 'byte_rate',
+          gatewayId,
+          signal,
+          batchBytes: cost,
+          // eslint-disable-next-line no-extra-parens -- JSDoc cast needs the parens
+          maxBytesPerSecond: /** @type {number} */ (this.maxBytesPerSecond),
+        })
+        writeBackpressure(res, 429, 'ingest disk-rate throttled', this.retryAfterSeconds)
+        return
+      }
+    }
+
     if (tagged.length > 0) {
       try {
         await this.appendBatch({ gatewayId, signal, day, lines: tagged })
@@ -181,9 +327,27 @@ export class Ingest {
   }
 
   /**
+   * Invoke the throttle hook with a full event record. Wrapped so individual
+   * call sites stay terse and so a misbehaving hook can't crash the request
+   * handler.
+   *
+   * @param {ThrottleEvent} info
+   */
+  fireThrottle(info) {
+    try {
+      this.onThrottle(info)
+    } catch {
+      // Hook errors are intentionally swallowed — observability must never
+      // turn a 429 into a 500.
+    }
+  }
+
+  /**
    * Append a batch of pre-validated lines to the on-disk file. Per-file
    * serialization keeps concurrent batches for the same target file from
-   * interleaving at the syscall level.
+   * interleaving at the syscall level. The pending-row counter is bumped
+   * for the duration of the chained write so concurrent requests see this
+   * batch's contribution to backpressure even before fsync returns.
    *
    * @param {{ gatewayId: string, signal: string, day: string, lines: string[] }} args
    * @returns {Promise<void>}
@@ -193,13 +357,127 @@ export class Ingest {
     const dir = path.join(this.sinkDir, gatewayId, signal)
     const file = path.join(dir, `${day}.jsonl`)
 
+    this.pendingRows += lines.length
     const previous = this.fileChains.get(file) ?? Promise.resolve()
     const next = previous.then(() => writeOnce(dir, file, lines))
     // Park a swallowed copy on the chain so the next caller can `then` off
     // it without inheriting our rejection. The original `next` still rejects
     // for our caller via the `await` below.
     this.fileChains.set(file, next.catch(() => {}))
-    await next
+    try {
+      await next
+    } finally {
+      this.pendingRows -= lines.length
+    }
+  }
+}
+
+/**
+ * @typedef {(
+ *   | { kind: 'high_water', gatewayId: string, signal: string, pendingRows: number, highWaterRows: number }
+ *   | { kind: 'capacity',   gatewayId: string, signal: string, pendingRows: number, maxPendingRows: number }
+ *   | { kind: 'byte_rate',  gatewayId: string, signal: string, batchBytes: number, maxBytesPerSecond: number }
+ * )} ThrottleEvent
+ */
+
+/**
+ * Default `onThrottle` hook: emit a single stderr line per rejection so ops
+ * can grep for it without standing up a metrics pipeline. The line is
+ * deliberately terse and key=value so it tails well in operator terminals.
+ *
+ * @param {ThrottleEvent} info
+ */
+function defaultOnThrottle(info) {
+  if (info.kind === 'high_water') {
+    process.stderr.write(`[ingest] backpressure kind=high_water gateway_id=${info.gatewayId} signal=${info.signal} pending_rows=${info.pendingRows}/${info.highWaterRows}\n`)
+  } else if (info.kind === 'capacity') {
+    process.stderr.write(`[ingest] backpressure kind=capacity gateway_id=${info.gatewayId} signal=${info.signal} pending_rows=${info.pendingRows}/${info.maxPendingRows}\n`)
+  } else {
+    process.stderr.write(`[ingest] backpressure kind=byte_rate gateway_id=${info.gatewayId} signal=${info.signal} batch_bytes=${info.batchBytes} max_bytes_per_second=${info.maxBytesPerSecond}\n`)
+  }
+}
+
+/**
+ * Compute the on-disk byte cost of a tagged batch. Mirrors `writeOnce` exactly:
+ * lines joined by `\n`, plus the trailing newline that closes the batch.
+ *
+ * @param {string[]} lines
+ * @returns {number}
+ */
+function computeBatchBytes(lines) {
+  if (lines.length === 0) return 0
+  let total = 0
+  for (const line of lines) total += Buffer.byteLength(line, 'utf8')
+  // (lines.length - 1) interior newlines + 1 trailing newline = lines.length
+  total += lines.length
+  return total
+}
+
+/**
+ * Token bucket used to enforce the per-process bytes-per-second ceiling. The
+ * standard "capacity = 1s of headroom, refill at the same rate" shape — a
+ * bursty client gets one second of slack, sustained throughput is capped.
+ *
+ * Tokens are refilled lazily on each `tryConsume` so we don't burn an
+ * interval timer per Ingest instance.
+ */
+export class TokenBucket {
+  /**
+   * @param {{ capacity: number, refillPerSecond: number, now: () => number }} opts
+   */
+  constructor(opts) {
+    /** @type {number} */
+    this.capacity = opts.capacity
+    /** @type {number} */
+    this.refillPerSecond = opts.refillPerSecond
+    /** @type {() => number} */
+    this.now = opts.now
+    /** @type {number} */
+    this.tokens = opts.capacity
+    /** @type {number} */
+    this.lastRefillMs = opts.now()
+  }
+
+  /**
+   * Add tokens accrued since the previous refill. Idempotent and cheap —
+   * safe to call before every consume / inspection.
+   *
+   * @returns {void}
+   */
+  refill() {
+    const nowMs = this.now()
+    const elapsedMs = nowMs - this.lastRefillMs
+    if (elapsedMs <= 0) return
+    const accrued = elapsedMs * this.refillPerSecond / 1000
+    this.tokens = Math.min(this.capacity, this.tokens + accrued)
+    this.lastRefillMs = nowMs
+  }
+
+  /**
+   * Attempt to debit `cost` tokens. Returns true on success and consumes the
+   * tokens; returns false (and leaves the bucket untouched) when there's not
+   * enough slack. A `cost` larger than `capacity` always fails — the bucket
+   * can never grow past its ceiling.
+   *
+   * @param {number} cost
+   * @returns {boolean}
+   */
+  tryConsume(cost) {
+    this.refill()
+    if (this.tokens < cost) return false
+    this.tokens -= cost
+    return true
+  }
+
+  /**
+   * Tokens currently available, after a fresh refill. Exposed for tests and
+   * future observability hooks.
+   *
+   * @returns {number}
+   */
+  available() {
+    this.refill()
+    return this.tokens
   }
 }
 
@@ -327,4 +605,22 @@ function writeJson(res, status, body) {
  */
 function writeError(res, status, message) {
   writeJson(res, status, { error: message })
+}
+
+/**
+ * Backpressure response shape: status + `Retry-After` header + a body that
+ * also reports the suggested wait. Same envelope for 429 and 503 so the
+ * gateway-side retry loop (epic C.4) handles them with one branch.
+ *
+ * @param {ServerResponse} res
+ * @param {number} status
+ * @param {string} message
+ * @param {number} retryAfterSeconds
+ */
+function writeBackpressure(res, status, message, retryAfterSeconds) {
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'retry-after': String(retryAfterSeconds),
+  })
+  res.end(JSON.stringify({ error: message, retry_after_seconds: retryAfterSeconds }))
 }

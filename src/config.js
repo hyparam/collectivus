@@ -29,7 +29,10 @@ const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
 const ALLOWED_SERVER_KEYS = new Set([
-  'control_plane_listen', 'identity_issuer', 'data_dir', 'sink_dir',
+  'control_plane_listen', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
+])
+const ALLOWED_INGEST_KEYS = new Set([
+  'max_pending_rows', 'high_water_pct', 'retry_after_seconds', 'max_bytes_per_second',
 ])
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
@@ -249,6 +252,35 @@ function validateServer(server) {
   }
   if (server.sink_dir !== undefined) {
     assertNonEmptyString(server.sink_dir, '/server/sink_dir')
+  }
+  if (server.ingest !== undefined) {
+    validateIngest(server.ingest)
+  }
+}
+
+/** @param {unknown} ingest */
+function validateIngest(ingest) {
+  assertObject(ingest, '/server/ingest')
+  assertOnlyKeys(ingest, ALLOWED_INGEST_KEYS, '/server/ingest')
+  if (ingest.max_pending_rows !== undefined) {
+    assertPositiveInteger(ingest.max_pending_rows, '/server/ingest/max_pending_rows')
+  }
+  if (ingest.high_water_pct !== undefined) {
+    if (typeof ingest.high_water_pct !== 'number'
+        || !Number.isInteger(ingest.high_water_pct)
+        || ingest.high_water_pct < 1
+        || ingest.high_water_pct > 100) {
+      throw new ConfigError(
+        'must be an integer between 1 and 100',
+        { pointer: '/server/ingest/high_water_pct' }
+      )
+    }
+  }
+  if (ingest.retry_after_seconds !== undefined) {
+    assertPositiveInteger(ingest.retry_after_seconds, '/server/ingest/retry_after_seconds')
+  }
+  if (ingest.max_bytes_per_second !== undefined) {
+    assertPositiveInteger(ingest.max_bytes_per_second, '/server/ingest/max_bytes_per_second')
   }
 }
 

@@ -140,6 +140,31 @@ describe('runAttach', function() {
     expect(stdout.value()).toMatch(/base_url = http:\/\/127\.0\.0\.1:9090\/v1/)
   })
 
+  it('--client codex: uses CODEX_HOME for the default Codex config path', async function() {
+    const originalCodexHome = process.env.CODEX_HOME
+    const codexHome = path.join(tmpDir, 'codex-home')
+    /** @type {object[]} */
+    const codexCalls = []
+    process.env.CODEX_HOME = codexHome
+    try {
+      const code = await runAttach(['--port', '9090', '--client', 'codex'], {
+        stdout: memo(), stderr: memo(),
+        version: '2.0.0',
+        attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true }) },
+      })
+      expect(code).toBe(0)
+      expect(codexCalls).toEqual([{
+        port: 9090, version: '2.0.0', configPath: path.join(codexHome, 'config.toml'),
+      }])
+    } finally {
+      if (originalCodexHome === undefined) {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = originalCodexHome
+      }
+    }
+  })
+
   it('--client all: attaches Claude Code and Codex', async function() {
     const stdout = memo()
     /** @type {object[]} */
@@ -221,6 +246,30 @@ describe('runAttach', function() {
     expect(calls).toEqual([{
       port: 8765, version: '2.0.0', configPath: path.join(tmpDir, 'codex.toml'),
     }])
+  })
+
+  it('--client codex with --config: rejects prefixes the proxy would not match', async function() {
+    for (const prefix of ['/v1/', '/v1/res']) {
+      const stderr = memo()
+      /** @type {CollectivusConfig} */
+      const cfg = {
+        version: 1,
+        proxy: {
+          listen: '0.0.0.0:8765',
+          upstreams: [{ name: 'openai', base_url: 'https://api.openai.com', match: { path_prefix: prefix } }],
+        },
+      }
+      /** @type {object[]} */
+      const codexCalls = []
+      const code = await runAttach(['--config', '/tmp/x', '--client', 'codex'], {
+        stdout: memo(), stderr,
+        loadConfig() { return cfg },
+        attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true }) },
+      })
+      expect(code).toBe(1)
+      expect(stderr.value()).toMatch(/routes \/v1\/responses/)
+      expect(codexCalls).toEqual([])
+    }
   })
 
   it('--config: surfaces ConfigError as code 1', async function() {

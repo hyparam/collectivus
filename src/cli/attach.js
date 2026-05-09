@@ -3,6 +3,7 @@ import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttachClaude, defaultSettingsPath } from '../claude-code/settings.js'
 import { attach as defaultAttachCodex, defaultConfigPath as defaultCodexConfigPath } from '../codex/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
+import { pathMatchesPrefix } from '../proxy.js'
 
 /**
  * @import { AttachParseResult, AttachHooks, CollectivusConfig } from '../types.js'
@@ -189,6 +190,6 @@ export async function runAttach(argv, hooks = {}) {
 function hasProxyRoute(config, requestPath) {
   return (config.proxy?.upstreams ?? []).some(function(upstream) {
     const prefix = upstream?.match?.path_prefix
-    return typeof prefix === 'string' && prefix.length > 0 && requestPath.startsWith(prefix)
+    return typeof prefix === 'string' && prefix.length > 0 && pathMatchesPrefix(requestPath, prefix)
   })
 }

@@ -341,12 +341,21 @@ function finishSafely(exchange) {
  */
 function matchUpstream(upstreams, pathname) {
   for (const u of upstreams) {
-    if (u.prefix === '/') return u
-    if (pathname === u.prefix || pathname.startsWith(u.prefix + '/')) {
+    if (pathMatchesPrefix(pathname, u.prefix)) {
       return u
     }
   }
   return undefined
+}
+
+/**
+ * @param {string} pathname
+ * @param {string} prefix
+ * @returns {boolean}
+ */
+export function pathMatchesPrefix(pathname, prefix) {
+  if (prefix === '/') return true
+  return pathname === prefix || pathname.startsWith(prefix + '/')
 }
 
 /**

@@ -13,6 +13,12 @@ const ROOT_BEGIN = '# BEGIN collectivus codex model_provider'
 const ROOT_END = '# END collectivus codex model_provider'
 const PROVIDER_BEGIN = '# BEGIN collectivus codex provider'
 const PROVIDER_END = '# END collectivus codex provider'
+const TOML_BASIC_MULTILINE_DELIMITER = '"""'
+const TOML_LITERAL_MULTILINE_DELIMITER = '\'\'\''
+const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
+const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
+const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
+const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
 
 export class CodexSettingsError extends Error {
   /**
@@ -32,11 +38,15 @@ export class CodexSettingsError extends Error {
 }
 
 /**
- * Default Codex config location: `~/.codex/config.toml`.
+ * Default Codex config location: `$CODEX_HOME/config.toml` when CODEX_HOME
+ * is set, otherwise `~/.codex/config.toml`.
  *
  * @returns {string}
  */
 export function defaultConfigPath() {
+  if (typeof process.env.CODEX_HOME === 'string' && process.env.CODEX_HOME.length > 0) {
+    return path.join(process.env.CODEX_HOME, 'config.toml')
+  }
   return path.join(os.homedir(), '.codex', 'config.toml')
 }
 
@@ -300,14 +310,24 @@ function removeRootModelProvider(lines) {
   const next = []
   /** @type {string | undefined} */
   let prevValue
+  /** @type {TomlMultilineStringDelimiter | undefined} */
+  let multilineDelimiter
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
+    if (i < firstTable && multilineDelimiter !== undefined) {
+      multilineDelimiter = closeMultilineString(line, multilineDelimiter)
+      next.push(line)
+      continue
+    }
     if (i < firstTable && isRootModelProviderLine(line)) {
       if (prevValue === undefined) prevValue = parseAssignmentString(line)
       continue
     }
     next.push(line)
+    if (i < firstTable) {
+      multilineDelimiter = openMultilineString(line)
+    }
   }
 
   /** @type {{ lines: string[], prevValue?: string }} */
@@ -322,9 +342,16 @@ function removeRootModelProvider(lines) {
  */
 function readRootModelProvider(lines) {
   const firstTable = findFirstTableIndex(lines)
+  /** @type {TomlMultilineStringDelimiter | undefined} */
+  let multilineDelimiter
   for (let i = 0; i < firstTable; i++) {
+    if (multilineDelimiter !== undefined) {
+      multilineDelimiter = closeMultilineString(lines[i], multilineDelimiter)
+      continue
+    }
     const parsed = parseRootModelProvider(lines[i])
     if (parsed !== undefined) return parsed
+    multilineDelimiter = openMultilineString(lines[i])
   }
   return undefined
 }
@@ -334,8 +361,27 @@ function readRootModelProvider(lines) {
  * @returns {number}
  */
 function findFirstTableIndex(lines) {
-  const index = lines.findIndex(isTableHeader)
-  return index === -1 ? lines.length : index
+  return findNextTableIndex(lines, 0)
+}
+
+/**
+ * @param {string[]} lines
+ * @param {number} start
+ * @returns {number}
+ */
+function findNextTableIndex(lines, start) {
+  /** @type {TomlMultilineStringDelimiter | undefined} */
+  let multilineDelimiter
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i]
+    if (multilineDelimiter !== undefined) {
+      multilineDelimiter = closeMultilineString(line, multilineDelimiter)
+      continue
+    }
+    if (isTableHeader(line)) return i
+    multilineDelimiter = openMultilineString(line)
+  }
+  return lines.length
 }
 
 /**
@@ -345,14 +391,19 @@ function findFirstTableIndex(lines) {
 function removeProviderTable(lines) {
   /** @type {string[]} */
   const next = []
-  for (let i = 0; i < lines.length;) {
-    if (isCollectivusProviderHeader(lines[i])) {
-      i++
-      while (i < lines.length && !isTableHeader(lines[i])) i++
+  for (let i = 0; i < lines.length; i++) {
+    const tableIndex = findNextTableIndex(lines, i)
+    if (tableIndex === lines.length) {
+      next.push(...lines.slice(i))
+      break
+    }
+    next.push(...lines.slice(i, tableIndex))
+    if (isCollectivusProviderHeader(lines[tableIndex])) {
+      i = findNextTableIndex(lines, tableIndex + 1) - 1
       continue
     }
-    next.push(lines[i])
-    i++
+    next.push(lines[tableIndex])
+    i = tableIndex
   }
   return next
 }
@@ -531,8 +582,73 @@ function tomlString(value) {
  * @returns {boolean}
  */
 function isTableHeader(line) {
-  const trimmed = line.trim()
-  return trimmed.startsWith('[')
+  return TOML_TABLE_HEADER_RE.test(line) || TOML_TABLE_ARRAY_HEADER_RE.test(line)
+}
+
+/**
+ * @typedef {'"""' | "'''"} TomlMultilineStringDelimiter
+ */
+
+/**
+ * @param {string} line
+ * @returns {TomlMultilineStringDelimiter | undefined}
+ */
+function openMultilineString(line) {
+  const trimmed = assignmentValue(line) ?? line.trimStart()
+  if (trimmed.startsWith(TOML_BASIC_MULTILINE_DELIMITER)) {
+    return hasClosingMultilineString(trimmed.slice(3), TOML_BASIC_MULTILINE_DELIMITER)
+      ? undefined
+      : TOML_BASIC_MULTILINE_DELIMITER
+  }
+  if (trimmed.startsWith(TOML_LITERAL_MULTILINE_DELIMITER)) {
+    return hasClosingMultilineString(trimmed.slice(3), TOML_LITERAL_MULTILINE_DELIMITER)
+      ? undefined
+      : TOML_LITERAL_MULTILINE_DELIMITER
+  }
+  return undefined
+}
+
+/**
+ * @param {string} line
+ * @param {TomlMultilineStringDelimiter} delimiter
+ * @returns {TomlMultilineStringDelimiter | undefined}
+ */
+function closeMultilineString(line, delimiter) {
+  return hasClosingMultilineString(line, delimiter) ? undefined : delimiter
+}
+
+/**
+ * @param {string} line
+ * @returns {string | undefined}
+ */
+function assignmentValue(line) {
+  if (/^\s*#/.test(line)) return undefined
+  const index = line.indexOf('=')
+  return index === -1 ? undefined : line.slice(index + 1).trimStart()
+}
+
+/**
+ * @param {string} value
+ * @param {TomlMultilineStringDelimiter} delimiter
+ * @returns {boolean}
+ */
+function hasClosingMultilineString(value, delimiter) {
+  if (delimiter === TOML_LITERAL_MULTILINE_DELIMITER) return value.includes(delimiter)
+  for (let index = value.indexOf(delimiter); index !== -1; index = value.indexOf(delimiter, index + 1)) {
+    if (!isEscaped(value, index)) return true
+  }
+  return false
+}
+
+/**
+ * @param {string} value
+ * @param {number} index
+ * @returns {boolean}
+ */
+function isEscaped(value, index) {
+  let backslashes = 0
+  for (let i = index - 1; i >= 0 && value[i] === '\\'; i--) backslashes++
+  return backslashes % 2 === 1
 }
 
 /**

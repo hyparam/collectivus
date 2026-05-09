@@ -9,13 +9,21 @@ import { CodexSettingsError, attach, defaultConfigPath, detach, isAttached } fro
 let tmpDir
 /** @type {string} */
 let configPath
+/** @type {string | undefined} */
+let originalCodexHome
 
 beforeEach(() => {
+  originalCodexHome = process.env.CODEX_HOME
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-codex-'))
   configPath = path.join(tmpDir, 'config.toml')
 })
 
 afterEach(() => {
+  if (originalCodexHome === undefined) {
+    delete process.env.CODEX_HOME
+  } else {
+    process.env.CODEX_HOME = originalCodexHome
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 
@@ -36,7 +44,13 @@ function readToml() {
 
 describe('defaultConfigPath', () => {
   it('points at ~/.codex/config.toml', () => {
+    delete process.env.CODEX_HOME
     expect(defaultConfigPath()).toBe(path.join(os.homedir(), '.codex', 'config.toml'))
+  })
+
+  it('uses CODEX_HOME when set', () => {
+    process.env.CODEX_HOME = tmpDir
+    expect(defaultConfigPath()).toBe(path.join(tmpDir, 'config.toml'))
   })
 })
 
@@ -67,6 +81,29 @@ describe('attach', () => {
     )
     expect(written).toContain('model = "gpt-5.1-codex"')
     expect(written).toContain('trust_level = "trusted"')
+  })
+
+  it('does not treat bracketed multiline string content as a table', async () => {
+    writeToml(
+      'instructions = """\n' +
+      '[section]\n' +
+      'model_provider = "inside-string"\n' +
+      '"""\n' +
+      '[projects."/repo"]\n' +
+      'trust_level = "trusted"\n'
+    )
+
+    await attach({ port: 8787, version: '1.0.0', configPath })
+
+    const written = readToml()
+    const closingStringIndex = written.indexOf('\n"""\n')
+    expect(written).toContain('[section]\nmodel_provider = "inside-string"\n"""')
+    expect(written.indexOf('model_provider = "collectivus"')).toBeGreaterThan(
+      closingStringIndex
+    )
+    expect(written.indexOf('model_provider = "collectivus"')).toBeLessThan(
+      written.indexOf('[projects."/repo"]')
+    )
   })
 
   it('records and removes the previous root model_provider', async () => {

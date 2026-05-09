@@ -9,6 +9,7 @@ import {
   issueFromBootstrap,
   signJwt,
 } from './identity.js'
+import { Ingest, defaultSinkDir } from './ingest.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
@@ -36,12 +37,15 @@ const REFRESH_RATE_MAX = 1
 export class ControlPlane {
   /**
    * @param {ServerConfig} config
-   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, now?: () => number }} [opts]
+   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, ingest?: Ingest, now?: () => number }} [opts]
    *   Test hooks. `bootstrapStore` overrides the file-backed store derived
    *   from `config.identity_issuer.bootstrap_store_path`. `configRegistry`
    *   overrides the file-backed registry derived from `config.data_dir`.
-   *   `now` is injected into the JWT signer/verifier and the rate limiters
-   *   so tests can drive token expiry and rate-limit windows.
+   *   `ingest` overrides the default `Ingest` instance (used by tests to
+   *   inject a temp sink directory). `now` is injected into the JWT signer/
+   *   verifier, rate limiters, and the ingest endpoint so tests can drive
+   *   token expiry, rate-limit windows, and the date used for daily-rolled
+   *   JSONL files.
    */
   constructor(config, opts = {}) {
     /** @type {ServerConfig} */
@@ -82,6 +86,12 @@ export class ControlPlane {
     this.refreshLimiter = new SlidingWindowRateLimiter({
       windowMs: REFRESH_RATE_WINDOW_MS,
       max: REFRESH_RATE_MAX,
+      now: this.now,
+    })
+
+    /** @type {Ingest} */
+    this.ingest = opts.ingest ?? new Ingest({
+      sinkDir: config.sink_dir ?? defaultSinkDir(),
       now: this.now,
     })
   }
@@ -167,6 +177,23 @@ export class ControlPlane {
       if (method !== 'GET') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
       this.handleGetConfig(req, res)
+      return
+    }
+
+    if (path.startsWith('/v1/ingest/')) {
+      if (method !== 'POST') return writeError(res, 405, 'method not allowed')
+      if (!this.authorize(req, res)) return
+      const signal = path.slice('/v1/ingest/'.length)
+      this.ingest.handleRequest(req, res, signal).catch((err) => {
+        // `Ingest.handleRequest` writes its own 4xx/5xx responses for
+        // expected failures. A throw escaping it means a programming bug
+        // (e.g. an unhandled file-system error path) — emit a terse 500
+        // only when the response is still open.
+        if (!res.writableEnded) {
+          const msg = err instanceof Error ? err.message : String(err)
+          writeError(res, 500, `ingest dispatch failed: ${msg}`)
+        }
+      })
       return
     }
 

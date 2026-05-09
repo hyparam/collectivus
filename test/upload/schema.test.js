@@ -10,6 +10,27 @@ describe('columnsForSignal', () => {
       expect(columns[0]).toEqual({ name: 'serviceName', type: 'STRING', nullable: false })
     }
   })
+
+  it('omits gateway_id by default (v1 standalone schema)', () => {
+    for (const signal of /** @type {const} */ (['logs', 'traces', 'metrics'])) {
+      const columns = columnsForSignal(signal)
+      expect(columns.find((c) => c.name === 'gateway_id')).toBeUndefined()
+    }
+  })
+
+  it('omits gateway_id when partitionDimensions does not include it', () => {
+    const columns = columnsForSignal('logs', ['service', 'signal'])
+    expect(columns.find((c) => c.name === 'gateway_id')).toBeUndefined()
+  })
+
+  it('prepends a non-null gateway_id STRING column when partitionDimensions includes gateway_id', () => {
+    for (const signal of /** @type {const} */ (['logs', 'traces', 'metrics'])) {
+      const columns = columnsForSignal(signal, ['gateway_id', 'signal'])
+      expect(columns[0]).toEqual({ name: 'gateway_id', type: 'STRING', nullable: false })
+      // serviceName still anchors the v1 layout immediately after the new column.
+      expect(columns[1].name).toBe('serviceName')
+    }
+  })
 })
 
 describe('rowsToColumns logs', () => {
@@ -119,6 +140,79 @@ describe('rowsToColumns metrics', () => {
 
     expect(read[0].value == null).toBe(true)
     expect(read[0].valueInt).toBe(9007199254740993n)
+  })
+})
+
+describe('rowsToColumns gateway_id (v2 multi-tenant schema)', () => {
+  it('writes gateway_id from row._partition.gateway_id and survives parquet roundtrip', async () => {
+    const rows = [
+      { _partition: { gateway_id: 'gw-a', signal: 'logs' }, serviceName: 'orders-api' },
+      { _partition: { gateway_id: 'gw-b', signal: 'logs' }, serviceName: 'billing' },
+    ]
+    const columnData = rowsToColumns('logs', rows, ['gateway_id', 'signal'])
+    const buffer = parquetWriteBuffer({ columnData })
+    const read = await parquetReadObjects({ file: buffer })
+    expect(read).toHaveLength(2)
+    expect(read[0].gateway_id).toBe('gw-a')
+    expect(read[0].serviceName).toBe('orders-api')
+    expect(read[1].gateway_id).toBe('gw-b')
+    expect(read[1].serviceName).toBe('billing')
+  })
+
+  it('ignores a body-level gateway_id and only honors _partition (spoof protection)', async () => {
+    // A row that tries to forge gateway_id directly in the body must not win
+    // — the partition tag from the directory walker is the single source.
+    const rows = [{
+      gateway_id: 'forged',
+      _partition: { gateway_id: 'real', signal: 'logs' },
+      serviceName: 'svc',
+    }]
+    const columnData = rowsToColumns('logs', rows, ['gateway_id', 'signal'])
+    const buffer = parquetWriteBuffer({ columnData })
+    const read = await parquetReadObjects({ file: buffer })
+    expect(read[0].gateway_id).toBe('real')
+  })
+
+  it('throws when gateway_id is required but the row has no _partition tag', () => {
+    expect(() => rowsToColumns('logs', [{ serviceName: 'svc' }], ['gateway_id', 'signal']))
+      .toThrow(/required column "gateway_id"/)
+  })
+
+  it('throws when gateway_id is required but _partition omits it', () => {
+    expect(() =>
+      rowsToColumns('logs', [{ _partition: { signal: 'logs' }, serviceName: 'svc' }], ['gateway_id', 'signal'])
+    ).toThrow(/required column "gateway_id"/)
+  })
+
+  it('applies to traces and metrics as well as logs', async () => {
+    const traceRows = [{
+      _partition: { gateway_id: 'gw-a', signal: 'traces' },
+      serviceName: 'svc', traceId: 't', spanId: 's',
+    }]
+    const traceColumns = rowsToColumns('traces', traceRows, ['gateway_id', 'signal'])
+    const traceBuffer = parquetWriteBuffer({ columnData: traceColumns })
+    const traceOut = await parquetReadObjects({ file: traceBuffer })
+    expect(traceOut[0].gateway_id).toBe('gw-a')
+
+    const metricRows = [{
+      _partition: { gateway_id: 'gw-b', signal: 'metrics' },
+      serviceName: 'svc', metricType: 'gauge', metricName: 'cpu', value: 0.5, valueType: 'double',
+    }]
+    const metricColumns = rowsToColumns('metrics', metricRows, ['gateway_id', 'signal'])
+    const metricBuffer = parquetWriteBuffer({ columnData: metricColumns })
+    const metricOut = await parquetReadObjects({ file: metricBuffer })
+    expect(metricOut[0].gateway_id).toBe('gw-b')
+  })
+
+  it('emits the v1 schema (no gateway_id column) when partitionDimensions is omitted', async () => {
+    // Standalone path stays bit-identical so historical readers see what they
+    // always saw — the column simply isn't there.
+    const rows = [{ serviceName: 'svc', _partition: { gateway_id: 'gw-x' } }]
+    const columnData = rowsToColumns('logs', rows)
+    const buffer = parquetWriteBuffer({ columnData })
+    const read = await parquetReadObjects({ file: buffer })
+    expect('gateway_id' in read[0]).toBe(false)
+    expect(read[0].serviceName).toBe('svc')
   })
 })
 

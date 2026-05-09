@@ -9,6 +9,19 @@
  * Metric number datapoints split doubles into `value` and 64-bit integers
  * into `valueInt` so OTLP integer values remain exact.
  *
+ * ## Schema versions
+ *
+ * - **v1**: original layout — service-partitioned standalone deployments.
+ *   Columns are exactly the per-signal lists below.
+ * - **v2**: multi-tenant — adds a non-null `gateway_id` STRING column
+ *   prepended to every signal when the writer is given a
+ *   `partitionDimensions` list that includes `'gateway_id'`. The value is
+ *   sourced from the row's `_partition.gateway_id` tag set by
+ *   `readPartitionRows` (so the directory walker is the single source of
+ *   truth — never a body field). Server-mode parquet always emits v2;
+ *   standalone parquet stays at v1 (column omitted entirely so historical
+ *   readers see exactly the layout they always saw).
+ *
  * TODO: when hyparquet-writer ships variant-encoder support, swap the
  * open-ended JSON columns to `variant`. Closed-shape arrays can move to
  * typed list<struct> via explicit schemas. Both are mechanical — only
@@ -111,24 +124,52 @@ const COLUMNS_BY_SIGNAL = {
 }
 
 /**
- * Get the column specs for a signal.
+ * `gateway_id` partition column. Prepended to every signal's column list
+ * when the writer is told partition data should land as columns (i.e.
+ * `partitionDimensions` contains `'gateway_id'`). Required (non-null) so
+ * downstream queries can rely on it always being present in v2 parquet.
+ *
+ * @type {ColumnSpec}
+ */
+const GATEWAY_ID_COLUMN = { name: 'gateway_id', type: 'STRING', nullable: false }
+
+/**
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @returns {boolean}
+ */
+function hasGatewayIdColumn(partitionDimensions) {
+  return Array.isArray(partitionDimensions) && partitionDimensions.includes('gateway_id')
+}
+
+/**
+ * Get the column specs for a signal. When `partitionDimensions` is supplied
+ * and includes `'gateway_id'`, the v2 schema is returned with `gateway_id`
+ * prepended; otherwise v1 (the original column list) is returned unchanged.
  *
  * @param {Signal} signal
+ * @param {ReadonlyArray<string>} [partitionDimensions]
  * @returns {ReadonlyArray<ColumnSpec>}
  */
-export function columnsForSignal(signal) {
-  return COLUMNS_BY_SIGNAL[signal]
+export function columnsForSignal(signal, partitionDimensions) {
+  const base = COLUMNS_BY_SIGNAL[signal]
+  if (hasGatewayIdColumn(partitionDimensions)) {
+    return [GATEWAY_ID_COLUMN, ...base]
+  }
+  return base
 }
 
 /**
  * Coerce an array of normalized JSONL rows into hyparquet-writer ColumnSource[].
+ * `partitionDimensions` controls the v1/v2 schema selection — see
+ * {@link columnsForSignal}.
  *
  * @param {Signal} signal
  * @param {ReadonlyArray<Record<string, unknown>>} rows
+ * @param {ReadonlyArray<string>} [partitionDimensions]
  * @returns {ColumnSource[]}
  */
-export function rowsToColumns(signal, rows) {
-  const columns = columnsForSignal(signal)
+export function rowsToColumns(signal, rows, partitionDimensions) {
+  const columns = columnsForSignal(signal, partitionDimensions)
   return columns.map((spec) => ({
     name: spec.name,
     type: spec.type,
@@ -139,13 +180,22 @@ export function rowsToColumns(signal, rows) {
 
 /**
  * Pull a column value out of a row. Handles the flattened scope_*
- * columns by looking inside the row's `scope` object.
+ * columns by looking inside the row's `scope` object, and the
+ * partition-derived `gateway_id` by reaching into `row._partition`
+ * (set by `readPartitionRows` in the directory walker — never read
+ * from the row body, so a row trying to spoof `gateway_id` in its
+ * payload is ignored).
  *
  * @param {string} name
  * @param {Record<string, unknown>} row
  * @returns {unknown}
  */
 function extractCell(name, row) {
+  if (name === 'gateway_id') {
+    const partition = row._partition
+    if (!partition || typeof partition !== 'object') return undefined
+    return /** @type {Record<string, unknown>} */ (partition).gateway_id
+  }
   if (name === 'value') {
     return row.valueType === 'int' ? undefined : row.value
   }

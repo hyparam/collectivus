@@ -642,8 +642,15 @@ describe('CLI lifecycle wiring', () => {
 
   it('role: gateway does NOT start the control-plane listener', async () => {
     // Gateway needs at least one bound listener (otel/proxy) — A.4 wires the
-    // gateway-side bootstrap client. For now, pair with otel so the lifecycle
-    // has something to keep alive while we assert the control plane is absent.
+    // gateway-side bootstrap client. Pre-seed a healthy persisted identity so
+    // `acquire()` takes the offline `loaded` path and the test never hits the
+    // network; we just want to verify the control-plane is NOT bound here.
+    const persistedPath = path.join(tmpDir, 'identity.json')
+    fs.writeFileSync(persistedPath, JSON.stringify({
+      jwt: signJwt({ gatewayId: 'gw-test', ttlSeconds: 60 * 24 * 60 * 60, secret: PLACEHOLDER_SECRET }),
+      expires_at: Math.floor(Date.now() / 1000) + 60 * 24 * 60 * 60,
+      gateway_id: 'gw-test',
+    }))
     const cfgPath = writeConfig({
       version: 1,
       role: 'gateway',
@@ -651,7 +658,7 @@ describe('CLI lifecycle wiring', () => {
       sink: { type: 'file', dir: path.join(tmpDir, 'data') },
       central_server: {
         url: 'http://127.0.0.1:1',
-        identity: { bootstrap_token: 'placeholder-bootstrap-token' },
+        identity: { bootstrap_token: 'unused', persisted_path: persistedPath },
       },
     })
     const stdout = memo()
@@ -666,6 +673,122 @@ describe('CLI lifecycle wiring', () => {
     trigger('SIGTERM')
     expect(await result).toBe(0)
     expect(stdout.value()).not.toMatch(/Control-plane listener bound/)
+    expect(stdout.value()).toMatch(/Identity loaded for gw-test/)
+  })
+
+  it('role: gateway bootstraps against a live control-plane on first start', async () => {
+    // End-to-end: spin up a real server-mode control plane on an ephemeral
+    // port, register a bootstrap token in its store, then start a gateway
+    // pointed at it. The gateway must exchange the token, persist a JWT, and
+    // continue past identity acquisition into normal lifecycle.
+    const storePath = path.join(tmpDir, 'bootstrap.json')
+    const store = new BootstrapStore({ path: storePath })
+    const { token } = store.register({ gatewayId: 'gw-cli', ttlSeconds: 60 })
+    const plane = new ControlPlane(
+      {
+        control_plane_listen: '127.0.0.1:0',
+        identity_issuer: { secret: PLACEHOLDER_SECRET, bootstrap_store_path: storePath },
+      },
+      { bootstrapStore: store }
+    )
+    await plane.start()
+    try {
+      const addr = plane.server?.address()
+      if (!addr || typeof addr === 'string') throw new Error('no address')
+      const persistedPath = path.join(tmpDir, 'identity.json')
+      const cfgPath = writeConfig({
+        version: 1,
+        role: 'gateway',
+        otel: { listen: '127.0.0.1:0' },
+        sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+        central_server: {
+          url: `http://127.0.0.1:${addr.port}`,
+          identity: { bootstrap_token: token, persisted_path: persistedPath },
+        },
+      })
+      const stdout = memo()
+      const stderr = memo()
+      /** @type {(signal: string) => void} */
+      let trigger = noop
+      const result = run(['--config', cfgPath], {}, {
+        stdout, stderr,
+        onShutdownRequested: (handler) => { trigger = handler },
+      })
+      await waitFor(() => stdout.value().includes('OTLP listener bound'))
+      trigger('SIGTERM')
+      expect(await result).toBe(0)
+      expect(stdout.value()).toMatch(/Identity bootstrapped for gw-cli/)
+      // The persisted file should now exist with mode 0600.
+      const stat = fs.statSync(persistedPath)
+      expect(stat.mode & 0o777).toBe(0o600)
+      const persisted = JSON.parse(fs.readFileSync(persistedPath, 'utf8'))
+      expect(persisted.gateway_id).toBe('gw-cli')
+      // Replaying the same token now must fail (it was consumed).
+      const replay = await fetch(`http://127.0.0.1:${addr.port}/v1/identity/bootstrap`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ bootstrap_token: token }),
+      })
+      expect(replay.status).toBe(401)
+    } finally {
+      await plane.stop()
+    }
+  })
+
+  it('role: gateway exits 1 with a clear error when the central server is unreachable', async () => {
+    // No persisted file + unreachable central server -> "failed to reach
+    // central server <url>: <err>" on stderr, exit 1, no listener bound.
+    const persistedPath = path.join(tmpDir, 'identity.json')
+    const cfgPath = writeConfig({
+      version: 1,
+      role: 'gateway',
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+      central_server: {
+        // Port 1 is reserved + closed — connecting fails fast.
+        url: 'http://127.0.0.1:1',
+        identity: { bootstrap_token: 'tok', persisted_path: persistedPath },
+      },
+    })
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run(['--config', cfgPath], {}, { stdout, stderr })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/error: failed to reach central server http:\/\/127\.0\.0\.1:1/)
+    expect(stdout.value()).not.toMatch(/OTLP listener bound/)
+    expect(fs.existsSync(persistedPath)).toBe(false)
+  })
+
+  it('role: gateway exits 1 when the central server rejects the bootstrap token', async () => {
+    // Server is up but has no bootstrap store provisioned -> 503.
+    const plane = new ControlPlane({
+      control_plane_listen: '127.0.0.1:0',
+      identity_issuer: { secret: PLACEHOLDER_SECRET },
+    })
+    await plane.start()
+    try {
+      const addr = plane.server?.address()
+      if (!addr || typeof addr === 'string') throw new Error('no address')
+      const persistedPath = path.join(tmpDir, 'identity.json')
+      const cfgPath = writeConfig({
+        version: 1,
+        role: 'gateway',
+        otel: { listen: '127.0.0.1:0' },
+        sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+        central_server: {
+          url: `http://127.0.0.1:${addr.port}`,
+          identity: { bootstrap_token: 'whatever', persisted_path: persistedPath },
+        },
+      })
+      const stdout = memo()
+      const stderr = memo()
+      const code = await run(['--config', cfgPath], {}, { stdout, stderr })
+      expect(code).toBe(1)
+      expect(stderr.value()).toMatch(/error: identity bootstrap failed: 503 bootstrap not provisioned/)
+      expect(fs.existsSync(persistedPath)).toBe(false)
+    } finally {
+      await plane.stop()
+    }
   })
 
   it('drains the control plane via stopAll within DRAIN_TIMEOUT_MS', async () => {

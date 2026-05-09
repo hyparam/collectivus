@@ -2,6 +2,7 @@ import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfig } from './config.js'
+import { IdentityClient } from './gateway/identity.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { ControlPlane } from './server/control_plane.js'
@@ -156,15 +157,50 @@ export async function run(argv, env, hooks = {}) {
     return 1
   }
 
-  return runLifecycle(buildConfigListeners(config, { env, stderr }), stdout, stderr, onShutdownRequested)
+  // role: gateway must hold a valid JWT before any listener binds. Acquire
+  // here (eager, before runLifecycle) so a bad bootstrap token or unreachable
+  // central server fails with a clean stderr line and exit 1, without ever
+  // opening a port. The IdentityClient is then handed to buildConfigListeners
+  // for future epics (B config vending, C log shipping) to consume.
+  /** @type {IdentityClient | undefined} */
+  let identityClient
+  if (config.role === 'gateway') {
+    if (!config.central_server) {
+      stderr.write('config error: role: gateway requires a central_server block (validator should have caught this).\n')
+      return 1
+    }
+    identityClient = new IdentityClient(config.central_server)
+    try {
+      const source = await identityClient.acquire()
+      const id = identityClient.identity
+      stdout.write(`Identity ${source} for ${id ? id.gateway_id : 'gateway'}\n`)
+    } catch (err) {
+      stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+  }
+
+  return runLifecycle(
+    buildConfigListeners(config, { env, stderr, identityClient }),
+    stdout,
+    stderr,
+    onShutdownRequested
+  )
 }
 
 /**
  * @param {CollectivusConfig} config
- * @param {{ env?: NodeJS.ProcessEnv, stderr: { write: (s: string) => void } }} ctx
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   stderr: { write: (s: string) => void },
+ *   identityClient?: IdentityClient,
+ * }} ctx
  *   `env` is forwarded to the uploader so its connector reads creds from the
  *   same env we pre-flighted in `run()`. `stderr` is consumed by the
- *   self-update factory for warning output.
+ *   self-update factory for warning output. `identityClient` is set when
+ *   `config.role === 'gateway'` and `run()` has already acquired the JWT;
+ *   future epics (B config vending, C log shipping) will read this off `ctx`
+ *   to authenticate to the central server.
  * @returns {ListenerFactory[]}
  */
 function buildConfigListeners(config, ctx) {

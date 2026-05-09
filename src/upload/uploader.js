@@ -188,7 +188,7 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
     return { uploaded: false, key, rows: 0, size: 0 }
   }
 
-  const parquet = await rowsToParquet(job.signal, rows)
+  const parquet = await rowsToParquet(job.signal, rows, options.partitionDimensions)
   await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
 
   const entry = {

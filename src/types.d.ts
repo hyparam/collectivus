@@ -241,6 +241,27 @@ export interface CentralServerConfig {
   url: string
   /** Identity material used by the gateway to authenticate. */
   identity: CentralServerIdentityConfig
+  /**
+   * Background config-pull interval in seconds. Default 30. Validator
+   * constrains to [5, 3600]: the floor is the minimum useful resolution for
+   * "hot reload" semantics; the ceiling keeps a misconfigured gateway from
+   * drifting hours behind a config change.
+   */
+  poll_interval_seconds?: number
+}
+
+/**
+ * Emitted by `ConfigClient` whenever a `GET /v1/config` returns 200 with a
+ * config that passes gateway-side validation. B.4's hot-reload code subscribes
+ * to this and diffs `newConfig` against the running config.
+ */
+export interface ConfigChangedEvent {
+  /** The newly fetched config — already validated. */
+  newConfig: CollectivusConfig
+  /** SHA-256 hex of the canonical JSON serialization of `newConfig`. */
+  etag: string
+  /** ISO-8601 timestamp of the moment the gateway accepted the config. */
+  fetchedAt: string
 }
 
 export interface CollectivusConfig {

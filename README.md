@@ -1,5 +1,7 @@
 # Collectivus
 
+![collectivus](collectivus.jpg)
+
 [![npm](https://img.shields.io/npm/v/collectivus)](https://www.npmjs.com/package/collectivus)
 [![minzipped](https://img.shields.io/bundlephobia/minzip/collectivus)](https://www.npmjs.com/package/collectivus)
 [![workflow status](https://github.com/hyparam/collectivus/actions/workflows/ci.yml/badge.svg)](https://github.com/hyparam/collectivus/actions)
@@ -52,7 +54,7 @@ Full step-by-step: [`docs/walkthrough-claude-code.md`](docs/walkthrough-claude-c
 
 ## Configuration
 
-Pass a JSON config with `--config <path>`. The schema:
+Pass a JSON config with `--config <path>` (a local path or url). The schema:
 
 ```json
 {
@@ -461,45 +463,3 @@ collectivus uninstall --detach --client all      # remove daemon AND un-route bo
 ```
 
 All revert paths are idempotent and tolerate already-reverted state.
-
-### What gets written to `~/.claude/settings.json`
-
-`attach` (and `install --yes`) edit settings.json to add two keys:
-
-```jsonc
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
-  },
-  "_collectivus": {
-    "attached_at": "2026-05-07T16:30:00.000Z",
-    "version": "1.1.0",
-    "port": 8787
-  }
-}
-```
-
-The `_collectivus` marker records what we wrote so `detach` can revert
-cleanly. `detach` removes both keys, **but only when** `ANTHROPIC_BASE_URL`
-still matches the recorded port — a manually overridden value is left in
-place with a warning. All other keys in settings.json are preserved.
-
-The file is written atomically (temp file + rename) so a crash mid-write
-leaves the previous file intact, and `attach` refuses to overwrite a file
-that changed on disk between read and write.
-
-`settings.json` containing JSONC-style comments is rejected rather than
-silently rewritten as plain JSON.
-
-### What gets written to `~/.codex/config.toml`
-
-`collectivus attach --client codex` edits `config.toml` with marked TOML
-blocks for the root `model_provider` and the `model_providers.collectivus`
-table. Existing root settings and unrelated tables are preserved. If a
-previous root `model_provider` existed, collectivus records it in a comment
-so repeated attaches preserve that prior value.
-
-When using `--config`, the command refuses to attach Codex unless the loaded
-proxy config has a route that matches `/v1/responses`; for OpenAI this means
-`match.path_prefix` should usually be `/v1` and `base_url` should be
-`https://api.openai.com`.

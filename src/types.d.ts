@@ -268,16 +268,57 @@ export interface ReadSettingsResult {
   mtimeMs: number | undefined
 }
 
+// ---------- Codex settings ----------
+
+export interface CodexAttachOptions {
+  /** TCP port (1..65535) the local proxy listens on. */
+  port: number
+  /** Non-empty version string recorded in managed comments. */
+  version: string
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
+export interface CodexAttachResult {
+  /** Always true; attach always (re)writes the managed config. */
+  changed: true
+  /** Previous root `model_provider`, if one existed before collectivus attached. */
+  prevValue?: string
+}
+
+export interface CodexDetachOptions {
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
+export interface CodexDetachResult {
+  /** True if the file was modified, false when no managed block was present. */
+  changed: boolean
+  /** The managed provider base_url that was removed. */
+  removed?: string
+  /** Previous root `model_provider` restored from the managed marker, if any. */
+  restoredValue?: string
+  /** Set when a user-edited root model_provider was left in place. */
+  warning?: string
+}
+
+export interface CodexIsAttachedOptions {
+  /** Override the config.toml path (default: `~/.codex/config.toml`). */
+  configPath?: string
+}
+
 // ---------- CLI subcommand parse results / hooks ----------
 
 export interface AttachParseResult {
   configPath?: string
   port?: number
+  client?: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
 
 export interface DetachParseResult {
+  client: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -297,6 +338,7 @@ export interface InstallParseResult {
 
 export interface UninstallParseResult {
   detach: boolean
+  client: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -309,16 +351,28 @@ export interface AttachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
   version?: string
+  /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for attachClaude. */
   attach?: (opts: AttachOptions) => Promise<AttachResult>
+  attachClaude?: (opts: AttachOptions) => Promise<AttachResult>
+  attachCodex?: (opts: CodexAttachOptions) => Promise<CodexAttachResult>
   loadConfig?: (path: string) => CollectivusConfig
 }
 
 export interface DetachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
+  /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for detachClaude. */
   detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
 }
 
 export interface StatusHooks {
@@ -395,11 +449,19 @@ export interface UninstallHooks {
   plistDir?: string
   /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
   isTTY?: boolean
   prompt?: (question: string) => Promise<string>
   uninstallLaunchAgent?: (opts: DaemonUninstallOptions) => Promise<void>
+  /** Back-compat alias for detachClaude. */
   detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
+  /** Back-compat alias for isClaudeAttached. */
   isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isClaudeAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isCodexAttached?: (opts?: CodexIsAttachedOptions) => Promise<boolean>
 }
 
 export interface InstalledPlistFields {

@@ -6,10 +6,10 @@
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
 [![dependencies](https://img.shields.io/badge/Dependencies-0-blueviolet)](https://www.npmjs.com/package/collectivus?activeTab=dependencies)
 
-Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two listeners in one process record everything to local JSONL: an OpenTelemetry receiver that normalizes traces, metrics, and logs by signal and service, and a transparent reverse proxy for the Anthropic Messages API that captures every request and SSE event. Pick one or run both.
+Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two listeners in one process record everything to local JSONL: an OpenTelemetry receiver that normalizes traces, metrics, and logs by signal and service, and a transparent reverse proxy for LLM APIs that captures every request and SSE event. Pick one or run both.
 
 - **OTLP receiver**: traces, metrics, and logs over HTTP, normalized to JSONL
-- **LLM proxy**: transparent pass-through for Anthropic Messages, full request/response capture
+- **LLM proxy**: transparent pass-through for Anthropic Messages and OpenAI-compatible APIs, full request/response capture
 - **Zero dependencies**: Node built-ins only, single binary, instant startup
 
 ## Installation
@@ -246,6 +246,54 @@ Bodies are never auto-redacted: full visibility is the intended behavior.
 Pass-through. The client's `x-api-key` is forwarded to upstream verbatim;
 collectivus does not hold a credential.
 
+### Codex
+
+Codex can route through the same proxy by configuring a Codex model provider.
+Use an OpenAI upstream whose path prefix matches `/v1/responses`:
+
+```json
+{
+  "version": 1,
+  "proxy": {
+    "listen": "127.0.0.1:8787",
+    "upstreams": [
+      {
+        "name": "openai",
+        "base_url": "https://api.openai.com",
+        "match": { "path_prefix": "/v1" }
+      }
+    ]
+  },
+  "sink": { "type": "file", "dir": "./collectivus-data" }
+}
+```
+
+Attach or detach Codex explicitly:
+
+```bash
+collectivus attach --config collectivus.json --client codex
+collectivus detach --client codex
+```
+
+This writes a managed provider to `~/.codex/config.toml` using Codex's
+documented `model_provider` / `model_providers.<id>` configuration format:
+
+```toml
+model_provider = "collectivus"
+
+[model_providers.collectivus]
+name = "Collectivus OpenAI Proxy"
+base_url = "http://127.0.0.1:8787/v1"
+requires_openai_auth = true
+wire_api = "responses"
+supports_websockets = false
+```
+
+`supports_websockets = false` keeps Codex on HTTP/SSE requests, which is the
+proxy path collectivus records today. See OpenAI's Codex docs for the
+underlying [configuration file](https://developers.openai.com/codex/config-basic#codex-configuration-file)
+and [provider fields](https://developers.openai.com/codex/config-reference#model_providers).
+
 ## CLI
 
 ```text
@@ -368,9 +416,9 @@ the binary into a per-invocation cache that is not stable across runs.
 | Command | Purpose |
 |---------|---------|
 | `collectivus install --config <path> [--yes\|--no]` | Install LaunchAgent and (optionally) attach Claude Code |
-| `collectivus uninstall [--detach]` | Stop and remove the LaunchAgent; pass `--detach` to also revert Claude Code |
-| `collectivus attach (--config <path> \| --port <n>)` | Route Claude Code through the proxy without touching the daemon |
-| `collectivus detach` | Revert Claude Code without uninstalling the daemon |
+| `collectivus uninstall [--detach] [--client claude\|codex\|all]` | Stop and remove the LaunchAgent; pass `--detach` to also revert selected clients |
+| `collectivus attach (--config <path> \| --port <n>) [--client claude\|codex\|all]` | Route Claude Code and/or Codex through the proxy without touching the daemon |
+| `collectivus detach [--client claude\|codex\|all]` | Revert Claude Code and/or Codex without uninstalling the daemon |
 | `collectivus status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `collectivus export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 
@@ -405,9 +453,11 @@ collectivus status
 ### Reverting
 
 ```bash
-collectivus detach                 # un-route Claude Code, leave daemon running
-collectivus uninstall              # prompt to detach if attached
-collectivus uninstall --detach     # remove daemon AND un-route Claude Code
+collectivus detach                               # un-route Claude Code, leave daemon running
+collectivus detach --client codex                # un-route Codex
+collectivus detach --client all                  # un-route Claude Code and Codex
+collectivus uninstall                            # prompt to detach Claude Code if attached
+collectivus uninstall --detach --client all      # remove daemon AND un-route both clients
 ```
 
 All revert paths are idempotent and tolerate already-reverted state.
@@ -440,3 +490,16 @@ that changed on disk between read and write.
 
 `settings.json` containing JSONC-style comments is rejected rather than
 silently rewritten as plain JSON.
+
+### What gets written to `~/.codex/config.toml`
+
+`collectivus attach --client codex` edits `config.toml` with marked TOML
+blocks for the root `model_provider` and the `model_providers.collectivus`
+table. Existing root settings and unrelated tables are preserved. If a
+previous root `model_provider` existed, collectivus records it in a comment
+so repeated attaches preserve that prior value.
+
+When using `--config`, the command refuses to attach Codex unless the loaded
+proxy config has a route that matches `/v1/responses`; for OpenAI this means
+`match.path_prefix` should usually be `/v1` and `base_url` should be
+`https://api.openai.com`.

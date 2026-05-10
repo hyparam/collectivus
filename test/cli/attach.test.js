@@ -46,8 +46,21 @@ describe('parseAttachArgs', function() {
 
   it('parses --port <n>', function() {
     expect(parseAttachArgs(['--port', '8787'])).toMatchObject({
-      port: 8787,
+      port: 8787, client: 'claude',
     })
+  })
+
+  it('parses --client <name>', function() {
+    expect(parseAttachArgs(['--port', '8787', '--client', 'codex'])).toMatchObject({
+      port: 8787, client: 'codex',
+    })
+    expect(parseAttachArgs(['--port=8787', '--client=all'])).toMatchObject({
+      port: 8787, client: 'all',
+    })
+  })
+
+  it('rejects unknown --client values', function() {
+    expect(parseAttachArgs(['--port', '8787', '--client', 'zed']).error).toMatch(/expected claude, codex, or all/)
   })
 
   it('rejects out-of-range --port', function() {
@@ -103,6 +116,77 @@ describe('runAttach', function() {
     expect(stdout.value()).toMatch(/ANTHROPIC_BASE_URL = http:\/\/127\.0\.0\.1:9090/)
   })
 
+  it('--client codex: attaches Codex with given port', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    /** @type {object[]} */
+    const claudeCalls = []
+    /** @type {object[]} */
+    const codexCalls = []
+    const code = await runAttach(['--port', '9090', '--client', 'codex'], {
+      stdout, stderr,
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'codex.toml'),
+      attachClaude(o) { claudeCalls.push(o); return Promise.resolve({ changed: true }) },
+      attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true }) },
+    })
+    expect(code).toBe(0)
+    expect(claudeCalls).toEqual([])
+    expect(codexCalls).toEqual([{
+      port: 9090, version: '2.0.0', configPath: path.join(tmpDir, 'codex.toml'),
+    }])
+    expect(stdout.value()).toMatch(/Codex attached/)
+    expect(stdout.value()).toMatch(/base_url = http:\/\/127\.0\.0\.1:9090\/v1/)
+  })
+
+  it('--client codex: uses CODEX_HOME for the default Codex config path', async function() {
+    const originalCodexHome = process.env.CODEX_HOME
+    const codexHome = path.join(tmpDir, 'codex-home')
+    /** @type {object[]} */
+    const codexCalls = []
+    process.env.CODEX_HOME = codexHome
+    try {
+      const code = await runAttach(['--port', '9090', '--client', 'codex'], {
+        stdout: memo(), stderr: memo(),
+        version: '2.0.0',
+        attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true }) },
+      })
+      expect(code).toBe(0)
+      expect(codexCalls).toEqual([{
+        port: 9090, version: '2.0.0', configPath: path.join(codexHome, 'config.toml'),
+      }])
+    } finally {
+      if (originalCodexHome === undefined) {
+        delete process.env.CODEX_HOME
+      } else {
+        process.env.CODEX_HOME = originalCodexHome
+      }
+    }
+  })
+
+  it('--client all: attaches Claude Code and Codex', async function() {
+    const stdout = memo()
+    /** @type {object[]} */
+    const claudeCalls = []
+    /** @type {object[]} */
+    const codexCalls = []
+    const code = await runAttach(['--port', '8787', '--client', 'all'], {
+      stdout, stderr: memo(),
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'codex.toml'),
+      attachClaude(o) { claudeCalls.push(o); return Promise.resolve({ changed: true }) },
+      attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true, prevValue: 'openai' }) },
+    })
+    expect(code).toBe(0)
+    expect(claudeCalls).toHaveLength(1)
+    expect(codexCalls).toHaveLength(1)
+    expect(stdout.value()).toMatch(/Claude Code attached/)
+    expect(stdout.value()).toMatch(/Codex attached/)
+    expect(stdout.value()).toMatch(/previous model_provider was openai/)
+  })
+
   it('--config: derives port from proxy.listen', async function() {
     const stdout = memo()
     const stderr = memo()
@@ -119,6 +203,73 @@ describe('runAttach', function() {
     })
     expect(code).toBe(0)
     expect(calls[0].port).toBe(8765)
+  })
+
+  it('--client codex with --config: requires a /v1/responses route', async function() {
+    const stderr = memo()
+    /** @type {CollectivusConfig} */
+    const cfg = {
+      version: 1,
+      proxy: {
+        listen: '0.0.0.0:8765',
+        upstreams: [{ name: 'anthropic', base_url: 'https://api.anthropic.com', match: { path_prefix: '/v1/messages' } }],
+      },
+    }
+    const code = await runAttach(['--config', '/tmp/x', '--client', 'codex'], {
+      stdout: memo(), stderr,
+      loadConfig() { return cfg },
+      attachCodex() { return Promise.resolve({ changed: true }) },
+    })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/routes \/v1\/responses/)
+  })
+
+  it('--client codex with --config: accepts a matching /v1 route', async function() {
+    /** @type {CollectivusConfig} */
+    const cfg = {
+      version: 1,
+      proxy: {
+        listen: '0.0.0.0:8765',
+        upstreams: [{ name: 'openai', base_url: 'https://api.openai.com', match: { path_prefix: '/v1' } }],
+      },
+    }
+    /** @type {object[]} */
+    const calls = []
+    const code = await runAttach(['--config', '/tmp/x', '--client', 'codex'], {
+      stdout: memo(), stderr: memo(),
+      version: '2.0.0',
+      codexConfigPath: path.join(tmpDir, 'codex.toml'),
+      loadConfig() { return cfg },
+      attachCodex(o) { calls.push(o); return Promise.resolve({ changed: true }) },
+    })
+    expect(code).toBe(0)
+    expect(calls).toEqual([{
+      port: 8765, version: '2.0.0', configPath: path.join(tmpDir, 'codex.toml'),
+    }])
+  })
+
+  it('--client codex with --config: rejects prefixes the proxy would not match', async function() {
+    for (const prefix of ['/v1/', '/v1/res']) {
+      const stderr = memo()
+      /** @type {CollectivusConfig} */
+      const cfg = {
+        version: 1,
+        proxy: {
+          listen: '0.0.0.0:8765',
+          upstreams: [{ name: 'openai', base_url: 'https://api.openai.com', match: { path_prefix: prefix } }],
+        },
+      }
+      /** @type {object[]} */
+      const codexCalls = []
+      const code = await runAttach(['--config', '/tmp/x', '--client', 'codex'], {
+        stdout: memo(), stderr,
+        loadConfig() { return cfg },
+        attachCodex(o) { codexCalls.push(o); return Promise.resolve({ changed: true }) },
+      })
+      expect(code).toBe(1)
+      expect(stderr.value()).toMatch(/routes \/v1\/responses/)
+      expect(codexCalls).toEqual([])
+    }
   })
 
   it('--config: surfaces ConfigError as code 1', async function() {
@@ -167,5 +318,15 @@ describe('runAttach', function() {
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/failed to attach Claude Code.*settings malformed/)
+  })
+
+  it('exits 1 when Codex attach throws', async function() {
+    const stderr = memo()
+    const code = await runAttach(['--port', '8787', '--client', 'codex'], {
+      stdout: memo(), stderr,
+      attachCodex() { return Promise.reject(new Error('config.toml malformed')) },
+    })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/failed to attach Codex.*config\.toml malformed/)
   })
 })

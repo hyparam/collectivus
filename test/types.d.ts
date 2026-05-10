@@ -67,15 +67,19 @@ export interface UninstallCall {
 }
 
 export interface DetachCall {
-  settingsPath: string
+  settingsPath?: string
+  configPath?: string
 }
 
 export interface UninstallMocks {
   uninstallCalls: UninstallCall[]
   detachCalls: DetachCall[]
+  codexDetachCalls: DetachCall[]
   uninstallLaunchAgent(opts: any): Promise<void>
   detach(opts: any): Promise<{ changed: boolean, removed?: string, warning?: string }>
+  detachCodex(opts: any): Promise<{ changed: boolean, removed?: string, restoredValue?: string, warning?: string }>
   isAttached(opts: any): Promise<boolean>
+  isCodexAttached(opts: any): Promise<boolean>
 }
 
 // ---------- daemon/macos.test.js ----------

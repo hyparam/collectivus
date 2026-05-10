@@ -337,8 +337,6 @@ export interface InstallParseResult {
 }
 
 export interface UninstallParseResult {
-  detach: boolean
-  client: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -451,8 +449,6 @@ export interface UninstallHooks {
   settingsPath?: string
   /** Override for `~/.codex/config.toml`. */
   codexConfigPath?: string
-  isTTY?: boolean
-  prompt?: (question: string) => Promise<string>
   uninstallLaunchAgent?: (opts: DaemonUninstallOptions) => Promise<void>
   /** Back-compat alias for detachClaude. */
   detach?: (opts?: DetachOptions) => Promise<DetachResult>

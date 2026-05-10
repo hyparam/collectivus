@@ -418,7 +418,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | Command | Purpose |
 |---------|---------|
 | `collectivus install --config <path> [--yes\|--no]` | Install LaunchAgent and (optionally) attach Claude Code |
-| `collectivus uninstall [--detach] [--client claude\|codex\|all]` | Stop and remove the LaunchAgent; pass `--detach` to also revert selected clients |
+| `collectivus uninstall` | Stop and remove the LaunchAgent; revert any attached clients (Claude Code, Codex) |
 | `collectivus attach (--config <path> \| --port <n>) [--client claude\|codex\|all]` | Route Claude Code and/or Codex through the proxy without touching the daemon |
 | `collectivus detach [--client claude\|codex\|all]` | Revert Claude Code and/or Codex without uninstalling the daemon |
 | `collectivus status` | Print daemon (loaded / PID) and Claude Code (attached) state |
@@ -455,11 +455,8 @@ collectivus status
 ### Reverting
 
 ```bash
-collectivus detach                               # un-route Claude Code, leave daemon running
-collectivus detach --client codex                # un-route Codex
-collectivus detach --client all                  # un-route Claude Code and Codex
-collectivus uninstall                            # prompt to detach Claude Code if attached
-collectivus uninstall --detach --client all      # remove daemon AND un-route both clients
+collectivus detach [--client claude|codex|all]   # un-route, leave daemon running
+collectivus uninstall                            # remove daemon and revert attached clients
 ```
 
 All revert paths are idempotent and tolerate already-reverted state.

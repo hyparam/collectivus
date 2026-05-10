@@ -23,8 +23,7 @@ const USAGE = `Usage:
 
 Commands:
   collectivus install [--config <path|url>]    Install the background daemon
-  collectivus uninstall [--detach] [--client claude|codex|all]
-                                               Remove the daemon (and detach selected clients)
+  collectivus uninstall                        Remove the daemon and detach attached clients
   collectivus attach [--config <path|url>] [--port <n>] [--client claude|codex|all]
                                                Point Claude Code or Codex at the local proxy
   collectivus detach [--client claude|codex|all]

@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
+import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttachClaude, defaultSettingsPath } from '../claude-code/settings.js'
 import { attach as defaultAttachCodex, defaultConfigPath as defaultCodexConfigPath } from '../codex/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
@@ -10,13 +10,13 @@ import { pathMatchesPrefix } from '../proxy.js'
  */
 
 const USAGE = `Usage:
-  collectivus attach (--config <path> | --port <n>) [--client claude|codex|all]
+  collectivus attach (--config <path|url> | --port <n>) [--client claude|codex|all]
 
 Options:
-  --config <path>   Read the proxy port from this collectivus config
-  --port <n>        Use this port directly
-  --client <name>   Tool to configure: claude, codex, or all (default: claude)
-  --help, -h        Show this help
+  --config <path|url>  Read the proxy port from this collectivus config (path or http(s) URL)
+  --port <n>           Use this port directly
+  --client <name>      Tool to configure: claude, codex, or all (default: claude)
+  --help, -h           Show this help
 
 Edits Claude Code and/or Codex configuration to point at the local proxy.
 Exactly one of --config or --port is required.`
@@ -110,7 +110,7 @@ export async function runAttach(argv, hooks = {}) {
     port = parsed.port
   } else if (parsed.configPath !== undefined) {
     try {
-      config = loadConfigFn(parsed.configPath)
+      config = await loadConfigFn(parsed.configPath)
     } catch (err) {
       if (err instanceof ConfigError) {
         stderr.write(`config error: ${err.message}\n`)

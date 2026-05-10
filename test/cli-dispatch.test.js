@@ -69,6 +69,6 @@ describe('bin/cli.js — subcommand dispatch', function() {
     const r = await runCli(['--help'])
     expect(r.exitCode).toBe(0)
     // Top-level USAGE wording, not a subcommand-specific Usage.
-    expect(r.stdout).toMatch(/--config <path>\s+Run with config file/)
+    expect(r.stdout).toMatch(/--config <path\|url>\s+Run with config file/)
   })
 })

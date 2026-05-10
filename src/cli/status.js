@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
+import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { isAttached as defaultIsAttached, defaultSettingsPath } from '../claude-code/settings.js'
 import {
   LAUNCH_AGENT_LABEL,
@@ -135,7 +135,7 @@ export async function runStatus(argv, hooks = {}) {
   /** @type {CollectivusConfig | undefined} */
   let config
   try {
-    config = loadConfigFn(configPath)
+    config = await loadConfigFn(configPath)
     stdout.write('  Status: valid\n')
   } catch (err) {
     if (err instanceof ConfigError && /not found/.test(err.message)) {

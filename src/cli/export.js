@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
+import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { rowsToParquet } from '../upload/parquet.js'
 import { readJsonlRows } from '../upload/reader.js'
 import { proxyRowsToParquet } from './proxy-parquet.js'
@@ -12,7 +12,7 @@ import { proxyRowsToParquet } from './proxy-parquet.js'
  */
 
 const USAGE = `Usage:
-  collectivus export --config <path> [--out <dir>] [--date <YYYY-MM-DD>] [--service <name>] [--signal <s>]
+  collectivus export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--service <name>] [--signal <s>]
 
 Convert recorded JSONL under the configured sink dir into local Parquet files.
 Runs once and exits — does not invoke the daily upload pipeline.
@@ -23,7 +23,7 @@ Drains both:
   - services/<svc>/<signal>-<date>.jsonl → <out>/<svc>/<signal>/date=<date>/data.parquet
 
 Options:
-  --config <path>     Path to the collectivus JSON config (required)
+  --config <path|url> Path or http(s) URL to the collectivus JSON config (required)
   --out <dir>         Output directory (default: <sink.dir>/parquet)
   --date <date>       Only export this UTC date (YYYY-MM-DD; default: all). OTLP only.
   --service <name>    Only export this service (default: all). OTLP only.
@@ -122,7 +122,7 @@ export async function runExport(argv, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfigFn(parsed.configPath)
+    config = await loadConfigFn(parsed.configPath)
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)

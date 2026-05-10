@@ -30,6 +30,17 @@ const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 
 /**
+ * Returns true when `value` is a `http://` or `https://` URL that
+ * `loadConfigAsync` should fetch instead of reading from disk.
+ *
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function isConfigUrl(value) {
+  return /^https?:\/\//i.test(value)
+}
+
+/**
  * Load and validate a collectivus JSON config file.
  *
  * @param {string} configPath - Absolute or relative path to a JSON config file.
@@ -52,13 +63,69 @@ export function loadConfig(configPath, opts = {}) {
     throw new ConfigError(`failed to read ${configPath}: ${msg}`)
   }
 
+  return parseConfig(raw, configPath, opts)
+}
+
+/**
+ * Load and validate a collectivus JSON config from either a local path or
+ * an `http(s)://` URL. URLs are fetched with `globalThis.fetch`; non-URL
+ * values fall through to the sync `loadConfig` reader.
+ *
+ * @param {string} pathOrUrl
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void }, fetch?: typeof fetch }} [opts]
+ * @returns {Promise<CollectivusConfig>}
+ * @throws {ConfigError} when the source is unreachable, the body is not JSON, or the schema check fails.
+ */
+export async function loadConfigAsync(pathOrUrl, opts = {}) {
+  if (!isConfigUrl(pathOrUrl)) return loadConfig(pathOrUrl, opts)
+
+  const fetchFn = opts.fetch ?? globalThis.fetch
+  if (typeof fetchFn !== 'function') {
+    throw new ConfigError(`fetch is not available; cannot load config from ${pathOrUrl}`)
+  }
+
+  let response
+  try {
+    response = await fetchFn(pathOrUrl)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new ConfigError(`failed to fetch ${pathOrUrl}: ${msg}`)
+  }
+
+  if (!response.ok) {
+    throw new ConfigError(
+      `failed to fetch ${pathOrUrl}: HTTP ${response.status} ${response.statusText}`
+    )
+  }
+
+  let raw
+  try {
+    raw = await response.text()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new ConfigError(`failed to read response body from ${pathOrUrl}: ${msg}`)
+  }
+
+  return parseConfig(raw, pathOrUrl, opts)
+}
+
+/**
+ * Parse a raw JSON config string and run schema validation. The `source`
+ * argument is only used to render error locations.
+ *
+ * @param {string} raw
+ * @param {string} source
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void } }} [opts]
+ * @returns {CollectivusConfig}
+ */
+export function parseConfig(raw, source, opts = {}) {
   let parsed
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const location = jsonErrorLocation(raw, msg)
-    throw new ConfigError(`invalid JSON in ${configPath}${location}: ${msg}`)
+    throw new ConfigError(`invalid JSON in ${source}${location}: ${msg}`)
   }
 
   validateConfig(parsed, {

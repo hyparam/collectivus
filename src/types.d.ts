@@ -187,7 +187,7 @@ export interface ExportParseResult {
 export interface ExportHooks {
   stdout?: { write(chunk: string): unknown }
   stderr?: { write(chunk: string): unknown }
-  loadConfig?: (path: string) => CollectivusConfig
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
 }
 
 export interface VersionResult {
@@ -359,7 +359,7 @@ export interface AttachHooks {
   attach?: (opts: AttachOptions) => Promise<AttachResult>
   attachClaude?: (opts: AttachOptions) => Promise<AttachResult>
   attachCodex?: (opts: CodexAttachOptions) => Promise<CodexAttachResult>
-  loadConfig?: (path: string) => CollectivusConfig
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
 }
 
 export interface DetachHooks {
@@ -390,7 +390,7 @@ export interface StatusHooks {
   /** Override for raw read of settings.json (returns undefined on ENOENT). */
   readSettingsRaw?: (p: string) => Promise<string | undefined>
   /** Load and validate a config; throws on parse/validation errors. */
-  loadConfig?: (path: string) => CollectivusConfig
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
   /** Stat a file; resolve to undefined when missing. */
   statFile?: (p: string) => Promise<{ size: number, mtimeMs: number } | undefined>
   /** Count `*.jsonl` files under `dir` (recursive). Undefined when dir is missing. */
@@ -439,7 +439,7 @@ export interface InstallHooks {
   prompt?: (question: string) => Promise<string>
   installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>
   attach?: (opts: AttachOptions) => Promise<AttachResult>
-  loadConfig?: (path: string) => CollectivusConfig
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
 }
 
 export interface UninstallHooks {

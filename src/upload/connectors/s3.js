@@ -22,13 +22,14 @@ const EMPTY_SHA256 = crypto.createHash('sha256').update('').digest('hex')
 export function s3Connector(options) {
   return {
     scheme: 's3',
-    async putObject(key, body, contentType) {
+    async putObject(key, body, putOpts) {
       await s3Request({
         ...options,
         method: 'PUT',
         key,
         body,
-        contentType: contentType ?? 'application/octet-stream',
+        contentType: putOpts?.contentType ?? 'application/octet-stream',
+        ifNoneMatch: putOpts?.ifNoneMatch,
       })
     },
     async headObject(key) {
@@ -44,6 +45,46 @@ export function s3Connector(options) {
       }
       throw s3Error(`s3 HEAD ${options.bucket}/${key} returned ${res.statusCode}`, res.statusCode)
     },
+    async getObject(key) {
+      const res = await s3Request({
+        ...options,
+        method: 'GET',
+        key,
+      })
+      if (res.statusCode === 404) return undefined
+      return new Uint8Array(res.body.buffer, res.body.byteOffset, res.body.byteLength)
+    },
+    async listObjects(prefix) {
+      /** @type {string[]} */
+      const keys = []
+      /** @type {string | undefined} */
+      let continuationToken
+      do {
+        /** @type {Record<string, string>} */
+        const query = { 'list-type': '2', prefix }
+        if (continuationToken) query['continuation-token'] = continuationToken
+        const res = await s3Request({
+          ...options,
+          method: 'GET',
+          key: '',
+          query,
+        })
+        if (res.statusCode === 404) {
+          throw s3Error(`s3 LIST ${options.bucket}/${prefix} returned 404`, 404)
+        }
+        const parsed = parseListBucketResult(res.body.toString('utf8'))
+        keys.push(...parsed.keys)
+        continuationToken = parsed.nextContinuationToken
+      } while (continuationToken)
+      return keys
+    },
+    async deleteObject(key) {
+      await s3Request({
+        ...options,
+        method: 'DELETE',
+        key,
+      })
+    },
   }
 }
 
@@ -56,7 +97,7 @@ export function s3Connector(options) {
  * @returns {Promise<{ statusCode: number, headers: IncomingHttpHeaders, body: Buffer }>}
  */
 async function s3Request(options) {
-  const { bucket, region, endpoint, method, key, body, contentType } = options
+  const { bucket, region, endpoint, method, key, query, body, contentType, ifNoneMatch } = options
   const { accessKeyId, secretAccessKey, sessionToken } = await resolveCredentials(options)
 
   const useEndpoint = endpoint && endpoint.length > 0
@@ -84,17 +125,19 @@ async function s3Request(options) {
     headers['Content-Length'] = String(body.byteLength)
     headers['Content-Type'] = contentType ?? 'application/octet-stream'
   }
+  if (ifNoneMatch) headers['If-None-Match'] = ifNoneMatch
 
   const signedHeaderNames = Object.keys(headers).map((h) => h.toLowerCase()).sort()
   const canonicalHeaders = signedHeaderNames
     .map((h) => `${h}:${headers[headerKey(headers, h)].trim()}\n`)
     .join('')
   const signedHeaders = signedHeaderNames.join(';')
+  const canonicalQuery = canonicalQueryString(query)
 
   const canonicalRequest = [
     method,
     requestPath,
-    '',
+    canonicalQuery,
     canonicalHeaders,
     signedHeaders,
     payloadHash,
@@ -119,7 +162,7 @@ async function s3Request(options) {
     method,
     host: base.hostname,
     port: base.port || (protocol === 'https:' ? 443 : 80),
-    path: requestPath,
+    path: canonicalQuery ? `${requestPath}?${canonicalQuery}` : requestPath,
     headers,
   }
 
@@ -131,7 +174,15 @@ async function s3Request(options) {
       res.on('end', () => {
         const buf = Buffer.concat(chunks)
         const statusCode = res.statusCode ?? 0
-        if (method !== 'HEAD' && (statusCode < 200 || statusCode >= 300)) {
+        // HEAD callers handle 404 themselves; GET surfaces 404 as undefined;
+        // DELETE tolerates 404 since S3 returns 204 for missing keys but
+        // S3-compatible servers may differ.
+        const okStatus =
+          (statusCode >= 200 && statusCode < 300) ||
+          method === 'HEAD' ||
+          (method === 'GET' && statusCode === 404) ||
+          (method === 'DELETE' && statusCode === 404)
+        if (!okStatus) {
           reject(s3Error(`s3 ${method} ${bucket}/${key} returned ${statusCode}: ${buf.toString('utf8')}`, statusCode))
           return
         }
@@ -145,6 +196,40 @@ async function s3Request(options) {
     }
     req.end()
   })
+}
+
+/**
+ * @param {string} xml
+ * @returns {{ keys: string[], nextContinuationToken?: string }}
+ */
+function parseListBucketResult(xml) {
+  const keys = [...xml.matchAll(/<Contents\b[^>]*>[\s\S]*?<Key>([\s\S]*?)<\/Key>[\s\S]*?<\/Contents>/g)]
+    .map((match) => decodeXml(match[1]))
+  const nextContinuationToken = xmlText(xml, 'NextContinuationToken')
+  return { keys, nextContinuationToken }
+}
+
+/**
+ * @param {string} xml
+ * @param {string} tag
+ * @returns {string | undefined}
+ */
+function xmlText(xml, tag) {
+  const match = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`).exec(xml)
+  return match ? decodeXml(match[1]) : undefined
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function decodeXml(text) {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, '\'')
+    .replace(/&amp;/g, '&')
 }
 
 /**
@@ -201,6 +286,26 @@ function deriveSigningKey(secret, dateStamp, region) {
  */
 function encodeKey(path) {
   return path.split('/').map((seg) => seg ? encodeURIComponent(seg).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`) : '').join('/')
+}
+
+/**
+ * @param {Readonly<Record<string, string>> | undefined} query
+ * @returns {string}
+ */
+function canonicalQueryString(query) {
+  if (!query) return ''
+  return Object.keys(query)
+    .sort()
+    .map((key) => `${encodeQueryComponent(key)}=${encodeQueryComponent(query[key])}`)
+    .join('&')
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function encodeQueryComponent(value) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
 }
 
 /**

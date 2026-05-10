@@ -409,6 +409,12 @@ describe('loadConfig - upload section', () => {
     })
     expect(() => loadConfig(p)).toThrow(/\/upload\/mistery/)
   })
+
+  it('accepts Iceberg upload mode', () => {
+    const cfg = { version: 1, upload: { bucket: 'b', iceberg: {} } }
+    const p = writeJson('upload-iceberg.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
 })
 
 describe('loadConfig - role / server / central_server', () => {

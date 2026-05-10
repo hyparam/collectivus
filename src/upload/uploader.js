@@ -107,7 +107,7 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
     : await otlpJobToParquet(job, options)
   if (rowCount === 0) return { uploaded: false, key, rows: 0, size: 0 }
 
-  await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
+  await withRetry(() => connector.putObject(key, parquet, { contentType: 'application/octet-stream' }), resolved)
 
   /** @type {LedgerEntry} */
   const entry = {
@@ -319,7 +319,7 @@ function backfillToolNames(rows, toolLookup) {
  * @param {Required<UploadDeps>} deps
  * @returns {Promise<T>}
  */
-async function withRetry(fn, deps) {
+export async function withRetry(fn, deps) {
   let lastErr
   for (let attempt = 0; attempt < deps.maxAttempts; attempt++) {
     try {
@@ -349,6 +349,9 @@ function isTransient(err) {
   const status = /** @type {{ statusCode?: unknown }} */ (err)?.statusCode
   if (typeof status === 'number') {
     if (status === 429) return true
+    // 412 (Precondition Failed) and 409 (Conflict) come from conditional PUTs
+    // and indicate a real collision — not something to retry blindly.
+    if (status === 412 || status === 409) return false
     return status >= 500 && status < 600
   }
   return true
@@ -366,7 +369,7 @@ function defaultSleep(ms) {
  * @param {UploadDeps} deps
  * @returns {Required<UploadDeps>}
  */
-function resolveDeps(deps) {
+export function resolveDeps(deps) {
   return {
     maxAttempts: deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
     initialBackoffMs: deps.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS,

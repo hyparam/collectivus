@@ -144,6 +144,9 @@ export interface FileSinkConfig {
 
 export type UploadSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
 
+/** Iceberg mode has no nested options; use `{}` to enable it. */
+export type IcebergUploadConfig = Record<string, never>
+
 export interface UploadConfig {
   /** Destination bucket. Required. */
   bucket: string
@@ -159,6 +162,12 @@ export interface UploadConfig {
   catchupDays?: number
   /** Override base URL for S3-compatible servers (MinIO, etc.). */
   endpoint?: string
+  /**
+   * Opt in to Iceberg upload mode. When set, daily Parquet objects are
+   * replaced by appends to an Iceberg table per (service, signal),
+   * partitioned by date. Local JSONL retention is unchanged.
+   */
+  iceberg?: IcebergUploadConfig
 }
 
 export interface QueryParquetConfig {

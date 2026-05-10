@@ -190,7 +190,7 @@ export function rowsToColumns(signal, rows, partitionDimensions) {
  * @param {Record<string, unknown>} row
  * @returns {unknown}
  */
-function extractCell(name, row) {
+export function extractCell(name, row) {
   if (name === 'gateway_id') {
     const partition = row._partition
     if (!partition || typeof partition !== 'object') return undefined

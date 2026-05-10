@@ -1,13 +1,33 @@
+import type { IcebergUploadConfig } from '../types.d.ts'
+
 export type Signal = 'logs' | 'traces' | 'metrics'
 export type UploadSignal = Signal | 'proxy'
+
+export interface PutObjectOptions {
+  /** Content-Type. Default 'application/octet-stream'. */
+  contentType?: string
+  /**
+   * If '*', PUT only when the object does not already exist (S3
+   * `If-None-Match: *`). On collision, the connector throws an error tagged
+   * with `statusCode: 412` (or 409 on some providers). Honored by `s3` and
+   * `memory`; other connectors may ignore.
+   */
+  ifNoneMatch?: '*'
+}
 
 export interface StorageConnector {
   /** Scheme this connector handles, e.g. "s3". */
   readonly scheme: string
-  /** PUT a single object. Idempotent: overwriting is fine. */
-  putObject(key: string, body: Uint8Array, contentType?: string): Promise<void>
+  /** PUT a single object. Idempotent: overwriting is fine unless `ifNoneMatch` is set. */
+  putObject(key: string, body: Uint8Array, options?: PutObjectOptions): Promise<void>
   /** HEAD an object to check existence. Returns undefined if absent. */
   headObject(key: string): Promise<{ size: number } | undefined>
+  /** GET an object. Returns undefined if absent (404). */
+  getObject?(key: string): Promise<Uint8Array | undefined>
+  /** List object keys under a prefix. */
+  listObjects?(prefix: string): Promise<string[]>
+  /** DELETE an object. Tolerates 404 / already-absent. */
+  deleteObject?(key: string): Promise<void>
   close?(): Promise<void>
 }
 
@@ -28,6 +48,7 @@ export interface UploadOptions {
    * configured dimensions.
    */
   partitionDimensions?: ReadonlyArray<string>
+  iceberg?: IcebergUploadConfig
 }
 
 export interface ResolvedUploadOptions {
@@ -46,6 +67,7 @@ export interface ResolvedUploadOptions {
    * applies for the public surface.
    */
   partitionDimensions?: ReadonlyArray<string>
+  iceberg?: ResolvedIcebergUploadOptions
 }
 
 export interface LedgerEntry {
@@ -143,8 +165,14 @@ export interface S3ConnectorOptions {
 }
 
 export interface S3RequestOptions extends S3ConnectorOptions {
-  method: 'PUT' | 'HEAD' | 'GET'
+  method: 'PUT' | 'HEAD' | 'GET' | 'DELETE'
   key: string
+  query?: Readonly<Record<string, string>>
   body?: Uint8Array
   contentType?: string
+  /** Send `If-None-Match: *` to require the object not pre-exist. */
+  ifNoneMatch?: '*'
 }
+
+/** Resolved marker for Iceberg mode; table creation always uses format version 3. */
+export type ResolvedIcebergUploadOptions = Record<string, never>

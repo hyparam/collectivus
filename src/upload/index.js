@@ -1,10 +1,11 @@
 import { awsCredentialProviderFromEnv, hasAwsCredentialSource } from './aws_credentials.js'
 import { s3Connector } from './connectors/s3.js'
+import { icebergUploadPending } from './iceberg/index.js'
 import { createScheduler } from './scheduler.js'
 import { uploadPending } from './uploader.js'
 
 /**
- * @import { ResolvedUploadOptions, StorageConnector, UploadOptions, UploadSignal } from './upload.d.ts'
+ * @import { ResolvedIcebergUploadOptions, ResolvedUploadOptions, StorageConnector, UploadOptions, UploadSignal } from './upload.d.ts'
  */
 
 const DEFAULT_TIME = '00:10'
@@ -48,11 +49,15 @@ export function createUploader(args) {
   }
   const connector = args.connector ?? defaultConnector(options, env, { fetch: args.fetch })
 
+  const upload = options.iceberg
+    ? icebergUploadPending
+    : uploadPending
+
   const scheduler = createScheduler({
     time: options.time,
     tick: async () => {
       const today = todayUtc(new Date())
-      const results = await uploadPending(options, connector, args.outputDir, today)
+      const results = await upload(options, connector, args.outputDir, today)
       return { retry: results.some((r) => r.retryable === true) }
     },
   })
@@ -70,6 +75,19 @@ function resolve(options) {
   if (!partitionDimensions.includes('signal')) {
     throw new Error(`upload.partitionDimensions must include 'signal'; got ${JSON.stringify(partitionDimensions)}`)
   }
+  if (options.iceberg !== undefined) {
+    if (options.iceberg === null || typeof options.iceberg !== 'object' || Array.isArray(options.iceberg)) {
+      throw new Error('upload.iceberg must be an object')
+    }
+    const icebergKeys = Object.keys(options.iceberg)
+    if (icebergKeys.length > 0) {
+      throw new Error(`upload.iceberg.${icebergKeys[0]} is not supported`)
+    }
+  }
+  /** @type {ResolvedIcebergUploadOptions | undefined} */
+  const iceberg = options.iceberg === undefined
+    ? undefined
+    : {}
   return {
     bucket: options.bucket,
     prefix: options.prefix ?? DEFAULT_PREFIX,
@@ -79,6 +97,7 @@ function resolve(options) {
     region: options.region ?? '',
     endpoint: options.endpoint,
     partitionDimensions,
+    iceberg,
   }
 }
 

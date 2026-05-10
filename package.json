@@ -47,7 +47,8 @@
     "vitest": "4.1.6"
   },
   "optionalDependencies": {
-    "hyparquet-writer": "0.15.1"
+    "hyparquet-writer": "0.15.1",
+    "icebird": "0.7.0"
   },
   "dependencies": {
     "hyparquet": "1.25.8",

@@ -28,7 +28,7 @@ const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
 const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
 const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
-  'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
+  'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint', 'iceberg',
 ])
 const ALLOWED_QUERY_KEYS = new Set(['parquet'])
 const ALLOWED_QUERY_PARQUET_KEYS = new Set(['enabled', 'dir'])
@@ -50,6 +50,7 @@ const ALLOWED_RENDEZVOUS_KEYS = new Set([
 const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds', 'outbox_dir'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
 const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
+const ALLOWED_ICEBERG_KEYS = new Set([])
 const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 const IDENTITY_SECRET_MIN_LENGTH = 32
@@ -722,6 +723,18 @@ function validateUpload(upload) {
     }
   }
   if (upload.endpoint !== undefined) assertNonEmptyString(upload.endpoint, '/upload/endpoint')
+  if (upload.iceberg !== undefined) validateIceberg(upload.iceberg)
+}
+
+/**
+ * Validate the optional `upload.iceberg` block. Presence enables Iceberg
+ * mode; the empty object `{}` is a valid form.
+ *
+ * @param {unknown} iceberg
+ */
+function validateIceberg(iceberg) {
+  assertObject(iceberg, '/upload/iceberg')
+  assertOnlyKeys(iceberg, ALLOWED_ICEBERG_KEYS, '/upload/iceberg')
 }
 
 /**

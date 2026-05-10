@@ -29,6 +29,17 @@ beforeEach(async () => {
         res.end()
         return
       }
+      if (req.method === 'GET' && req.url?.includes('list-type=2')) {
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/xml')
+        res.end([
+          '<ListBucketResult>',
+          '<Contents><Key>collectivus/svc-a/logs/metadata/v1.metadata.json</Key></Contents>',
+          '<Contents><Key>collectivus/svc-a/logs/metadata/v2&amp;next.metadata.json</Key></Contents>',
+          '</ListBucketResult>',
+        ].join(''))
+        return
+      }
       res.statusCode = 200
       if (req.method === 'HEAD') res.setHeader('content-length', '42')
       res.end()
@@ -54,7 +65,7 @@ describe('s3Connector', () => {
       endpoint,
     })
     const body = new Uint8Array([1, 2, 3, 4, 5])
-    await connector.putObject('a/b/c.parquet', body, 'application/octet-stream')
+    await connector.putObject('a/b/c.parquet', body, { contentType: 'application/octet-stream' })
 
     expect(captured).toHaveLength(1)
     const req = captured[0]
@@ -84,6 +95,27 @@ describe('s3Connector', () => {
 
     const present = await connector.headObject('present/key.parquet')
     expect(present).toEqual({ size: 42 })
+  })
+
+  it('lists object keys with a signed ListObjectsV2 request', async () => {
+    const connector = s3Connector({
+      bucket: 'mybucket',
+      region: 'us-east-1',
+      accessKeyId: 'AKIAFAKE',
+      secretAccessKey: 'fake-secret',
+      endpoint,
+    })
+
+    const keys = await connector.listObjects?.('collectivus/svc-a/logs/metadata/')
+
+    expect(keys).toEqual([
+      'collectivus/svc-a/logs/metadata/v1.metadata.json',
+      'collectivus/svc-a/logs/metadata/v2&next.metadata.json',
+    ])
+    expect(captured).toHaveLength(1)
+    expect(captured[0].method).toBe('GET')
+    expect(captured[0].url).toBe('/mybucket/?list-type=2&prefix=collectivus%2Fsvc-a%2Flogs%2Fmetadata%2F')
+    expect(captured[0].headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAFAKE\//)
   })
 
   it('includes x-amz-security-token when sessionToken is provided', async () => {

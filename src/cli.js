@@ -22,10 +22,12 @@ const USAGE = `Usage:
 
 Commands:
   collectivus install [--config <path>]        Install the background daemon
-  collectivus uninstall [--detach]             Remove the daemon (and detach Claude Code)
+  collectivus uninstall [--detach] [--client claude|codex|all]
+                                               Remove the daemon (and detach selected clients)
   collectivus attach [--config <path>] [--port <n>] [--client claude|codex|all]
                                                Point Claude Code or Codex at the local proxy
-  collectivus detach                           Restore Claude Code's settings.json
+  collectivus detach [--client claude|codex|all]
+                                               Restore Claude Code and/or Codex config
   collectivus status                           Report daemon, config, recordings, attach state
   collectivus export --config <path> [...]     Convert recorded JSONL to Parquet`
 

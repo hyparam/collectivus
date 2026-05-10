@@ -33,8 +33,12 @@ afterEach(function() {
  *   uninstallError?: Error,
  *   detachError?: Error,
  *   detachResult?: { changed: boolean, removed?: string, warning?: string },
+ *   codexDetachError?: Error,
+ *   codexDetachResult?: { changed: boolean, removed?: string, restoredValue?: string, warning?: string },
  *   isAttachedResult?: boolean,
  *   isAttachedError?: Error,
+ *   isCodexAttachedResult?: boolean,
+ *   isCodexAttachedError?: Error,
  * }} [opts]
  * @returns {UninstallMocks}
  */
@@ -43,9 +47,12 @@ function makeMocks(opts = {}) {
   const uninstallCalls = []
   /** @type {DetachCall[]} */
   const detachCalls = []
+  /** @type {DetachCall[]} */
+  const codexDetachCalls = []
   return {
     uninstallCalls,
     detachCalls,
+    codexDetachCalls,
     uninstallLaunchAgent(o) {
       uninstallCalls.push({ ...o })
       if (opts.uninstallError) return Promise.reject(opts.uninstallError)
@@ -56,20 +63,42 @@ function makeMocks(opts = {}) {
       if (opts.detachError) return Promise.reject(opts.detachError)
       return Promise.resolve(opts.detachResult ?? { changed: true, removed: 'http://127.0.0.1:8787' })
     },
+    detachCodex(o) {
+      codexDetachCalls.push({ ...o })
+      if (opts.codexDetachError) return Promise.reject(opts.codexDetachError)
+      return Promise.resolve(opts.codexDetachResult ?? { changed: true, removed: 'http://127.0.0.1:8787/v1' })
+    },
     isAttached() {
       if (opts.isAttachedError) return Promise.reject(opts.isAttachedError)
       return Promise.resolve(opts.isAttachedResult ?? true)
+    },
+    isCodexAttached() {
+      if (opts.isCodexAttachedError) return Promise.reject(opts.isCodexAttachedError)
+      return Promise.resolve(opts.isCodexAttachedResult ?? true)
     },
   }
 }
 
 describe('parseUninstallArgs', function() {
   it('treats no args as no-detach', function() {
-    expect(parseUninstallArgs([])).toEqual({ detach: false, help: false })
+    expect(parseUninstallArgs([])).toEqual({ detach: false, help: false, client: 'claude' })
   })
 
   it('parses --detach', function() {
     expect(parseUninstallArgs(['--detach']).detach).toBe(true)
+  })
+
+  it('parses --client <name>', function() {
+    expect(parseUninstallArgs(['--client', 'codex'])).toMatchObject({
+      detach: false, client: 'codex',
+    })
+    expect(parseUninstallArgs(['--detach', '--client=all'])).toMatchObject({
+      detach: true, client: 'all',
+    })
+  })
+
+  it('rejects unknown --client values', function() {
+    expect(parseUninstallArgs(['--client', 'zed']).error).toMatch(/expected claude, codex, or all/)
   })
 
   it('returns help mode for --help / -h', function() {
@@ -120,6 +149,50 @@ describe('runUninstall', function() {
     expect(m.detachCalls).toEqual([{ settingsPath: path.join(tmpDir, 'settings.json') }])
     expect(stdout.value()).toMatch(/Daemon removed/)
     expect(stdout.value()).toMatch(/Claude Code reverted/)
+  })
+
+  it('--detach --client codex uninstalls and reverts Codex without touching Claude Code', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const m = makeMocks()
+    const code = await runUninstall(['--detach', '--client', 'codex'], {
+      stdout, stderr,
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'config.toml'),
+      uninstallLaunchAgent: m.uninstallLaunchAgent,
+      detach: m.detach,
+      detachCodex: m.detachCodex,
+      isAttached: m.isAttached,
+      isCodexAttached: m.isCodexAttached,
+    })
+    expect(code).toBe(0)
+    expect(m.uninstallCalls).toEqual([{ label: 'com.hyparam.collectivus' }])
+    expect(m.detachCalls).toEqual([])
+    expect(m.codexDetachCalls).toEqual([{ configPath: path.join(tmpDir, 'config.toml') }])
+    expect(stdout.value()).toMatch(/Daemon removed/)
+    expect(stdout.value()).toMatch(/Codex reverted/)
+  })
+
+  it('--detach --client all uninstalls and reverts Claude Code and Codex', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const m = makeMocks({ codexDetachResult: { changed: true, restoredValue: 'openai' } })
+    const code = await runUninstall(['--detach', '--client', 'all'], {
+      stdout, stderr,
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'config.toml'),
+      uninstallLaunchAgent: m.uninstallLaunchAgent,
+      detach: m.detach,
+      detachCodex: m.detachCodex,
+      isAttached: m.isAttached,
+      isCodexAttached: m.isCodexAttached,
+    })
+    expect(code).toBe(0)
+    expect(m.detachCalls).toEqual([{ settingsPath: path.join(tmpDir, 'settings.json') }])
+    expect(m.codexDetachCalls).toEqual([{ configPath: path.join(tmpDir, 'config.toml') }])
+    expect(stdout.value()).toMatch(/Claude Code reverted/)
+    expect(stdout.value()).toMatch(/Codex reverted/)
+    expect(stdout.value()).toMatch(/Restored model_provider=openai/)
   })
 
   it('TTY without --detach: prompts and reverts on yes', async function() {
@@ -194,6 +267,24 @@ describe('runUninstall', function() {
     expect(promptCalls).toHaveLength(0)
     expect(m.detachCalls).toHaveLength(0)
     expect(stderr.value()).toMatch(/not a TTY/)
+  })
+
+  it('non-TTY --client codex without --detach warns with the Codex detach command', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const m = makeMocks({ isCodexAttachedResult: true })
+    const code = await runUninstall(['--client', 'codex'], {
+      stdout, stderr,
+      codexConfigPath: path.join(tmpDir, 'config.toml'),
+      uninstallLaunchAgent: m.uninstallLaunchAgent,
+      detachCodex: m.detachCodex,
+      isCodexAttached: m.isCodexAttached,
+      isTTY: false,
+    })
+    expect(code).toBe(0)
+    expect(m.detachCalls).toHaveLength(0)
+    expect(m.codexDetachCalls).toHaveLength(0)
+    expect(stderr.value()).toMatch(/collectivus detach --client codex/)
   })
 
   it('skips revert prompt when settings.json has no marker', async function() {

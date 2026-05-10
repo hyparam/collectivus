@@ -318,6 +318,7 @@ export interface AttachParseResult {
 }
 
 export interface DetachParseResult {
+  client: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -337,6 +338,7 @@ export interface InstallParseResult {
 
 export interface UninstallParseResult {
   detach: boolean
+  client: 'claude' | 'codex' | 'all'
   help: boolean
   error?: string
 }
@@ -363,8 +365,14 @@ export interface AttachHooks {
 export interface DetachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
+  /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for detachClaude. */
   detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
 }
 
 export interface StatusHooks {
@@ -441,11 +449,19 @@ export interface UninstallHooks {
   plistDir?: string
   /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
   isTTY?: boolean
   prompt?: (question: string) => Promise<string>
   uninstallLaunchAgent?: (opts: DaemonUninstallOptions) => Promise<void>
+  /** Back-compat alias for detachClaude. */
   detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
+  /** Back-compat alias for isClaudeAttached. */
   isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isClaudeAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isCodexAttached?: (opts?: CodexIsAttachedOptions) => Promise<boolean>
 }
 
 export interface InstalledPlistFields {

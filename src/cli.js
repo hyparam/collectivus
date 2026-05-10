@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
-import { ConfigError, loadConfig } from './config.js'
+import { ConfigError, loadConfigAsync } from './config.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { FileSink } from './sinks/file.js'
@@ -14,22 +14,23 @@ import { createScheduler } from './upload/scheduler.js'
  */
 
 const USAGE = `Usage:
-  collectivus --config <path>                  Run with config file
-  collectivus --config <path> --print-config   Load config, print resolved JSON, exit
-  collectivus --config <path> --strict         Reject unknown top-level config keys
+  collectivus --config <path|url>              Run with config file or http(s) URL
+  collectivus --config <path|url> --print-config
+                                               Load config, print resolved JSON, exit
+  collectivus --config <path|url> --strict     Reject unknown top-level config keys
   collectivus --help                           Show this help
   collectivus --version                        Print program version
 
 Commands:
-  collectivus install [--config <path>]        Install the background daemon
+  collectivus install [--config <path|url>]    Install the background daemon
   collectivus uninstall [--detach] [--client claude|codex|all]
                                                Remove the daemon (and detach selected clients)
-  collectivus attach [--config <path>] [--port <n>] [--client claude|codex|all]
+  collectivus attach [--config <path|url>] [--port <n>] [--client claude|codex|all]
                                                Point Claude Code or Codex at the local proxy
   collectivus detach [--client claude|codex|all]
                                                Restore Claude Code and/or Codex config
   collectivus status                           Report daemon, config, recordings, attach state
-  collectivus export --config <path> [...]     Convert recorded JSONL to Parquet`
+  collectivus export --config <path|url> [...] Convert recorded JSONL to Parquet`
 
 const DRAIN_TIMEOUT_MS = 5000
 const SELF_UPDATE_TIME_UTC = '03:00'
@@ -143,7 +144,7 @@ export async function run(argv, env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfig(parsed.configPath, { strict: parsed.strict, stderr })
+    config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)

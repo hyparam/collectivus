@@ -11,11 +11,16 @@ const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
 const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
 const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
 const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
+const TOML_MODEL_PROVIDER_KEY = String.raw`(?:model_provider|"model_provider"|'model_provider')`
 const TOML_MODEL_PROVIDERS_KEY = String.raw`(?:model_providers|"model_providers"|'model_providers')`
 const TOML_COLLECTIVUS_PROVIDER_KEY = String.raw`(?:${PROVIDER_ID}|"${PROVIDER_ID}"|'${PROVIDER_ID}')`
 const TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY = String.raw`${TOML_MODEL_PROVIDERS_KEY}\s*\.\s*${TOML_COLLECTIVUS_PROVIDER_KEY}(?:\s*\.\s*${TOML_KEY_PART})*`
+const TOML_MODEL_PROVIDERS_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_MODEL_PROVIDERS_KEY}\s*\]\s*(?:#.*)?$`)
 const TOML_COLLECTIVUS_PROVIDER_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
 const TOML_COLLECTIVUS_PROVIDER_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
+const TOML_COLLECTIVUS_PROVIDER_DOTTED_ASSIGNMENT_RE = new RegExp(String.raw`^\s*${TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY}\s*=`)
+const TOML_COLLECTIVUS_PROVIDER_CHILD_ASSIGNMENT_RE = new RegExp(String.raw`^\s*${TOML_COLLECTIVUS_PROVIDER_KEY}(?:\s*\.\s*${TOML_KEY_PART})*\s*=`)
+const TOML_ROOT_MODEL_PROVIDER_RE = new RegExp(String.raw`^\s*${TOML_MODEL_PROVIDER_KEY}\s*=`)
 
 /**
  * @param {string} content
@@ -32,6 +37,7 @@ export function prepareAttach(content, port, version) {
   const root = removeRootModelProvider(lines)
   lines = root.lines
   lines = removeProviderTable(lines)
+  lines = removeProviderDottedAssignments(lines)
 
   const prevValue = root.prevValue ?? previousFromMarker
   const now = new Date().toISOString()
@@ -82,6 +88,7 @@ export function prepareDetach(content) {
   let next = removeMarkedBlock(lines, ROOT_BEGIN, ROOT_END)
   next = removeMarkedBlock(next, PROVIDER_BEGIN, PROVIDER_END)
   next = removeProviderTable(next)
+  next = removeProviderDottedAssignments(next)
 
   /** @type {string | undefined} */
   let restoredValue
@@ -263,6 +270,48 @@ function removeProviderTable(lines) {
 
 /**
  * @param {string[]} lines
+ * @returns {string[]}
+ */
+function removeProviderDottedAssignments(lines) {
+  /** @type {string[]} */
+  const next = []
+  /** @type {'root' | 'model_providers' | 'other'} */
+  let table = 'root'
+  /** @type {TomlMultilineStringDelimiter | undefined} */
+  let multilineDelimiter
+  /** @type {TomlMultilineStringDelimiter | undefined} */
+  let removedMultilineDelimiter
+
+  for (const line of lines) {
+    if (removedMultilineDelimiter !== undefined) {
+      removedMultilineDelimiter = closeMultilineString(line, removedMultilineDelimiter)
+      continue
+    }
+    if (multilineDelimiter !== undefined) {
+      multilineDelimiter = closeMultilineString(line, multilineDelimiter)
+      next.push(line)
+      continue
+    }
+    if (isTableHeader(line)) {
+      table = TOML_MODEL_PROVIDERS_TABLE_HEADER_RE.test(line) ? 'model_providers' : 'other'
+      next.push(line)
+      continue
+    }
+    if (
+      (table === 'root' && TOML_COLLECTIVUS_PROVIDER_DOTTED_ASSIGNMENT_RE.test(line))
+      || (table === 'model_providers' && TOML_COLLECTIVUS_PROVIDER_CHILD_ASSIGNMENT_RE.test(line))
+    ) {
+      removedMultilineDelimiter = openMultilineString(line)
+      continue
+    }
+    next.push(line)
+    multilineDelimiter = openMultilineString(line)
+  }
+  return next
+}
+
+/**
+ * @param {string[]} lines
  * @param {string} begin
  * @param {string} end
  * @returns {string[]}
@@ -387,7 +436,7 @@ function parseRootModelProvider(line) {
  * @returns {boolean}
  */
 function isRootModelProviderLine(line) {
-  return /^\s*model_provider\s*=/.test(line)
+  return TOML_ROOT_MODEL_PROVIDER_RE.test(line)
 }
 
 /**

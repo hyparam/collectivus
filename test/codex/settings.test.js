@@ -137,6 +137,21 @@ describe('attach', () => {
     expect(written).not.toMatch(/^model_provider = "openai"$/m)
   })
 
+  it.each([
+    ['double-quoted', '"model_provider" = "openai"\n'],
+    ['single-quoted', '\'model_provider\' = "openai"\n'],
+  ])('records and removes the previous %s root model_provider', async (_label, line) => {
+    writeToml(`${line}model = "gpt-5.1-codex"\n`)
+
+    const result = await attach({ port: 8787, version: '1.0.0', configPath })
+
+    expect(result).toEqual({ changed: true, prevValue: 'openai' })
+    const written = readToml()
+    expect(written).toContain('# previous_model_provider = "openai"')
+    expect(written).not.toMatch(/^["']model_provider["']\s*=\s*"openai"$/m)
+    expect(written).toContain('model_provider = "collectivus"')
+  })
+
   it('replaces an existing collectivus provider table', async () => {
     writeToml('[model_providers.collectivus]\nbase_url = "http://old.test/v1"\n[profiles.default]\nmodel = "gpt-5"\n')
 
@@ -168,6 +183,41 @@ describe('attach', () => {
     expect(written).not.toContain('[model_providers.collectivus.http_headers]')
     expect(written).not.toContain('STALE_TOKEN')
     expect(written).not.toContain('Bearer stale')
+    expect(written).toContain('[profiles.default]')
+  })
+
+  it('removes existing dotted collectivus provider assignments', async () => {
+    writeToml(
+      'model_providers.collectivus.base_url = "http://old.test/v1"\n' +
+      'model_providers.collectivus.requires_openai_auth = false\n' +
+      'model = "gpt-5"\n'
+    )
+
+    await attach({ port: 9090, version: '1.0.0', configPath })
+
+    const written = readToml()
+    expect(written).toContain('base_url = "http://127.0.0.1:9090/v1"')
+    expect(written).not.toContain('http://old.test/v1')
+    expect(written).not.toContain('model_providers.collectivus.requires_openai_auth')
+    expect(written.match(/\[model_providers\.collectivus\]/g)).toHaveLength(1)
+    expect(written).toContain('model = "gpt-5"')
+  })
+
+  it('removes existing collectivus assignments inside model_providers table', async () => {
+    writeToml(
+      '[model_providers]\n' +
+      'collectivus.base_url = "http://old.test/v1"\n' +
+      'openai.base_url = "https://api.openai.com/v1"\n' +
+      '[profiles.default]\n' +
+      'model = "gpt-5"\n'
+    )
+
+    await attach({ port: 9090, version: '1.0.0', configPath })
+
+    const written = readToml()
+    expect(written).toContain('base_url = "http://127.0.0.1:9090/v1"')
+    expect(written).not.toContain('http://old.test/v1')
+    expect(written).toContain('openai.base_url = "https://api.openai.com/v1"')
     expect(written).toContain('[profiles.default]')
   })
 

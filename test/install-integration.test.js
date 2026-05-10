@@ -106,7 +106,7 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     fs.rmSync(tmpHome, { recursive: true, force: true })
   })
 
-  it('install --yes writes plist + marker; uninstall --detach reverts both, preserving unrelated keys', async function() {
+  it('install --yes writes plist + marker; uninstall reverts both, preserving unrelated keys', async function() {
     const installResult = await runCli(['install', '--yes', '--config', configPath], {
       home: tmpHome, launchctlBin,
     })
@@ -135,7 +135,7 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     // Log directory is created during install.
     expect(fs.existsSync(logDir), 'log dir should be created').toBe(true)
 
-    const uninstallResult = await runCli(['uninstall', '--detach'], {
+    const uninstallResult = await runCli(['uninstall'], {
       home: tmpHome, launchctlBin,
     })
     expect(uninstallResult.stderr, uninstallResult.stderr).toBe('')

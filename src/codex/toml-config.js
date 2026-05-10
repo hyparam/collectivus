@@ -11,6 +11,11 @@ const TOML_KEY_PART = String.raw`(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)`
 const TOML_DOTTED_KEY = String.raw`${TOML_KEY_PART}(?:\s*\.\s*${TOML_KEY_PART})*`
 const TOML_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
 const TOML_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
+const TOML_MODEL_PROVIDERS_KEY = String.raw`(?:model_providers|"model_providers"|'model_providers')`
+const TOML_COLLECTIVUS_PROVIDER_KEY = String.raw`(?:${PROVIDER_ID}|"${PROVIDER_ID}"|'${PROVIDER_ID}')`
+const TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY = String.raw`${TOML_MODEL_PROVIDERS_KEY}\s*\.\s*${TOML_COLLECTIVUS_PROVIDER_KEY}(?:\s*\.\s*${TOML_KEY_PART})*`
+const TOML_COLLECTIVUS_PROVIDER_TABLE_HEADER_RE = new RegExp(String.raw`^\s*\[\s*${TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY}\s*\]\s*(?:#.*)?$`)
+const TOML_COLLECTIVUS_PROVIDER_TABLE_ARRAY_HEADER_RE = new RegExp(String.raw`^\s*\[\[\s*${TOML_COLLECTIVUS_PROVIDER_DOTTED_KEY}\s*\]\]\s*(?:#.*)?$`)
 
 /**
  * @param {string} content
@@ -127,12 +132,11 @@ function splitLines(content) {
  * @returns {string}
  */
 function formatLines(lines) {
-  const out = []
-  for (const line of lines) {
-    if (line === '' && (out.length === 0 || out[out.length - 1] === '')) continue
-    out.push(line)
-  }
-  while (out[out.length - 1] === '') out.pop()
+  let start = 0
+  let end = lines.length
+  while (start < end && lines[start] === '') start++
+  while (end > start && lines[end - 1] === '') end--
+  const out = lines.slice(start, end)
   return out.length === 0 ? '' : `${out.join('\n')}\n`
 }
 
@@ -247,7 +251,7 @@ function removeProviderTable(lines) {
       break
     }
     next.push(...lines.slice(i, tableIndex))
-    if (isCollectivusProviderHeader(lines[tableIndex])) {
+    if (isCollectivusProviderTableHeader(lines[tableIndex])) {
       i = findNextTableIndex(lines, tableIndex + 1) - 1
       continue
     }
@@ -504,8 +508,9 @@ function isEscaped(value, index) {
  * @param {string} line
  * @returns {boolean}
  */
-function isCollectivusProviderHeader(line) {
-  return /^\s*\[\s*model_providers\.collectivus\s*\]\s*(?:#.*)?$/.test(line)
+function isCollectivusProviderTableHeader(line) {
+  return TOML_COLLECTIVUS_PROVIDER_TABLE_HEADER_RE.test(line)
+    || TOML_COLLECTIVUS_PROVIDER_TABLE_ARRAY_HEADER_RE.test(line)
 }
 
 /**

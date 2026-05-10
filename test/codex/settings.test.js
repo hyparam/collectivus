@@ -106,6 +106,26 @@ describe('attach', () => {
     )
   })
 
+  it('preserves blank lines inside multiline strings', async () => {
+    writeToml(
+      'developer_instructions = """line one\n' +
+      '\n' +
+      '\n' +
+      'line four\n' +
+      '"""\n'
+    )
+
+    await attach({ port: 8787, version: '1.0.0', configPath })
+
+    expect(readToml()).toContain(
+      'developer_instructions = """line one\n' +
+      '\n' +
+      '\n' +
+      'line four\n' +
+      '"""\n'
+    )
+  })
+
   it('records and removes the previous root model_provider', async () => {
     writeToml('model_provider = "openai"\nmodel = "gpt-5.1-codex"\n')
 
@@ -125,6 +145,29 @@ describe('attach', () => {
     const written = readToml()
     expect(written).toContain('base_url = "http://127.0.0.1:9090/v1"')
     expect(written).not.toContain('http://old.test/v1')
+    expect(written).toContain('[profiles.default]')
+  })
+
+  it('removes existing collectivus provider child tables', async () => {
+    writeToml(
+      '[model_providers.collectivus]\n' +
+      'base_url = "http://old.test/v1"\n' +
+      '[model_providers.collectivus.auth]\n' +
+      'env_key = "STALE_TOKEN"\n' +
+      '[model_providers.collectivus.http_headers]\n' +
+      'authorization = "Bearer stale"\n' +
+      '[profiles.default]\n' +
+      'model = "gpt-5"\n'
+    )
+
+    await attach({ port: 9090, version: '1.0.0', configPath })
+
+    const written = readToml()
+    expect(written).toContain('base_url = "http://127.0.0.1:9090/v1"')
+    expect(written).not.toContain('[model_providers.collectivus.auth]')
+    expect(written).not.toContain('[model_providers.collectivus.http_headers]')
+    expect(written).not.toContain('STALE_TOKEN')
+    expect(written).not.toContain('Bearer stale')
     expect(written).toContain('[profiles.default]')
   })
 
@@ -208,6 +251,27 @@ describe('detach', () => {
       restoredValue: 'custom',
     })
     expect(readToml()).toBe('model = "gpt-5"\nmodel_provider = "custom"\n')
+  })
+
+  it('preserves blank lines inside multiline strings', async () => {
+    writeToml(
+      'developer_instructions = """line one\n' +
+      '\n' +
+      '\n' +
+      'line four\n' +
+      '"""\n'
+    )
+    await attach({ port: 8787, version: '1.0.0', configPath })
+
+    await detach({ configPath })
+
+    expect(readToml()).toBe(
+      'developer_instructions = """line one\n' +
+      '\n' +
+      '\n' +
+      'line four\n' +
+      '"""\n'
+    )
   })
 
   it('removes managed blocks without restoring when there was no previous provider', async () => {

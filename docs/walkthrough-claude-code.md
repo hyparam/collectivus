@@ -11,11 +11,10 @@ The whole pipeline is local — no third-party services, no server-side keys.
 ## 1. Start collectivus with a proxy config
 
 The fastest path is the interactive walkthrough — run `collectivus` with no
-arguments and answer the prompts (LLM gateway proxy → Anthropic → sink
-directory → optional S3 upload → install as daemon → attach Claude Code).
-It writes the config to `~/.hyp/collectivus.json`, recordings to
-`~/.hyp/collectivus/`, and (if you opt in) sets up the LaunchAgent /
-systemd unit and points Claude Code at the proxy:
+arguments and choose single-user mode at the first prompt. It writes the
+config to `~/.hyp/collectivus.json` (proxy on 127.0.0.1:8787 forwarding to
+Anthropic), recordings to `~/.hyp/collectivus/`, and (if you opt in) sets
+up the LaunchAgent / systemd unit and points Claude Code at the proxy:
 
 ```bash
 npx collectivus

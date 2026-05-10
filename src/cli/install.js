@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
+import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
 import {
   LAUNCH_AGENT_LABEL,
@@ -17,13 +17,13 @@ import { installDaemon } from '../daemon/index.js'
  */
 
 const USAGE = `Usage:
-  collectivus install --config <path> [--yes|--no]
+  collectivus install --config <path|url> [--yes|--no]
 
 Options:
-  --config <path>   Path to the collectivus JSON config (required)
-  --yes             Attach Claude Code without prompting
-  --no              Skip the Claude Code attach step
-  --help, -h        Show this help`
+  --config <path|url>  Path or http(s) URL to the collectivus JSON config (required)
+  --yes                Attach Claude Code without prompting
+  --no                 Skip the Claude Code attach step
+  --help, -h           Show this help`
 
 /**
  * Parse the argument list of `collectivus install`.
@@ -108,7 +108,7 @@ export async function runInstall(argv, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfigFn(parsed.configPath)
+    config = await loadConfigFn(parsed.configPath)
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)

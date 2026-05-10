@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
-import { ConfigError, loadConfig } from './config.js'
+import { ConfigError, loadConfigAsync } from './config.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
@@ -36,20 +36,24 @@ const SERVER_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
  */
 
 const USAGE = `Usage:
-  collectivus --config <path>                  Run with config file
-  collectivus --config <path> --print-config   Load config, print resolved JSON, exit
-  collectivus --config <path> --strict         Reject unknown top-level config keys
+  collectivus --config <path|url>              Run with config file or http(s) URL
+  collectivus --config <path|url> --print-config
+                                               Load config, print resolved JSON, exit
+  collectivus --config <path|url> --strict     Reject unknown top-level config keys
   collectivus --help                           Show this help
   collectivus --version                        Print program version
 
-Subcommands:
-  collectivus install [--config <path>] [--yes|--no]   Install the launch agent
-  collectivus uninstall [--detach]                     Remove the launch agent
-  collectivus attach   --config <path>                 Attach Claude Code settings
-  collectivus detach                                   Revert Claude Code settings
-  collectivus status                                   Show install + attach state
+Commands:
+  collectivus install [--config <path|url>]    Install the background daemon
+  collectivus uninstall                        Remove the daemon and detach attached clients
+  collectivus attach [--config <path|url>] [--port <n>] [--client claude|codex|all]
+                                               Point Claude Code or Codex at the local proxy
+  collectivus detach [--client claude|codex|all]
+                                               Restore Claude Code and/or Codex config
+  collectivus status                           Report daemon, config, recordings, attach state
+  collectivus export --config <path|url> [...] Convert recorded JSONL to Parquet
   collectivus config <set|get|list|delete|bootstrap-token> ...
-                                                       Operator CLI for per-gateway configs
+                                               Operator CLI for per-gateway configs
 
 Run \`collectivus <subcommand> --help\` for subcommand-specific options.`
 
@@ -81,7 +85,7 @@ export function parseArgs(argv) {
 
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return parseError('--config requires a path')
+      if (!value) return parseError('--config requires a path or URL')
       configPath = value
       continue
     }
@@ -100,7 +104,7 @@ export function parseArgs(argv) {
   }
 
   if (configPath === undefined) {
-    return parseError('--config <path> is required')
+    return parseError('--config <path|url> is required')
   }
 
   return { mode: 'config', configPath, printConfig, strict }
@@ -165,7 +169,7 @@ export async function run(argv, env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = loadConfig(parsed.configPath, { strict: parsed.strict, stderr })
+    config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)

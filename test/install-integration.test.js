@@ -36,7 +36,21 @@ function runCli(args, ctx) {
     child.stdout.on('data', function(c) { stdout += c.toString() })
     child.stderr.on('data', function(c) { stderr += c.toString() })
     child.once('error', reject)
-    child.once('exit', function(code) { resolve({ exitCode: code ?? -1, stdout, stderr }) })
+    child.once('exit', function(code) {
+      // The CLI's best-effort npm registry check writes an update notice to
+      // stderr whenever the published "latest" tag disagrees with the local
+      // package.json (e.g. running tests against an in-development version
+      // newer than what's on the registry). It's not an error; strip it so
+      // the assertions can still demand empty stderr for real failures.
+      const filtered = stderr
+        .split('\n')
+        .filter(function(line) {
+          return !/A newer version of collectivus is available/.test(line)
+            && !/Run 'npm install -g collectivus' to update/.test(line)
+        })
+        .join('\n')
+      resolve({ exitCode: code ?? -1, stdout, stderr: filtered })
+    })
   })
 }
 
@@ -92,7 +106,7 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     fs.rmSync(tmpHome, { recursive: true, force: true })
   })
 
-  it('install --yes writes plist + marker; uninstall --detach reverts both, preserving unrelated keys', async function() {
+  it('install --yes writes plist + marker; uninstall reverts both, preserving unrelated keys', async function() {
     const installResult = await runCli(['install', '--yes', '--config', configPath], {
       home: tmpHome, launchctlBin,
     })
@@ -121,7 +135,7 @@ describe.skipIf(!isDarwin)('install + uninstall round-trip (macOS)', function() 
     // Log directory is created during install.
     expect(fs.existsSync(logDir), 'log dir should be created').toBe(true)
 
-    const uninstallResult = await runCli(['uninstall', '--detach'], {
+    const uninstallResult = await runCli(['uninstall'], {
       home: tmpHome, launchctlBin,
     })
     expect(uninstallResult.stderr, uninstallResult.stderr).toBe('')

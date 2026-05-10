@@ -26,7 +26,20 @@ afterEach(function() {
 
 describe('parseDetachArgs', function() {
   it('treats no args as default', function() {
-    expect(parseDetachArgs([])).toEqual({ help: false })
+    expect(parseDetachArgs([])).toEqual({ help: false, client: 'claude' })
+  })
+
+  it('parses --client <name>', function() {
+    expect(parseDetachArgs(['--client', 'codex'])).toMatchObject({
+      help: false, client: 'codex',
+    })
+    expect(parseDetachArgs(['--client=all'])).toMatchObject({
+      help: false, client: 'all',
+    })
+  })
+
+  it('rejects unknown --client values', function() {
+    expect(parseDetachArgs(['--client', 'zed']).error).toMatch(/expected claude, codex, or all/)
   })
 
   it('returns help mode for --help', function() {
@@ -72,6 +85,63 @@ describe('runDetach', function() {
     expect(stdout.value()).toMatch(/Removed ANTHROPIC_BASE_URL=http:\/\/127\.0\.0\.1:8787/)
   })
 
+  it('--client codex: removes Codex marker and reports provider details', async function() {
+    const stdout = memo()
+    /** @type {object[]} */
+    const claudeCalls = []
+    /** @type {object[]} */
+    const codexCalls = []
+    const code = await runDetach(['--client', 'codex'], {
+      stdout, stderr: memo(),
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'config.toml'),
+      detachClaude(o) {
+        claudeCalls.push(o)
+        return Promise.resolve({ changed: true })
+      },
+      detachCodex(o) {
+        codexCalls.push(o)
+        return Promise.resolve({
+          changed: true,
+          removed: 'http://127.0.0.1:8787/v1',
+          restoredValue: 'openai',
+        })
+      },
+    })
+    expect(code).toBe(0)
+    expect(claudeCalls).toEqual([])
+    expect(codexCalls).toEqual([{ configPath: path.join(tmpDir, 'config.toml') }])
+    expect(stdout.value()).toMatch(/Codex reverted/)
+    expect(stdout.value()).toMatch(/Removed base_url=http:\/\/127\.0\.0\.1:8787\/v1/)
+    expect(stdout.value()).toMatch(/Restored model_provider=openai/)
+  })
+
+  it('--client all: reverts Claude Code and Codex', async function() {
+    const stdout = memo()
+    /** @type {object[]} */
+    const claudeCalls = []
+    /** @type {object[]} */
+    const codexCalls = []
+    const code = await runDetach(['--client', 'all'], {
+      stdout, stderr: memo(),
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'config.toml'),
+      detachClaude(o) {
+        claudeCalls.push(o)
+        return Promise.resolve({ changed: true })
+      },
+      detachCodex(o) {
+        codexCalls.push(o)
+        return Promise.resolve({ changed: true })
+      },
+    })
+    expect(code).toBe(0)
+    expect(claudeCalls).toHaveLength(1)
+    expect(codexCalls).toHaveLength(1)
+    expect(stdout.value()).toMatch(/Claude Code reverted/)
+    expect(stdout.value()).toMatch(/Codex reverted/)
+  })
+
   it('reports a warning when ANTHROPIC_BASE_URL was overridden externally', async function() {
     const stdout = memo()
     const code = await runDetach([], {
@@ -107,5 +177,15 @@ describe('runDetach', function() {
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/failed to detach Claude Code.*settings malformed/)
+  })
+
+  it('exits 1 when Codex detach throws', async function() {
+    const stderr = memo()
+    const code = await runDetach(['--client', 'codex'], {
+      stdout: memo(), stderr,
+      detachCodex() { return Promise.reject(new Error('config.toml malformed')) },
+    })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/failed to detach Codex.*config\.toml malformed/)
   })
 })

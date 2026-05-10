@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ConfigError, loadConfig } from '../src/config.js'
+import { ConfigError, isConfigUrl, loadConfig, loadConfigAsync } from '../src/config.js'
 
 /** @type {string} */
 let tmpDir
@@ -756,5 +756,87 @@ describe('loadConfig - valid configs', () => {
     }
     const p = writeJson('both.json', cfg)
     expect(loadConfig(p)).toEqual(cfg)
+  })
+})
+
+describe('isConfigUrl', () => {
+  it('matches http and https URLs', () => {
+    expect(isConfigUrl('http://example.com/c.json')).toBe(true)
+    expect(isConfigUrl('https://example.com/c.json')).toBe(true)
+    expect(isConfigUrl('HTTPS://EXAMPLE.COM/c.json')).toBe(true)
+  })
+
+  it('rejects non-URL paths', () => {
+    expect(isConfigUrl('/tmp/c.json')).toBe(false)
+    expect(isConfigUrl('./c.json')).toBe(false)
+    expect(isConfigUrl('c.json')).toBe(false)
+    expect(isConfigUrl('file:///tmp/c.json')).toBe(false)
+    expect(isConfigUrl('s3://bucket/c.json')).toBe(false)
+  })
+})
+
+describe('loadConfigAsync', () => {
+  /**
+   * @param {{ ok: boolean, status?: number, statusText?: string, body?: string }} resp
+   * @returns {typeof fetch}
+   */
+  function stubFetch(resp) {
+    async function fetchFn() {
+      return {
+        ok: resp.ok,
+        status: resp.status ?? (resp.ok ? 200 : 500),
+        statusText: resp.statusText ?? (resp.ok ? 'OK' : 'Server Error'),
+        async text() { return resp.body ?? '' },
+      }
+    }
+    return /** @type {any} */ (fetchFn)
+  }
+
+  it('delegates to sync loadConfig for filesystem paths', async () => {
+    const cfg = { version: 1 }
+    const p = writeJson('async-path.json', cfg)
+    await expect(loadConfigAsync(p)).resolves.toEqual(cfg)
+  })
+
+  it('fetches and validates a URL config', async () => {
+    const cfg = { version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp' } }
+    const fetchFn = stubFetch({ ok: true, body: JSON.stringify(cfg) })
+    await expect(
+      loadConfigAsync('https://example.com/c.json', { fetch: fetchFn })
+    ).resolves.toEqual(cfg)
+  })
+
+  it('reports HTTP errors as ConfigError', async () => {
+    const fetchFn = stubFetch({ ok: false, status: 404, statusText: 'Not Found' })
+    await expect(
+      loadConfigAsync('https://example.com/missing.json', { fetch: fetchFn })
+    ).rejects.toThrow(/HTTP 404 Not Found/)
+  })
+
+  it('wraps fetch failures as ConfigError', async () => {
+    async function fetchFn() { throw new Error('ECONNREFUSED') }
+    /** @type {unknown} */
+    let caught
+    try {
+      await loadConfigAsync('https://example.com/c.json', { fetch: /** @type {any} */ (fetchFn) })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeInstanceOf(ConfigError)
+    expect(/** @type {Error} */ (caught).message).toMatch(/failed to fetch.*ECONNREFUSED/)
+  })
+
+  it('reports JSON parse errors with the URL as source', async () => {
+    const fetchFn = stubFetch({ ok: true, body: '{not json' })
+    await expect(
+      loadConfigAsync('https://example.com/c.json', { fetch: fetchFn })
+    ).rejects.toThrow(/invalid JSON in https:\/\/example.com\/c.json/)
+  })
+
+  it('runs schema validation on URL-fetched configs', async () => {
+    const fetchFn = stubFetch({ ok: true, body: JSON.stringify({ version: 2 }) })
+    await expect(
+      loadConfigAsync('https://example.com/c.json', { fetch: fetchFn })
+    ).rejects.toThrow(/unsupported version/)
   })
 })

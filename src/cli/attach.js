@@ -1,21 +1,24 @@
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig } from '../config.js'
-import { attach as defaultAttach, defaultSettingsPath } from '../claude-code/settings.js'
+import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
+import { attach as defaultAttachClaude, defaultSettingsPath } from '../claude-code/settings.js'
+import { attach as defaultAttachCodex, defaultConfigPath as defaultCodexConfigPath } from '../codex/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
+import { pathMatchesPrefix } from '../proxy.js'
 
 /**
  * @import { AttachParseResult, AttachHooks, CollectivusConfig } from '../types.js'
  */
 
 const USAGE = `Usage:
-  collectivus attach (--config <path> | --port <n>)
+  collectivus attach (--config <path|url> | --port <n>) [--client claude|codex|all]
 
 Options:
-  --config <path>   Read the proxy port from this collectivus config
-  --port <n>        Use this port directly
-  --help, -h        Show this help
+  --config <path|url>  Read the proxy port from this collectivus config (path or http(s) URL)
+  --port <n>           Use this port directly
+  --client <name>      Tool to configure: claude, codex, or all (default: claude)
+  --help, -h           Show this help
 
-Edits ~/.claude/settings.json to point Claude Code at the local proxy.
+Edits Claude Code and/or Codex configuration to point at the local proxy.
 Exactly one of --config or --port is required.`
 
 /**
@@ -48,6 +51,16 @@ export function parseAttachArgs(argv) {
       r.port = n
       continue
     }
+    if (arg === '--client' || arg.startsWith('--client=')) {
+      const value = arg === '--client' ? argv[++i] : arg.slice('--client='.length)
+      if (!value) { r.error = '--client requires claude, codex, or all'; return r }
+      if (value !== 'claude' && value !== 'codex' && value !== 'all') {
+        r.error = `--client: expected claude, codex, or all (got "${value}")`
+        return r
+      }
+      r.client = value
+      continue
+    }
     r.error = `unknown argument: ${arg}`
     return r
   }
@@ -56,6 +69,7 @@ export function parseAttachArgs(argv) {
   } else if (r.configPath === undefined && r.port === undefined) {
     r.error = 'one of --config or --port is required'
   }
+  if (r.client === undefined) r.client = 'claude'
   return r
 }
 
@@ -63,7 +77,7 @@ export function parseAttachArgs(argv) {
  * Run `collectivus attach`.
  *
  * Resolves the proxy port from `--port` or `proxy.listen` in the supplied
- * config, then writes the marker + `env.ANTHROPIC_BASE_URL` to settings.json.
+ * config, then updates the selected client configuration.
  *
  * @param {string[]} argv
  * @param {AttachHooks} [hooks]
@@ -72,9 +86,11 @@ export function parseAttachArgs(argv) {
 export async function runAttach(argv, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
-  const attachFn = hooks.attach ?? defaultAttach
+  const attachClaude = hooks.attachClaude ?? hooks.attach ?? defaultAttachClaude
+  const attachCodex = hooks.attachCodex ?? defaultAttachCodex
   const loadConfigFn = hooks.loadConfig ?? defaultLoadConfig
   const settingsPath = hooks.settingsPath ?? defaultSettingsPath()
+  const codexConfigPath = hooks.codexConfigPath ?? defaultCodexConfigPath()
 
   const parsed = parseAttachArgs(argv)
   if (parsed.help) {
@@ -88,13 +104,13 @@ export async function runAttach(argv, hooks = {}) {
 
   /** @type {number} */
   let port
+  /** @type {CollectivusConfig | undefined} */
+  let config
   if (parsed.port !== undefined) {
     port = parsed.port
   } else if (parsed.configPath !== undefined) {
-    /** @type {CollectivusConfig} */
-    let config
     try {
-      config = loadConfigFn(parsed.configPath)
+      config = await loadConfigFn(parsed.configPath)
     } catch (err) {
       if (err instanceof ConfigError) {
         stderr.write(`config error: ${err.message}\n`)
@@ -118,21 +134,62 @@ export async function runAttach(argv, hooks = {}) {
     return 2
   }
 
-  const version = hooks.version ?? readPackageVersion()
-
-  /** @type {{ changed: boolean, prevValue?: string }} */
-  let result
-  try {
-    result = await attachFn({ port, version, settingsPath })
-  } catch (err) {
-    stderr.write(`error: failed to attach Claude Code: ${err instanceof Error ? err.message : String(err)}\n`)
+  if ((parsed.client === 'codex' || parsed.client === 'all') && config && !hasProxyRoute(config, '/v1/responses')) {
+    stderr.write(
+      'error: Codex attach requires a proxy upstream that routes /v1/responses ' +
+      '(for OpenAI, use match.path_prefix "/v1" with base_url "https://api.openai.com")\n'
+    )
     return 1
   }
 
-  stdout.write(`✓ Claude Code attached (${settingsPath})\n`)
-  stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${port}\n`)
-  if (result.prevValue !== undefined) {
-    stdout.write(`  (previous ANTHROPIC_BASE_URL was ${result.prevValue})\n`)
+  const version = hooks.version ?? readPackageVersion()
+
+  if (parsed.client === 'claude' || parsed.client === 'all') {
+    /** @type {{ changed: boolean, prevValue?: string }} */
+    let result
+    try {
+      result = await attachClaude({ port, version, settingsPath })
+    } catch (err) {
+      stderr.write(`error: failed to attach Claude Code: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+
+    stdout.write(`✓ Claude Code attached (${settingsPath})\n`)
+    stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${port}\n`)
+    if (result.prevValue !== undefined) {
+      stdout.write(`  (previous ANTHROPIC_BASE_URL was ${result.prevValue})\n`)
+    }
   }
+
+  if (parsed.client === 'codex' || parsed.client === 'all') {
+    /** @type {{ changed: boolean, prevValue?: string }} */
+    let result
+    try {
+      result = await attachCodex({ port, version, configPath: codexConfigPath })
+    } catch (err) {
+      stderr.write(`error: failed to attach Codex: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+
+    stdout.write(`✓ Codex attached (${codexConfigPath})\n`)
+    stdout.write('  model_provider = collectivus\n')
+    stdout.write(`  base_url = http://127.0.0.1:${port}/v1\n`)
+    if (result.prevValue !== undefined) {
+      stdout.write(`  (previous model_provider was ${result.prevValue})\n`)
+    }
+  }
+
   return 0
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {string} requestPath
+ * @returns {boolean}
+ */
+function hasProxyRoute(config, requestPath) {
+  return (config.proxy?.upstreams ?? []).some(function(upstream) {
+    const prefix = upstream?.match?.path_prefix
+    return typeof prefix === 'string' && prefix.length > 0 && pathMatchesPrefix(requestPath, prefix)
+  })
 }

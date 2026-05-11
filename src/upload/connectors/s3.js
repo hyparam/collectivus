@@ -209,7 +209,7 @@ function headerKey(headers, lower) {
 function joinPath(a, b) {
   const trimmed = a.endsWith('/') ? a.slice(0, -1) : a
   const next = b.startsWith('/') ? b : `/${b}`
-  return (trimmed + next) || '/'
+  return trimmed + next || '/'
 }
 
 /**

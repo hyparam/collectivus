@@ -40,7 +40,7 @@ function stubListener(name, opts = {}) {
       this.stops++
       if (opts.stopThrows) throw opts.stopThrows()
       if (opts.stopHangs) {
-        await new Promise((/** @type {(value?: undefined) => void} */ resolve) => { release = () => resolve() })
+        await new Promise(resolve => { release = () => resolve() })
       }
       this.stopped = true
     },
@@ -66,15 +66,15 @@ function stubFactory(name, opts = {}) {
   /** @type {ReturnType<typeof stubListener>[]} */
   const instances = []
   const state = { factory: /** @type {ListenerFactory} */ (() => Promise.reject(new Error('placeholder'))), calls: 0, instances }
-  state.factory = async () => {
+  state.factory = () => {
     state.calls++
-    if (opts.throws) throw opts.throws
+    if (opts.throws) return Promise.reject(opts.throws)
     if (opts.throwsOnCall !== undefined && state.calls === opts.throwsOnCall) {
-      throw new Error(`${name} factory throws on call #${opts.throwsOnCall}`)
+      return Promise.reject(new Error(`${name} factory throws on call #${opts.throwsOnCall}`))
     }
     const listener = stubListener(`${name}#${state.calls}`)
     instances.push(listener)
-    return listener
+    return Promise.resolve(listener)
   }
   return state
 }
@@ -204,7 +204,7 @@ describe('diffConfig', () => {
   })
 })
 
-describe('applyDiff — only proxy changes', () => {
+describe('applyDiff: only proxy changes', () => {
   it('restarts proxy and leaves otel + upload untouched', async () => {
     const oldCfg = gatewayConfig({
       otel: { listen: '127.0.0.1:4318' },
@@ -257,7 +257,7 @@ describe('applyDiff — only proxy changes', () => {
   })
 })
 
-describe('applyDiff — sink swap cascades to consumers', () => {
+describe('applyDiff: sink swap cascades to consumers', () => {
   it('restarts otel + proxy + upload when sink.dir changes (each owns a FileSink rooted there)', async () => {
     const oldCfg = gatewayConfig({
       otel: { listen: '127.0.0.1:4318' },
@@ -312,7 +312,7 @@ describe('applyDiff — sink swap cascades to consumers', () => {
   })
 })
 
-describe('applyDiff — section removal', () => {
+describe('applyDiff: section removal', () => {
   it('removes a stopped listener from the registry when its section is removed', async () => {
     const oldCfg = gatewayConfig({ upload: { bucket: 'b' } })
     const newCfg = gatewayConfig({ upload: null })
@@ -352,7 +352,7 @@ describe('applyDiff — section removal', () => {
   })
 })
 
-describe('applyDiff — failure modes', () => {
+describe('applyDiff: failure modes', () => {
   it('keeps the old listener bound when the new factory throws on a different-port restart', async () => {
     const oldCfg = gatewayConfig({
       proxy: {
@@ -437,7 +437,7 @@ describe('applyDiff — failure modes', () => {
   })
 })
 
-describe('applyDiff — sequential restarts', () => {
+describe('applyDiff: sequential restarts', () => {
   it('applies five back-to-back proxy changes without leaking listeners', async () => {
     /** @type {Map<string, StartedListener>} */
     const registry = new Map([['proxy', stubListener('proxy-0')]])
@@ -478,7 +478,7 @@ describe('applyDiff — sequential restarts', () => {
   })
 })
 
-describe('applyDiff — factoryBuilder failure', () => {
+describe('applyDiff: factoryBuilder failure', () => {
   it('logs and leaves the old registry intact when factoryBuilder throws', async () => {
     const oldCfg = gatewayConfig()
     const newCfg = gatewayConfig({

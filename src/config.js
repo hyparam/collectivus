@@ -448,9 +448,8 @@ function validateProxy(proxy) {
   proxy.upstreams.forEach(function(u, i) {
     const pointer = `/proxy/upstreams/${i}`
     validateUpstream(u, pointer)
-    // validateUpstream guarantees `name` is a non-empty string above. The
-    // cast keeps the duplicate-name check working under strict typing.
-    const { name } = /** @type {{ name: string }} */ (u)
+    // validateUpstream guarantees `name` is a non-empty string above.
+    const { name } = u
     if (seen.has(name)) {
       throw new ConfigError(
         `duplicate upstream name "${name}"`,

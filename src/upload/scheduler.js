@@ -47,7 +47,7 @@ export function createScheduler(options, deps = {}) {
       if (stopped) return
       try {
         const result = await options.tick()
-        lastRetry = !!(result && /** @type {TickResult} */ (result).retry)
+        lastRetry = !!(result && result.retry)
       } catch (err) {
         onError(err)
         lastRetry = true

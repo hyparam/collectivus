@@ -90,7 +90,7 @@ export class ConfigRegistry {
       throw new Error(`ConfigRegistry: invalid JSON in ${file}: ${msg}`)
     }
     validateCollectivusConfig(parsed)
-    const config = /** @type {CollectivusConfig} */ (parsed)
+    const config = parsed
     const etag = computeEtag(config)
     return { config, etag }
   }
@@ -112,7 +112,7 @@ export class ConfigRegistry {
       if (err instanceof ConfigError) throw err
       throw err
     }
-    const config = /** @type {CollectivusConfig} */ (configObj)
+    const config = configObj
     fs.mkdirSync(this.configsDir, { recursive: true })
     const file = this.fileFor(gatewayId)
     const canonical = canonicalJsonString(config)

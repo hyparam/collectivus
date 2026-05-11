@@ -277,7 +277,7 @@ export class ConfigClient extends EventEmitter {
         this.recordSuccess()
         return this.pollIntervalSeconds
       }
-      const newConfig = /** @type {CollectivusConfig} */ (parsed)
+      const newConfig = parsed
       const etag = serverEtag ?? this.etag ?? ''
       this.etag = etag
       writePersistedEtag(this.etagPath, etag)

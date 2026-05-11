@@ -45,7 +45,7 @@ function stubFetch(handlers) {
  * Build a deterministic timer pair so a test can fire a pending timeout
  * synchronously without waiting on real wall clock. Returning a numeric
  * handle (not a Node Timeout object) is fine because the sink only calls
- * `unref()` when the handle is an object — a guard we inherit by design.
+ * `unref()` when the handle is an object, a guard we inherit by design.
  *
  * @returns {{
  *   setTimeoutFn: (fn: () => void, ms: number) => unknown,
@@ -65,7 +65,7 @@ function makeFakeTimers() {
       return handle
     },
     clearTimeoutFn: (handle) => {
-      // Mirrors the sink's permissive `unknown` parameter — fakes don't have
+      // Mirrors the sink's permissive `unknown` parameter; fakes don't have
       // to track `clearTimeout` against the built-in's overload list.
       if (typeof handle === 'number') pending.delete(handle)
     },
@@ -163,7 +163,7 @@ function buildSink(overrides = {}) {
 
 /**
  * Generate `n` rows shaped like proxy exchanges so the body size is
- * predictable. Each row serialises to ~80 bytes — enough variation between
+ * predictable. Each row serialises to ~80 bytes, enough variation between
  * tests to hit row-count and byte thresholds independently.
  *
  * @param {number} n
@@ -180,13 +180,13 @@ function makeRows(n) {
 
 describe('ShippingSink construction', () => {
   it('throws when centralUrl is missing or empty', () => {
-    // @ts-expect-error — exercising the runtime guard
+    // @ts-expect-error: exercising the runtime guard
     expect(() => new ShippingSink({ identityClient: fakeIdentity() })).toThrow(/centralUrl/)
     expect(() => new ShippingSink({ centralUrl: '', identityClient: fakeIdentity() })).toThrow(/centralUrl/)
   })
 
   it('throws when identityClient is missing', () => {
-    // @ts-expect-error — exercising the runtime guard
+    // @ts-expect-error: exercising the runtime guard
     expect(() => new ShippingSink({ centralUrl: 'https://x/' })).toThrow(/identityClient/)
   })
 
@@ -210,7 +210,7 @@ describe('ShippingSink construction', () => {
   })
 })
 
-describe('ShippingSink batching — row count threshold', () => {
+describe('ShippingSink batching: row count threshold', () => {
   it('flushes exactly once when 1000 rows are written, sending all rows with the JWT', async () => {
     const { sink, fetch, identity } = buildSink({
       handlers: [() => jsonResponse(202, { accepted: 1000 })],
@@ -251,7 +251,7 @@ describe('ShippingSink batching — row count threshold', () => {
   })
 })
 
-describe('ShippingSink batching — byte threshold', () => {
+describe('ShippingSink batching: byte threshold', () => {
   it('flushes when total bytes (incl. newlines) reach maxBytes, before the row count threshold', async () => {
     // 200 rows × ~50 bytes ≈ 10 KB > 4 KB threshold → byte flush wins.
     const { sink, fetch } = buildSink({
@@ -284,14 +284,14 @@ describe('ShippingSink batching — byte threshold', () => {
       if (fetch.calls.length === 1) break
     }
     expect(fetch.calls.length).toBe(1)
-    // 1 MB / 8 KB ≈ 128 rows — must flush well before the row cap.
+    // 1 MB / 8 KB ≈ 128 rows, must flush well before the row cap.
     expect(written).toBeLessThan(DEFAULT_MAX_ROWS)
     expect(Buffer.byteLength(String(fetch.calls[0].init.body), 'utf8'))
       .toBeGreaterThanOrEqual(DEFAULT_MAX_BYTES)
   })
 })
 
-describe('ShippingSink batching — time threshold', () => {
+describe('ShippingSink batching: time threshold', () => {
   it('flushes when the timer fires (size threshold not hit)', async () => {
     const { sink, fetch, timers } = buildSink({
       handlers: [() => jsonResponse(202)],
@@ -335,7 +335,7 @@ describe('ShippingSink batching — time threshold', () => {
   })
 })
 
-describe('ShippingSink — JWT refresh on 401', () => {
+describe('ShippingSink: JWT refresh on 401', () => {
   it('refreshes once and retries when the first POST returns 401', async () => {
     const identity = fakeIdentity({ jwt: 'jwt-stale' })
     const { sink, fetch } = buildSink({
@@ -374,7 +374,7 @@ describe('ShippingSink — JWT refresh on 401', () => {
     await sink.writeRow({ seq: 0 })
 
     // The ship promise is held by the chain; close() drains it. We expect
-    // close to NOT throw — close swallows ship errors via whenIdle's
+    // close to NOT throw; close swallows ship errors via whenIdle's
     // Promise.allSettled.
     await sink.close()
 
@@ -383,7 +383,7 @@ describe('ShippingSink — JWT refresh on 401', () => {
   })
 })
 
-describe('ShippingSink — response status handling', () => {
+describe('ShippingSink: response status handling', () => {
   it('treats 202 (Accepted) as success', async () => {
     const { sink, fetch } = buildSink({
       handlers: [() => jsonResponse(202, { accepted: 1 })],
@@ -405,7 +405,7 @@ describe('ShippingSink — response status handling', () => {
   })
 })
 
-describe('ShippingSink — close and lifecycle', () => {
+describe('ShippingSink: close and lifecycle', () => {
   it('flushes any pending batch on close', async () => {
     const { sink, fetch, timers } = buildSink({
       handlers: [() => jsonResponse(202)],
@@ -423,7 +423,7 @@ describe('ShippingSink — close and lifecycle', () => {
     expect(timers.pending().length).toBe(0)
   })
 
-  it('is idempotent — second close is a no-op', async () => {
+  it('is idempotent: second close is a no-op', async () => {
     const { sink, fetch } = buildSink({
       handlers: [() => jsonResponse(202)],
     })
@@ -446,7 +446,7 @@ describe('ShippingSink — close and lifecycle', () => {
   })
 })
 
-describe('ShippingSink — URL composition', () => {
+describe('ShippingSink: URL composition', () => {
   it('composes URLs correctly when centralUrl ends in a slash', async () => {
     const { sink, fetch } = buildSink({
       handlers: [() => jsonResponse(202)],
@@ -481,28 +481,28 @@ describe('ShippingSink — URL composition', () => {
   })
 })
 
-describe('ShippingSink — JSON serialisation guard', () => {
+describe('ShippingSink: JSON serialisation guard', () => {
   it('throws when writeRow is given a value that JSON.stringify drops', async () => {
     const { sink } = buildSink()
     await expect(sink.writeRow(undefined)).rejects.toThrow(/JSON-serializable/)
   })
 })
 
-describe('ShippingSink — batch ordering', () => {
+describe('ShippingSink: batch ordering', () => {
   it('serialises ships per-signal so the server sees batches in submission order', async () => {
     /** @type {string[]} */
     const arrived = []
     const { sink } = buildSink({
       handlers: [
         async (_, init) => {
-          // Simulate a slow first request — the second batch must wait.
+          // Simulate a slow first request; the second batch must wait.
           await new Promise((r) => setImmediate(r))
           arrived.push(`batch-1:${parseFirstSeq(init.body)}`)
           return jsonResponse(202)
         },
-        async (_, init) => {
+        (_, init) => {
           arrived.push(`batch-2:${parseFirstSeq(init.body)}`)
-          return jsonResponse(202)
+          return Promise.resolve(jsonResponse(202))
         },
       ],
       batch: { maxRows: 2, maxBytes: 100_000, maxSeconds: 60 },
@@ -518,7 +518,7 @@ describe('ShippingSink — batch ordering', () => {
   })
 })
 
-describe('ShippingSink — error detail extraction', () => {
+describe('ShippingSink: error detail extraction', () => {
   it('surfaces a JSON `error` field when the server returns 5xx', async () => {
     const { sink } = buildSink({
       handlers: [
@@ -548,7 +548,7 @@ afterEach(() => {
 })
 
 beforeEach(() => {
-  // No-op — the ShippingSink owns no module-level state.
+  // No-op: the ShippingSink owns no module-level state.
 })
 
 /**

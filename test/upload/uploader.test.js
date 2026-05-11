@@ -192,7 +192,7 @@ describe('uploadPending', () => {
       connector,
       outputDir,
       today,
-      { sleep: async (ms) => { sleeps.push(ms) }, initialBackoffMs: 1000 }
+      { sleep: (ms) => { sleeps.push(ms); return Promise.resolve() }, initialBackoffMs: 1000 }
     )
 
     expect(putAttempts).toBe(3)
@@ -211,13 +211,13 @@ describe('uploadPending', () => {
     /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
-      async putObject() {
+      putObject() {
         putAttempts++
         const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 403'))
         err.statusCode = 403
-        throw err
+        return Promise.reject(err)
       },
-      async headObject() { return undefined },
+      headObject() { return Promise.resolve(undefined) },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -244,12 +244,12 @@ describe('uploadPending', () => {
     /** @type {StorageConnector} */
     const connector = {
       scheme: 'flaky',
-      async putObject() {
+      putObject() {
         const err = /** @type {Error & { statusCode: number }} */ (new Error('s3 PUT returned 503'))
         err.statusCode = 503
-        throw err
+        return Promise.reject(err)
       },
-      async headObject() { return undefined },
+      headObject() { return Promise.resolve(undefined) },
     }
 
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})

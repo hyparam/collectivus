@@ -751,16 +751,11 @@ async function runGatewayFlow(args) {
     config.otel = otel
   }
 
-  stdout.write('\nWhere should collectivus write recordings? Each signal lands in its\n')
-  stdout.write('own JSONL file under this directory.\n')
-  const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
-  /** @type {FileSinkConfig} */
-  const sink = { type: 'file', dir: sinkAns === '' ? defaultSink : sinkAns }
-  config.sink = sink
-
-  stdout.write('\nKeep a local Parquet query cache for `ctvs query`? [Y/n]\n')
-  const queryAns = (await prompt('Enable local query cache? [Y/n]: ')).trim()
-  config.query = { parquet: { enabled: isYes(queryAns) } }
+  stdout.write('\nWhere should this gateway keep its durable delivery outbox?\n')
+  stdout.write('Central server remains the canonical recording store; this directory\n')
+  stdout.write('is only a local retry spool.\n')
+  const outboxAns = (await prompt(`Outbox directory [${defaultSink}/outbox]: `)).trim()
+  if (outboxAns !== '') centralServer.outbox_dir = outboxAns
 
   const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
   if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0

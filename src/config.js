@@ -40,7 +40,7 @@ const ALLOWED_INGEST_KEYS = new Set([
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
-const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds'])
+const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds', 'outbox_dir'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
 const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
 const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
@@ -227,7 +227,8 @@ function validateConfig(cfg, opts) {
   if (cfg.gateway_id !== undefined) validateGatewayId(cfg.gateway_id)
   if (cfg.otel !== undefined) validateOtel(cfg.otel)
   if (cfg.proxy !== undefined) validateProxy(cfg.proxy)
-  if ((cfg.otel !== undefined || cfg.proxy !== undefined) && cfg.sink === undefined) {
+  const role = cfg.role === undefined ? 'standalone' : cfg.role
+  if ((cfg.otel !== undefined || cfg.proxy !== undefined) && cfg.sink === undefined && role !== 'gateway') {
     throw new ConfigError(
       'sink is required when otel or proxy is configured',
       { pointer: '/sink' }
@@ -412,6 +413,9 @@ function validateCentralServer(cs) {
         { pointer: '/central_server/poll_interval_seconds' }
       )
     }
+  }
+  if (cs.outbox_dir !== undefined) {
+    assertNonEmptyString(cs.outbox_dir, '/central_server/outbox_dir')
   }
 }
 

@@ -60,6 +60,20 @@ export interface ShippingSinkOptions {
   batch?: ShippingSinkBatchOptions
 }
 
+/** Construction options for the durable gateway outbox sink. */
+export interface OutboxSinkOptions {
+  /** Directory where per-signal outbox files are spooled. */
+  outboxDir: string
+  /** Base URL of the central control-plane server (same as `central_server.url`). */
+  centralUrl: string
+  /** Identity source providing JWTs and refresh — typically the gateway's `IdentityClient`. */
+  identityClient: ShippingSinkIdentitySource
+  /** Signal label embedded in the ingest URL (`/v1/ingest/<signal>`). */
+  signal: IngestSignal
+  /** Rotation thresholds. Defaults match the bead spec (1000 / 1 MB / 5 s). */
+  batch?: ShippingSinkBatchOptions
+}
+
 /**
  * Emitted by `ConfigClient` whenever a `GET /v1/config` returns 200 with a
  * config that passes gateway-side validation. B.4's hot-reload code subscribes

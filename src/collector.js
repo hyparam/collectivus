@@ -4,7 +4,7 @@ import { createServer } from './server.js'
 
 /**
  * @import { Server } from 'node:http'
- * @import { NormalizedLogRow, NormalizedServiceRow, MetricRowBase } from './types.js'
+ * @import { NormalizedLogRow, NormalizedServiceRow, MetricRowBase, Sink } from './types.js'
  * @import { UploadOptions } from './upload/upload.js'
  */
 
@@ -13,7 +13,7 @@ const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
 
 export class Collector {
-  /** @param {{ port?: number, host?: string, outputDir?: string, gatewayId: string, upload?: UploadOptions }} options */
+  /** @param {{ port?: number, host?: string, outputDir?: string, gatewayId: string, upload?: UploadOptions, rowSinks?: Partial<Record<'logs' | 'traces' | 'metrics', Sink>> }} options */
   constructor(options) {
     if (!options || typeof options.gatewayId !== 'string' || options.gatewayId.length === 0) {
       throw new Error('Collector: gatewayId is required')
@@ -24,6 +24,8 @@ export class Collector {
     this.outputDir = options.outputDir || './otel-data'
     this.gatewayId = options.gatewayId
     this.uploadOptions = options.upload
+    /** @type {Partial<Record<'logs' | 'traces' | 'metrics', Sink>> | undefined} */
+    this.rowSinks = options.rowSinks
     /** @type {Server | undefined} */
     this.server = undefined
     /** @type {{ start: () => Promise<void>, stop: () => Promise<void> } | undefined} */
@@ -84,7 +86,11 @@ export class Collector {
    * @param {string} signal
    * @param {unknown} data
    */
-  handleData(signal, data) {
+  async handleData(signal, data) {
+    if (this.rowSinks) {
+      await writeRowsToSinks(this.rowSinks, signal, data)
+      return
+    }
     writeRawEnvelope(this.outputDir, this.gatewayId, signal, data)
     writeNormalizedRows(this.outputDir, this.gatewayId, signal, data)
   }
@@ -137,6 +143,27 @@ function writeNormalizedRows(outputDir, gatewayId, signal, data) {
   let buf = ''
   for (const row of rows) buf += JSON.stringify(row) + '\n'
   fs.appendFileSync(filePath, buf)
+}
+
+/**
+ * Write normalized OTLP rows to Gateway-mode durable outbox sinks. Raw OTLP
+ * envelopes are intentionally not preserved in this path; Central server is
+ * the canonical recording store for managed gateways.
+ *
+ * @param {Partial<Record<'logs' | 'traces' | 'metrics', Sink>>} sinks
+ * @param {string} signal
+ * @param {unknown} data
+ * @returns {Promise<void>}
+ */
+async function writeRowsToSinks(sinks, signal, data) {
+  const rows = flattenSignalRows(signal, data)
+  if (rows.length === 0) return
+  if (signal !== 'logs' && signal !== 'traces' && signal !== 'metrics') return
+  const sink = sinks[signal]
+  if (!sink) return
+  for (const row of rows) {
+    await sink.writeRow(row)
+  }
 }
 
 /**
@@ -735,4 +762,3 @@ function objectRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
   return { ...value }
 }
-

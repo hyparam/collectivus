@@ -26,43 +26,49 @@ describe('bin/cli.js — subcommand dispatch', function() {
   it('dispatches `install --help`', async function() {
     const r = await runCli(['install', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus install/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs install/)
   })
 
   it('dispatches `uninstall --help`', async function() {
     const r = await runCli(['uninstall', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus uninstall/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs uninstall/)
   })
 
   it('dispatches `attach --help`', async function() {
     const r = await runCli(['attach', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus attach/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs attach/)
   })
 
   it('dispatches `detach --help`', async function() {
     const r = await runCli(['detach', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus detach/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs detach/)
   })
 
   it('dispatches `status --help`', async function() {
     const r = await runCli(['status', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus status/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs status/)
   })
 
   it('dispatches `config --help`', async function() {
     const r = await runCli(['config', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus config set/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs config set/)
   })
 
   it('dispatches `export --help`', async function() {
     const r = await runCli(['export', '--help'])
     expect(r.exitCode).toBe(0)
-    expect(r.stdout).toMatch(/Usage:\s+collectivus export/)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs export/)
+  })
+
+  it('dispatches `query --help`', async function() {
+    const r = await runCli(['query', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs query/)
   })
 
   it('passes subcommand args through (install with no --config)', async function() {

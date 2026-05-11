@@ -9,7 +9,7 @@ import { uninstallDaemon } from '../daemon/index.js'
  */
 
 const USAGE = `Usage:
-  collectivus uninstall
+  ctvs uninstall
 
 Removes the daemon and reverts any attached clients (Claude Code, Codex).
 

@@ -13,7 +13,7 @@ import { proxyRowsToParquet } from './proxy-parquet.js'
  */
 
 const USAGE = `Usage:
-  collectivus export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--gateway-id <id>] [--signal <s>]
+  ctvs export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--gateway-id <id>] [--signal <s>]
 
 Convert recorded JSONL under the configured sink dir into local Parquet files.
 Runs once and exits. Does not invoke the daily upload pipeline.

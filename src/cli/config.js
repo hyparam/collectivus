@@ -12,12 +12,12 @@ import { defaultPrompt } from './common.js'
  */
 
 const USAGE = `Usage:
-  collectivus config set <gateway-id> --server-config <path> --file <config.json>
-  collectivus config get <gateway-id> --server-config <path>
-  collectivus config list --server-config <path>
-  collectivus config delete <gateway-id> --server-config <path> [--yes]
-  collectivus config bootstrap-token issue <gateway-id> --server-config <path> [--ttl-seconds <n>]
-  collectivus config bootstrap-token revoke <gateway-id> --server-config <path>
+  ctvs config set <gateway-id> --server-config <path> --file <config.json>
+  ctvs config get <gateway-id> --server-config <path>
+  ctvs config list --server-config <path>
+  ctvs config delete <gateway-id> --server-config <path> [--yes]
+  ctvs config bootstrap-token issue <gateway-id> --server-config <path> [--ttl-seconds <n>]
+  ctvs config bootstrap-token revoke <gateway-id> --server-config <path>
 
 Options:
   --server-config <path>   Path to the server's collectivus.json config (required)

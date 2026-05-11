@@ -7,7 +7,7 @@ import { defaultConfigPath as defaultCodexConfigPath, detach as defaultDetachCod
  */
 
 const USAGE = `Usage:
-  collectivus detach [--client claude|codex|all]
+  ctvs detach [--client claude|codex|all]
 
 Removes the collectivus-managed config from Claude Code and/or Codex.
 Safe no-op when no marker is present.

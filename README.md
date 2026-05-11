@@ -22,15 +22,15 @@ npm install collectivus
 
 ## Quick start: record claude-code
 
-The fastest path is the interactive walkthrough. Run `collectivus` with no
-arguments and it asks whether to run in single-user (local) or enterprise
-(central server) mode, where to write recordings, and whether to install
-as a daemon and attach Claude Code. Enterprise mode also prints the
-`npx collectivus --config <url>` command teammates run on their own
-machines to forward LLM traffic and OTel telemetry to the server:
+The fastest path is the interactive walkthrough. Run `ctvs` with no
+arguments and choose Standalone, Gateway, or Central server. Standalone keeps
+config and recordings on this machine; Gateway pulls config from a central
+server; Central server vendors per-gateway config and receives shipped ingest.
+The walkthrough also asks where to write recordings and whether to install as
+a daemon and attach Claude Code when the selected mode uses a local proxy:
 
 ```bash
-npx collectivus
+npx -p collectivus ctvs
 ```
 
 By default it writes the config to `~/.hyp/collectivus.json`, the sink to
@@ -41,13 +41,13 @@ Or write a config by hand:
 
 ```bash
 # 1. Save examples/claude-code.json (proxy on 127.0.0.1:8787 → api.anthropic.com)
-npx collectivus --config examples/claude-code.json
+npx -p collectivus ctvs --config examples/claude-code.json
 
 # 2. In another terminal:
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
 
 # 3. Run a prompt, then watch the recording:
-tail -f collectivus-data/proxy.jsonl
+tail -f "collectivus-data/$USER/proxy/$(date -u +%F).jsonl"
 ```
 
 Full step-by-step: [`docs/walkthrough-claude-code.md`](docs/walkthrough-claude-code.md).
@@ -71,7 +71,8 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
     ],
     "redact_headers": ["authorization", "x-api-key", "anthropic-api-key", "cookie", "set-cookie"]
   },
-  "sink": { "type": "file", "dir": "./collectivus-data" }
+  "sink": { "type": "file", "dir": "./collectivus-data" },
+  "query": { "parquet": { "enabled": true } }
 }
 ```
 
@@ -80,8 +81,9 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 | `version` | Schema version. Required. Currently `1`. |
 | `otel`    | Enable the OTLP receiver. Omit to disable. |
 | `proxy`   | Enable the LLM proxy. Omit to disable. Requires `sink`. |
-| `sink`    | Where the proxy writes `proxy.jsonl`. Required when `otel` or `proxy` is set. (OTLP output also lands under `sink.dir`.) The walkthrough defaults this to `~/.hyp/collectivus/`. |
+| `sink`    | Root directory for JSONL recordings. Proxy rows land under `<sink.dir>/<gateway_id>/proxy/`; OTLP rows land under `<sink.dir>/<gateway_id>/<signal>/`. Required when `otel` or `proxy` is set. The walkthrough defaults this to `~/.hyp/collectivus/`. |
 | `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
+| `query`   | Optional. Configures the local `ctvs query` Parquet cache. `query.parquet.enabled` defaults to `true`; `query.parquet.dir` defaults to `<recording-root>/.collectivus-query/parquet`. |
 
 Add an `upload` block to drain JSONL to S3 once a day:
 
@@ -103,7 +105,7 @@ Add an `upload` block to drain JSONL to S3 once a day:
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
 ```bash
-npx collectivus --config collectivus.json --print-config
+npx -p collectivus ctvs --config collectivus.json --print-config
 ```
 
 ### v1 schema
@@ -129,17 +131,17 @@ Operator workflow on the server host:
 # 1. Issue a one-shot bootstrap token for a new gateway. Hand the printed token
 #    to the gateway operator over a secure channel — it can be redeemed exactly
 #    once.
-collectivus config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
+ctvs config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
 # → bt_abc123...
 
 # 2. Register the per-gateway config the gateway will pull. Validated server-
 #    side; an invalid file is rejected before any bytes hit disk.
-collectivus config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
+ctvs config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
 
-# 3. Inspect / list / delete as needed.
-collectivus config get gw-prod-1 --server-config /etc/collectivus-server.json
-collectivus config list --server-config /etc/collectivus-server.json
-collectivus config delete gw-prod-1 --server-config /etc/collectivus-server.json
+# 3. Operator inspection / cleanup tools.
+ctvs config get gw-prod-1 --server-config /etc/collectivus-server.json
+ctvs config list --server-config /etc/collectivus-server.json
+ctvs config delete gw-prod-1 --server-config /etc/collectivus-server.json
 ```
 
 Gateway side, with the token pasted into `central_server.identity.bootstrap_token`:
@@ -157,7 +159,7 @@ Gateway side, with the token pasted into `central_server.identity.bootstrap_toke
 ```
 
 ```bash
-collectivus --config /etc/collectivus.json
+ctvs --config /etc/collectivus.json
 # → exchanges the bootstrap token for a 30-day JWT, persists it to
 #   ~/.hyp/collectivus/identity.json, then begins polling /v1/config.
 ```
@@ -237,7 +239,7 @@ log record — partitioned by `service.name`.
 ### Verify the OTLP receiver
 
 ```bash
-npx collectivus --config collectivus.json &
+npx -p collectivus ctvs --config collectivus.json &
 curl -X POST localhost:4318/v1/traces \
   -H 'Content-Type: application/json' \
   -d '{"resourceSpans":[]}'
@@ -329,8 +331,8 @@ Use an OpenAI upstream whose path prefix matches `/v1/responses`:
 Attach or detach Codex explicitly:
 
 ```bash
-collectivus attach --config collectivus.json --client codex
-collectivus detach --client codex
+ctvs attach --config collectivus.json --client codex
+ctvs detach --client codex
 ```
 
 This writes a managed provider to `~/.codex/config.toml` using Codex's
@@ -352,13 +354,38 @@ proxy path collectivus records today. See OpenAI's Codex docs for the
 underlying [configuration file](https://developers.openai.com/codex/config-basic#codex-configuration-file)
 and [provider fields](https://developers.openai.com/codex/config-reference#model_providers).
 
+## Local query
+
+`ctvs query` reads local recordings only. It never contacts S3 and it does not
+auto-refresh its Parquet cache unless you ask for that explicitly.
+
+```bash
+ctvs query refresh --config collectivus.json
+ctvs query logs --config collectivus.json --since 1h
+ctvs query traces slow --config collectivus.json --limit 20
+ctvs query metrics series latency.ms --config collectivus.json
+ctvs query proxy get <exchange-id> --config collectivus.json --format json
+ctvs query sql "select serviceName, count(*) as logs from logs group by serviceName"
+```
+
+Cache files are written under
+`<recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet`
+with `data.parquet.meta.json` sidecars. If a command needs missing or stale
+cache data, it exits with the exact `ctvs query refresh ...` command to run.
+Use `--refresh always` when you want a query command to refresh first.
+
+Logical datasets are `logs`, `traces`, `metrics`, `proxy_exchanges`, and
+`proxy_stream_events`. `ctvs query schema <dataset>` prints the static schema,
+and `ctvs query catalog` shows which datasets have source and cached rows.
+
 ## CLI
 
 ```text
-collectivus --config <path>                  Run with config file
-collectivus --config <path> --print-config   Validate + print resolved config
-collectivus export --config <path> [...]     Convert recorded JSONL to local Parquet (one-shot)
-collectivus --help                           Show usage
+ctvs --config <path>                         Run with config file
+ctvs --config <path> --print-config          Validate + print resolved config
+ctvs query <command> [...]                   Query local recordings
+ctvs export --config <path> [...]            Convert recorded JSONL to local Parquet (one-shot)
+ctvs --help                                  Show usage
 ```
 
 `SIGINT` and `SIGTERM` trigger graceful shutdown: stop accepting new requests,
@@ -366,7 +393,7 @@ drain in-flight, fsync sinks, exit 0.
 
 ### Export to Parquet on demand
 
-`collectivus export` walks the configured sink dir and converts what it finds
+`ctvs export` walks the configured sink dir and converts what it finds
 into local Parquet. Runs once and exits — independent of the daily upload
 scheduler, and includes today's open files (which the upload pipeline
 deliberately skips).
@@ -375,19 +402,19 @@ Two sinks are drained:
 
 | Source | Destination |
 | --- | --- |
-| `<sink.dir>/proxy.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
-| `<sink.dir>/services/<svc>/<signal>-<date>.jsonl` (OTLP) | `<out>/<svc>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
+| `<sink.dir>/<gateway_id>/proxy/<date>.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
+| `<sink.dir>/<gateway_id>/<signal>/<date>.jsonl` (OTLP) | `<out>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
 
 The two proxy row kinds (`exchange` and `stream_event`) get their own typed
 schemas. Headers are JSON columns; bodies are preserved as strings.
 
 ```text
-collectivus export --config <path> [--out <dir>] [--date YYYY-MM-DD]
-                                   [--service <name>] [--signal logs|traces|metrics]
+ctvs export --config <path> [--out <dir>] [--date YYYY-MM-DD]
+                            [--gateway-id <id>] [--signal logs|traces|metrics]
 ```
 
-`--date`, `--service`, and `--signal` only filter the OTLP path; `proxy.jsonl`
-is always drained when present.
+`--date`, `--gateway-id`, and `--signal` only filter the OTLP path; proxy
+JSONL is always drained when present.
 
 ## Programmatic use
 
@@ -414,7 +441,7 @@ through the proxy in the same step.
 
 ```bash
 npm install -g collectivus
-collectivus install --config /path/to/collectivus.json
+ctvs install --config /path/to/collectivus.json
 # Configure Claude Code to use this proxy? [Y/n] y
 # ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
 # ✓ Claude Code attached (~/.claude/settings.json)
@@ -432,7 +459,7 @@ daemon starts at login and launchd restarts it if it exits. Logs land in
 
 ```bash
 npm install -g collectivus
-collectivus install --config /path/to/collectivus.json
+ctvs install --config /path/to/collectivus.json
 # ✓ Daemon installed (systemd unit: com.hyparam.collectivus.service)
 # ✓ Claude Code attached (~/.claude/settings.json)
 ```
@@ -473,12 +500,13 @@ the binary into a per-invocation cache that is not stable across runs.
 
 | Command | Purpose |
 |---------|---------|
-| `collectivus install --config <path> [--yes\|--no]` | Install LaunchAgent and (optionally) attach Claude Code |
-| `collectivus uninstall` | Stop and remove the LaunchAgent; revert any attached clients (Claude Code, Codex) |
-| `collectivus attach (--config <path> \| --port <n>) [--client claude\|codex\|all]` | Route Claude Code and/or Codex through the proxy without touching the daemon |
-| `collectivus detach [--client claude\|codex\|all]` | Revert Claude Code and/or Codex without uninstalling the daemon |
-| `collectivus status` | Print daemon (loaded / PID) and Claude Code (attached) state |
-| `collectivus export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
+| `ctvs install --config <path> [--yes\|--no]` | Install LaunchAgent and (optionally) attach Claude Code |
+| `ctvs uninstall` | Stop and remove the LaunchAgent; revert any attached clients (Claude Code, Codex) |
+| `ctvs attach (--config <path> \| --port <n>) [--client claude\|codex\|all]` | Route Claude Code and/or Codex through the proxy without touching the daemon |
+| `ctvs detach [--client claude\|codex\|all]` | Revert Claude Code and/or Codex without uninstalling the daemon |
+| `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
+| `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
+| `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
 Claude Code unattended, or `--no` to skip the attach step.
@@ -486,7 +514,7 @@ Claude Code unattended, or `--no` to skip the attach step.
 ### Status
 
 ```bash
-collectivus status
+ctvs status
 # Daemon
 #   Status: loaded (PID 12345)
 #   Plist: /Users/you/Library/LaunchAgents/com.hyparam.collectivus.plist
@@ -503,16 +531,16 @@ collectivus status
 #   Settings: /Users/you/.claude/settings.json
 ```
 
-> On Linux, `collectivus status` does not yet report systemd unit state.
+> On Linux, `ctvs status` does not yet report systemd unit state.
 > Use `systemctl --user status com.hyparam.collectivus.service` for the
-> daemon view; `collectivus status` will still report Claude Code attach
+> daemon view; `ctvs status` will still report Claude Code attach
 > state correctly.
 
 ### Reverting
 
 ```bash
-collectivus detach [--client claude|codex|all]   # un-route, leave daemon running
-collectivus uninstall                            # remove daemon and revert attached clients
+ctvs detach [--client claude|codex|all]          # un-route, leave daemon running
+ctvs uninstall                                   # remove daemon and revert attached clients
 ```
 
 All revert paths are idempotent and tolerate already-reverted state.

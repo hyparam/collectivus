@@ -21,7 +21,7 @@ export class ConfigError extends Error {
 }
 
 const ALLOWED_TOP_KEYS = new Set([
-  'version', 'role', 'gateway_id', 'otel', 'proxy', 'sink', 'upload', 'server', 'central_server',
+  'version', 'role', 'gateway_id', 'otel', 'proxy', 'sink', 'upload', 'query', 'server', 'central_server',
 ])
 const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
 const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
@@ -29,6 +29,8 @@ const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
+const ALLOWED_QUERY_KEYS = new Set(['parquet'])
+const ALLOWED_QUERY_PARQUET_KEYS = new Set(['enabled', 'dir'])
 const ALLOWED_SERVER_KEYS = new Set([
   'control_plane_listen', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
 ])
@@ -233,6 +235,7 @@ function validateConfig(cfg, opts) {
   }
   if (cfg.sink !== undefined) validateSink(cfg.sink)
   if (cfg.upload !== undefined) validateUpload(cfg.upload)
+  if (cfg.query !== undefined) validateQuery(cfg.query)
   validateRole(cfg)
 }
 
@@ -561,6 +564,29 @@ function validateUpload(upload) {
     }
   }
   if (upload.endpoint !== undefined) assertNonEmptyString(upload.endpoint, '/upload/endpoint')
+}
+
+/**
+ * @param {unknown} query
+ */
+function validateQuery(query) {
+  assertObject(query, '/query')
+  assertOnlyKeys(query, ALLOWED_QUERY_KEYS, '/query')
+  if (query.parquet !== undefined) validateQueryParquet(query.parquet)
+}
+
+/**
+ * @param {unknown} parquet
+ */
+function validateQueryParquet(parquet) {
+  assertObject(parquet, '/query/parquet')
+  assertOnlyKeys(parquet, ALLOWED_QUERY_PARQUET_KEYS, '/query/parquet')
+  if (parquet.enabled !== undefined && typeof parquet.enabled !== 'boolean') {
+    throw new ConfigError('must be a boolean', { pointer: '/query/parquet/enabled' })
+  }
+  if (parquet.dir !== undefined) {
+    assertNonEmptyString(parquet.dir, '/query/parquet/dir')
+  }
 }
 
 /**

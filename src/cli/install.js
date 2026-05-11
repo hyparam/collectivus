@@ -18,7 +18,7 @@ import { installDaemon } from '../daemon/index.js'
  */
 
 const USAGE = `Usage:
-  collectivus install --config <path|url> [--yes|--no]
+  ctvs install --config <path|url> [--yes|--no]
 
 Options:
   --config <path|url>  Path or http(s) URL to the collectivus JSON config (required)
@@ -100,8 +100,8 @@ export async function runInstall(argv, hooks = {}) {
 
   if (isNpxBinPath(binPath)) {
     stderr.write(
-      'error: `collectivus install` requires a global install. ' +
-      'Run `npm install -g collectivus` first, then `collectivus install`.\n'
+      'error: `ctvs install` requires a global install. ' +
+      'Run `npm install -g collectivus` first, then `ctvs install`.\n'
     )
     return 1
   }
@@ -161,7 +161,7 @@ export async function runInstall(argv, hooks = {}) {
   } else {
     stderr.write(
       'warning: not a TTY and neither --yes nor --no provided; skipping Claude Code attach. ' +
-      'Run `collectivus attach` later to opt in.\n'
+      'Run `ctvs attach` later to opt in.\n'
     )
     shouldAttach = false
   }

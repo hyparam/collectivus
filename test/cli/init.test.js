@@ -104,6 +104,7 @@ describe('runInit', function() {
       })
       expect(written.proxy.redact_headers).toContain('x-api-key')
       expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
+      expect(written.query).toEqual({ parquet: { enabled: true } })
       expect(written.otel).toBeUndefined()
       expect(written.upload).toBeUndefined()
       expect(stdout.value()).toMatch(/Wrote/)
@@ -261,7 +262,7 @@ describe('runInit', function() {
       expect(code).toBe(0)
       expect(installCalls).toHaveLength(0)
       expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
-      expect(stdout.value()).toMatch(/npx collectivus --config/)
+      expect(stdout.value()).toMatch(/npx -p collectivus ctvs --config/)
       expect(stdout.value()).toMatch(/npm install -g collectivus/)
     })
   })
@@ -572,6 +573,7 @@ describe('runInit', function() {
         '1', // anthropic
         '', // default proxy listen
         sinkDir,
+        '', // keep local query cache
         cfgPath, // save path
         'y', // confirm write
         'n', // decline daemon install
@@ -593,10 +595,11 @@ describe('runInit', function() {
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
       expect(written.proxy.upstreams[0].name).toBe('anthropic')
       expect(written.sink.dir).toBe(sinkDir)
+      expect(written.query).toEqual({ parquet: { enabled: true } })
       expect(written.otel).toBeUndefined()
       const loaded = loadConfig(cfgPath)
       expect(loaded.role).toBe('gateway')
-      expect(stdout.value()).toMatch(/collectivus config set <gateway-id>/)
+      expect(stdout.value()).toMatch(/ctvs config set <gateway-id>/)
       expect(stdout.value()).toMatch(/before this gateway will see anything to load/)
       expect(stdout.value()).toMatch(/bootstrap_token in/)
       expect(asked.some(function(q) { return /bootstrap.token/i.test(q) })).toBe(false)
@@ -613,6 +616,7 @@ describe('runInit', function() {
         '2', // capture: otel only
         '127.0.0.1:4319', // otel listen override
         path.join(tmpDir, 'gw-sink'),
+        '',
         cfgPath,
         'y',
       ])
@@ -643,6 +647,7 @@ describe('runInit', function() {
         '1', // capture: proxy only
         '1', '', // anthropic, default listen
         path.join(tmpDir, 'gw-sink'),
+        '',
         cfgPath,
         'y', 'n',
       ])
@@ -672,6 +677,7 @@ describe('runInit', function() {
         '1', // capture proxy
         '1', '', // anthropic, default listen
         path.join(tmpDir, 'gw-sink'),
+        '',
         cfgPath, 'y', 'n',
       ])
       const code = await runInit({
@@ -719,10 +725,11 @@ describe('runInit', function() {
       expect(typeof written.server.identity_issuer.secret).toBe('string')
       expect(written.server.identity_issuer.secret.length).toBe(64)
       expect(written.server.identity_issuer.secret).toMatch(/^[0-9a-f]+$/)
+      expect(written.query).toEqual({ parquet: { enabled: true } })
       const loaded = loadConfig(cfgPath)
       expect(loaded.role).toBe('server')
-      expect(stdout.value()).toMatch(/collectivus config bootstrap-token issue/)
-      expect(stdout.value()).toMatch(/collectivus config set <gateway-id>/)
+      expect(stdout.value()).toMatch(/ctvs config bootstrap-token issue/)
+      expect(stdout.value()).toMatch(/ctvs config set <gateway-id>/)
     })
 
     it('falls back to a generated secret when the operator-supplied value is too short', async function() {

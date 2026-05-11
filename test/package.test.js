@@ -12,12 +12,22 @@ describe('package.json', () => {
     expect(packageJson.license).toBe('MIT')
   })
   it('should have precise dependency versions', () => {
-    const { devDependencies } = packageJson
-    Object.values(devDependencies).forEach(version => {
+    const { dependencies, devDependencies } = packageJson
+    Object.values({ ...dependencies, ...devDependencies }).forEach(version => {
       expect(version).toMatch(/^\d+\.\d+\.\d+$/)
     })
   })
-  it('should have no dependencies', () => {
-    expect('dependencies' in packageJson).toBe(false)
+  it('exposes ctvs and collectivus binaries', () => {
+    expect(packageJson.bin).toMatchObject({
+      ctvs: 'bin/cli.js',
+      collectivus: 'bin/cli.js',
+    })
+  })
+  it('should have direct query dependencies', () => {
+    expect(packageJson.dependencies).toMatchObject({
+      hyparquet: '1.25.8',
+      'hyparquet-compressors': '1.1.1',
+      squirreling: '0.12.19',
+    })
   })
 })

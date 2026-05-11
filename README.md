@@ -35,6 +35,10 @@ passing the same arguments you would pass to `ctvs`:
 # Central server, gateway, or standalone: selected by role in the config file.
 docker run --rm ghcr.io/hyparam/collectivus:latest --config /config/collectivus.json
 
+# Same, but with config JSON injected as an environment variable.
+docker run --rm -e COLLECTIVUS_CONFIG_JSON ghcr.io/hyparam/collectivus:latest \
+  --config-env COLLECTIVUS_CONFIG_JSON
+
 # Hosted-discovery rendezvous server: selected by the rendezvous subcommand.
 docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
 ```
@@ -292,17 +296,22 @@ uploads).
 
 ### Credentials
 
-Credentials are never stored in the config. They are resolved at daemon
-start from the environment:
+Credentials are never stored in the config. They are resolved at daemon start
+from one of these sources:
 
-- `AWS_ACCESS_KEY_ID` (required)
-- `AWS_SECRET_ACCESS_KEY` (required)
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for local/dev or explicit
+  static credentials.
+- ECS task-role credentials exposed through
+  `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI`.
+- `AWS_CONTAINER_AUTHORIZATION_TOKEN` or
+  `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` when the container credential
+  endpoint requires an auth token.
 - `AWS_SESSION_TOKEN` (optional, for temporary credentials)
 - `AWS_REGION` (optional; the `upload.region` config field overrides this)
 
-When `upload` is set in the config but `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` are missing from the environment, the daemon
-fails fast at startup rather than at the first daily tick.
+When `upload` is set in the config but no supported AWS credential source is
+available, the daemon fails fast at startup rather than at the first daily tick.
 
 ## OTLP receiver
 

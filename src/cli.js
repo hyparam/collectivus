@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
-import { ConfigError, loadConfigAsync } from './config.js'
+import { ConfigError, loadConfigAsync, parseConfig } from './config.js'
 import { resolveStandaloneGatewayId } from './gateway_id.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
@@ -11,6 +11,7 @@ import { Recorder } from './recorder.js'
 import { ControlPlane } from './server/control_plane.js'
 import { defaultSinkDir as defaultIngestSinkDir } from './server/ingest.js'
 import { FileSink } from './sinks/file.js'
+import { hasAwsCredentialSource } from './upload/aws_credentials.js'
 import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
 
@@ -27,12 +28,13 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 /**
  * @import { Server } from 'node:http'
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from './types.js'
- * @import { ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
+ * @import { ConfigResult, ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
  * @import { ConfigChangedEvent } from './gateway/types.d.ts'
  */
 
 const USAGE = `Usage:
   ctvs --config <path|url>                     Run with config file or http(s) URL
+  ctvs --config-env <env-var>                  Run from config JSON in an environment variable
   ctvs --config-endpoint <url>                 Run from a central-server setup URL
   ctvs --config <path|url> --print-config
                                                Load config, print resolved JSON, exit
@@ -71,6 +73,8 @@ export function parseArgs(argv) {
   let configPath
   /** @type {string | undefined} */
   let configEndpoint
+  /** @type {string | undefined} */
+  let configEnv
   let printConfig = false
   let strict = false
 
@@ -89,7 +93,19 @@ export function parseArgs(argv) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
       if (!value) return parseError('--config requires a path or URL')
       if (configEndpoint !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      if (configEnv !== undefined) return parseError('--config and --config-env are mutually exclusive')
       configPath = value
+      continue
+    }
+
+    if (arg === '--config-env' || arg.startsWith('--config-env=')) {
+      const value = arg === '--config-env' ? argv[++i] : arg.slice('--config-env='.length)
+      if (!value) return parseError('--config-env requires an environment variable name')
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return parseError('--config-env must be an environment variable name')
+      if (configPath !== undefined || configEndpoint !== undefined) {
+        return parseError('--config-env cannot be combined with --config or --config-endpoint')
+      }
+      configEnv = value
       continue
     }
 
@@ -98,6 +114,7 @@ export function parseArgs(argv) {
       if (!value) return parseError('--config-endpoint requires a URL')
       if (!isHttpUrl(value)) return parseError('--config-endpoint requires an http(s) URL')
       if (configPath !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      if (configEnv !== undefined) return parseError('--config-endpoint and --config-env are mutually exclusive')
       configEndpoint = value
       configPath = value
       continue
@@ -116,11 +133,15 @@ export function parseArgs(argv) {
     return parseError(`unknown argument: ${arg}`)
   }
 
-  if (configPath === undefined) {
-    return parseError('--config <path|url> or --config-endpoint <url> is required')
+  if (configPath === undefined && configEnv === undefined) {
+    return parseError('--config <path|url>, --config-env <env-var>, or --config-endpoint <url> is required')
   }
 
-  return { mode: 'config', configPath, printConfig, strict }
+  /** @type {ConfigResult} */
+  const result = { mode: 'config', printConfig, strict }
+  if (configPath !== undefined) result.configPath = configPath
+  if (configEnv !== undefined) result.configEnv = configEnv
+  return result
 }
 
 /**
@@ -191,7 +212,12 @@ export async function run(argv, env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
+    if (parsed.configEnv) {
+      config = loadConfigFromEnv(parsed.configEnv, env, { strict: parsed.strict, stderr })
+    } else {
+      if (!parsed.configPath) throw new ConfigError('config path is missing')
+      config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
+    }
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)
@@ -214,6 +240,18 @@ export async function run(argv, env, hooks = {}) {
 }
 
 /**
+ * @param {string} envName
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void } }} opts
+ * @returns {CollectivusConfig}
+ */
+function loadConfigFromEnv(envName, env, opts) {
+  const raw = env?.[envName]
+  if (!raw) throw new ConfigError(`environment variable ${envName} is not set`)
+  return parseConfig(raw, `env:${envName}`, opts)
+}
+
+/**
  * Run the normal listener/gateway lifecycle from an already constructed
  * config object. Callers use this when the config is intentionally in memory
  * only, such as `ctvs join` after resolving a hosted-discovery join code.
@@ -233,11 +271,11 @@ export async function runWithConfig(config, env, hooks = {}) {
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
 
-  // Fail at boot rather than at the first daily uploader tick when the
-  // upload section is configured but AWS credentials aren't in the env.
-  if (config.upload && (!env?.AWS_ACCESS_KEY_ID || !env?.AWS_SECRET_ACCESS_KEY)) {
+  // Fail at boot rather than at the first daily uploader tick when the upload
+  // section is configured but no supported AWS credential source is available.
+  if (config.upload && !hasAwsCredentialSource(env ?? {})) {
     stderr.write(
-      'config error: upload.bucket is set but AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not in the environment.\n'
+      'config error: upload.bucket is set but no AWS credential source is available; set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or run with an ECS task role.\n'
     )
     return 1
   }

@@ -53,7 +53,7 @@ describe('parseArgs', () => {
   it('requires --config', () => {
     const r = parseArgs([])
     expect(r.mode).toBe('error')
-    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
+    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
   })
 
   it('parses --config <path>', () => {
@@ -66,6 +66,18 @@ describe('parseArgs', () => {
     expect(parseArgs(['--config=/tmp/c.json'])).toEqual({
       mode: 'config', configPath: '/tmp/c.json', printConfig: false, strict: false,
     })
+  })
+
+  it('parses --config-env <env-var>', () => {
+    expect(parseArgs(['--config-env', 'COLLECTIVUS_CONFIG_JSON'])).toEqual({
+      mode: 'config', configEnv: 'COLLECTIVUS_CONFIG_JSON', printConfig: false, strict: false,
+    })
+  })
+
+  it('rejects invalid --config-env names', () => {
+    const r = parseArgs(['--config-env', 'not-valid'])
+    expect(r.mode).toBe('error')
+    if (r.mode === 'error') expect(r.message).toMatch(/environment variable name/)
   })
 
   it('parses --config-endpoint <url>', () => {
@@ -85,6 +97,12 @@ describe('parseArgs', () => {
 
   it('rejects --config with --config-endpoint', () => {
     const r = parseArgs(['--config', '/tmp/c.json', '--config-endpoint', 'https://central.example/config'])
+    expect(r.mode).toBe('error')
+    if (r.mode === 'error') expect(r.message).toMatch(/mutually exclusive/)
+  })
+
+  it('rejects --config-env with --config', () => {
+    const r = parseArgs(['--config-env', 'COLLECTIVUS_CONFIG_JSON', '--config', '/tmp/c.json'])
     expect(r.mode).toBe('error')
     if (r.mode === 'error') expect(r.message).toMatch(/mutually exclusive/)
   })
@@ -167,7 +185,7 @@ describe('run(): help and arg errors', () => {
     const stderr = memo()
     const code = await run([], {}, { stdout, stderr })
     expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
     expect(stderr.value()).toMatch(/Usage:/)
   })
 })
@@ -198,7 +216,7 @@ describe('run(): walkthrough dispatch', () => {
     })
     expect(code).toBe(2)
     expect(initCalls).toBe(0)
-    expect(stderr.value()).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
   })
 })
 
@@ -288,6 +306,31 @@ describe('run(): --config <path>', () => {
     expect(JSON.parse(stdout.value())).toEqual(cfg)
   })
 
+  it('--config-env loads config JSON from the environment', async () => {
+    const cfg = {
+      version: 1,
+      otel: { listen: '0.0.0.0:4318' },
+      sink: { type: 'file', dir: '/tmp/x' },
+    }
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run(
+      ['--config-env', 'COLLECTIVUS_CONFIG_JSON', '--print-config'],
+      { COLLECTIVUS_CONFIG_JSON: JSON.stringify(cfg) },
+      { stdout, stderr }
+    )
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout.value())).toEqual(cfg)
+  })
+
+  it('--config-env reports a config error when the environment variable is missing', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    const code = await run(['--config-env', 'COLLECTIVUS_CONFIG_JSON'], {}, { stdout, stderr })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/environment variable COLLECTIVUS_CONFIG_JSON is not set/)
+  })
+
   it('starts the uploader when upload is configured and AWS creds are present', async () => {
     const sinkDir = path.join(tmpDir, 'data')
     const cfg = {
@@ -315,6 +358,31 @@ describe('run(): --config <path>', () => {
     expect(stderr.value()).not.toMatch(/AWS_ACCESS_KEY/)
   })
 
+  it('starts the uploader when upload is configured with ECS task-role credentials', async () => {
+    const sinkDir = path.join(tmpDir, 'data')
+    const cfg = {
+      version: 1,
+      otel: { listen: '127.0.0.1:0' },
+      sink: { type: 'file', dir: sinkDir },
+      upload: { bucket: 'b', prefix: 'collectivus', time: '03:14' },
+    }
+    const cfgPath = writeConfig(cfg)
+    const stdout = memo()
+    const stderr = memo()
+    /** @type {(signal: string) => void} */
+    let trigger = noop
+    const env = { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: '/v2/credentials/task' }
+    const result = run(['--config', cfgPath], env, {
+      stdout, stderr,
+      onShutdownRequested: (handler) => { trigger = handler },
+    })
+    await waitFor(() => stdout.value().includes('Uploader scheduled'))
+    trigger('SIGTERM')
+    expect(await result).toBe(0)
+    expect(stdout.value()).toMatch(/Uploader scheduled for 03:14 UTC, target s3:\/\/b\/collectivus/)
+    expect(stderr.value()).not.toMatch(/credential source/)
+  })
+
   it('exits 1 with a config error before binding any listener when AWS creds are missing', async () => {
     const sinkDir = path.join(tmpDir, 'data')
     const cfg = {
@@ -330,7 +398,7 @@ describe('run(): --config <path>', () => {
     const code = await run(['--config', cfgPath], {}, { stdout, stderr })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(
-      /config error: upload\.bucket is set but AWS_ACCESS_KEY_ID \/ AWS_SECRET_ACCESS_KEY are not in the environment\./
+      /config error: upload\.bucket is set but no AWS credential source is available; set AWS_ACCESS_KEY_ID\/AWS_SECRET_ACCESS_KEY or run with an ECS task role\./
     )
     // Boot must fail before the otel listener gets a chance to bind.
     expect(stdout.value()).not.toMatch(/OTLP listener bound/)

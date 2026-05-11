@@ -279,8 +279,8 @@ async function confirmAndWrite(args) {
     writeFile(cfgPath, json + '\n')
     stdout.write(`✓ Wrote ${cfgPath}\n`)
     if (config.upload) {
-      stdout.write('ⓘ Upload requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY in env.\n')
-      stdout.write('  Daemon will fail fast at start if they are missing.\n')
+      stdout.write('ⓘ Upload uses AWS env credentials or an ECS task role.\n')
+      stdout.write('  Daemon will fail fast at start if no credential source is available.\n')
     }
     return true
   } catch (err) {
@@ -453,9 +453,9 @@ async function askUpload(prompt, stdout, stderr) {
     }
   }
 
-  stdout.write('\nNote: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION must be\n')
-  stdout.write('set when the daemon runs. The walkthrough will not store credentials\n')
-  stdout.write('in the config file.\n')
+  stdout.write('\nNote: upload uses AWS env credentials or an ECS task role when the\n')
+  stdout.write('daemon runs. The walkthrough will not store credentials in the config\n')
+  stdout.write('file.\n')
 
   /** @type {UploadConfig} */
   const upload = { bucket, region, prefix, time, signals }

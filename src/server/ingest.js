@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { GATEWAY_ID_PATTERN } from '../gateway_id.js'
 import { getClaims } from './auth.js'
 import { parseContentType, readTextBody, writeError, writeJson, writeRetryAfterJson } from './http.js'
 import { TokenBucket } from './rate_limit.js'
@@ -28,16 +29,6 @@ const SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 const DEFAULT_MAX_PENDING_ROWS = 50_000
 const DEFAULT_HIGH_WATER_PCT = 80
 const DEFAULT_RETRY_AFTER_SECONDS = 5
-
-/**
- * Defense-in-depth pattern for `gateway_id` taken from `claims.sub` before
- * it's joined into a filesystem path. The alphabet permits the punctuation
- * found in real-world email addresses (`.`, `_`, `-`, `+`, and the at-sign)
- * so operators can use `firstname.last(at)acme.com` shapes as a gateway_id,
- * while still excluding `/`, `\`, shell metacharacters, and the leading-dot
- * case that would create hidden files on the filesystem.
- */
-const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+@-]*$/
 
 /**
  * Default sink directory when `config.server.sink_dir` is absent.

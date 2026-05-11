@@ -218,6 +218,14 @@ export interface CollectivusConfig {
   version: 1
   /** Operating mode. Defaults to `standalone` when omitted. */
   role?: CollectivusRole
+  /**
+   * Tenant identifier used as the first directory level under `sink.dir`.
+   * Standalone defaults to the OS username (sanitized through
+   * `GATEWAY_ID_PATTERN`); gateway and server modes derive it from the JWT
+   * claim and reject this field. Validated against the same pattern that
+   * the server's ingest endpoint enforces on `claims.sub`.
+   */
+  gateway_id?: string
   /** OTLP receiver. Omit to disable. */
   otel?: OtelConfig
   /** Proxy listener. Omit to disable. */

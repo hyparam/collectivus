@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import process from 'node:process'
+import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from './gateway_id.js'
 
 /**
  * @import { CollectivusConfig } from './types.js'
@@ -20,7 +21,7 @@ export class ConfigError extends Error {
 }
 
 const ALLOWED_TOP_KEYS = new Set([
-  'version', 'role', 'otel', 'proxy', 'sink', 'upload', 'server', 'central_server',
+  'version', 'role', 'gateway_id', 'otel', 'proxy', 'sink', 'upload', 'server', 'central_server',
 ])
 const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
 const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
@@ -221,6 +222,7 @@ function validateConfig(cfg, opts) {
     warnUnknownTopKeys(cfg, opts.stderr)
   }
 
+  if (cfg.gateway_id !== undefined) validateGatewayId(cfg.gateway_id)
   if (cfg.otel !== undefined) validateOtel(cfg.otel)
   if (cfg.proxy !== undefined) validateProxy(cfg.proxy)
   if ((cfg.otel !== undefined || cfg.proxy !== undefined) && cfg.sink === undefined) {
@@ -250,6 +252,12 @@ function validateRole(cfg) {
     throw new ConfigError(
       'must be one of "server", "gateway", "standalone"',
       { pointer: '/role' }
+    )
+  }
+  if (role !== 'standalone' && cfg.gateway_id !== undefined) {
+    throw new ConfigError(
+      `gateway_id is only permitted when role is "standalone"; ${role} mode derives it from the JWT`,
+      { pointer: '/gateway_id' }
     )
   }
   if (role === 'server') {
@@ -479,6 +487,25 @@ function validateUpstream(upstream, pointer) {
   assertObject(upstream.match, `${pointer}/match`)
   assertOnlyKeys(upstream.match, new Set(['path_prefix']), `${pointer}/match`)
   assertNonEmptyString(upstream.match.path_prefix, `${pointer}/match/path_prefix`)
+}
+
+/** @param {unknown} value */
+function validateGatewayId(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ConfigError('must be a non-empty string', { pointer: '/gateway_id' })
+  }
+  if (value.length > GATEWAY_ID_MAX_LENGTH) {
+    throw new ConfigError(
+      `must be at most ${GATEWAY_ID_MAX_LENGTH} characters`,
+      { pointer: '/gateway_id' }
+    )
+  }
+  if (!GATEWAY_ID_PATTERN.test(value)) {
+    throw new ConfigError(
+      'must start with [A-Za-z0-9] and contain only [A-Za-z0-9._+@-]',
+      { pointer: '/gateway_id' }
+    )
+  }
 }
 
 /** @param {unknown} sink */

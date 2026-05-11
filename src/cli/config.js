@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import process from 'node:process'
 import { ConfigError, loadConfig as defaultLoadConfig, validateCollectivusConfig } from '../config.js'
+import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from '../gateway_id.js'
 import { ConfigRegistry, resolveConfigsDir } from '../server/config_registry.js'
 import { BootstrapStore } from '../server/identity.js'
 import { defaultPrompt } from './common.js'
@@ -24,9 +25,6 @@ Options:
   --yes, -y                For \`delete\`: skip the interactive confirmation
   --ttl-seconds <n>        For \`bootstrap-token issue\`: TTL override in seconds
   --help, -h               Show this help`
-
-const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+@-]*$/
-const GATEWAY_ID_MAX_LENGTH = 128
 
 /**
  * Parse the argument list of `collectivus config <subcommand>`.

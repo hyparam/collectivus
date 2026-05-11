@@ -122,23 +122,26 @@ export interface ColumnSpec {
   nullable: boolean
 }
 
-export interface S3ConnectorOptions {
-  bucket: string
-  region: string
+export interface AwsCredentials {
   accessKeyId: string
   secretAccessKey: string
   sessionToken?: string
+}
+
+export type AwsCredentialProvider = () => AwsCredentials | Promise<AwsCredentials>
+
+export interface S3ConnectorOptions {
+  bucket: string
+  region: string
+  accessKeyId?: string
+  secretAccessKey?: string
+  sessionToken?: string
+  credentials?: AwsCredentialProvider
   /** Override base URL for S3-compatible servers (MinIO, etc.) */
   endpoint?: string
 }
 
-export interface S3RequestOptions {
-  bucket: string
-  region: string
-  accessKeyId: string
-  secretAccessKey: string
-  sessionToken?: string
-  endpoint?: string
+export interface S3RequestOptions extends S3ConnectorOptions {
   method: 'PUT' | 'HEAD' | 'GET'
   key: string
   body?: Uint8Array

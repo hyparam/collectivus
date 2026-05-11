@@ -223,6 +223,11 @@ export interface CentralServerConfig {
   /** Identity material used by the gateway to authenticate. */
   identity: CentralServerIdentityConfig
   /**
+   * Durable local delivery spool used by Gateway mode before rows are accepted
+   * by Central server. Defaults to `<dirname(identity.json)>/outbox`.
+   */
+  outbox_dir?: string
+  /**
    * Background config-pull interval in seconds. Default 30. Validator
    * constrains to [5, 3600]: the floor is the minimum useful resolution for
    * "hot reload" semantics; the ceiling keeps a misconfigured gateway from
@@ -248,7 +253,11 @@ export interface CollectivusConfig {
   otel?: OtelConfig
   /** Proxy listener. Omit to disable. */
   proxy?: ProxyConfig
-  /** Sink for proxy recordings. Required when `otel` or `proxy` is set. */
+  /**
+   * Sink for local file recordings. Required when `otel` or `proxy` is set in
+   * Standalone mode. Accepted but unused by Gateway mode, which writes to the
+   * durable central-server outbox instead.
+   */
   sink?: FileSinkConfig
   /** Reserved upload section. Schema-validated only; uploader wires up later. */
   upload?: UploadConfig

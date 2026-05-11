@@ -100,6 +100,26 @@ describe('s3Connector', () => {
     expect(captured[0].headers.authorization).toContain('x-amz-security-token')
   })
 
+  it('signs requests with async credential providers', async () => {
+    const provider = vi.fn(() => Promise.resolve({
+      accessKeyId: 'AKIAPROVIDER',
+      secretAccessKey: 'provider-secret',
+      sessionToken: 'provider-token',
+    }))
+    const connector = s3Connector({
+      bucket: 'mybucket',
+      region: 'us-east-1',
+      credentials: provider,
+      endpoint,
+    })
+
+    await connector.putObject('k', new Uint8Array([0]))
+
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(captured[0].headers.authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAPROVIDER\//)
+    expect(captured[0].headers['x-amz-security-token']).toBe('provider-token')
+  })
+
   it('uses AWS path-style requests for dotted buckets when endpoint is omitted', async () => {
     /** @type {http.RequestOptions | undefined} */
     let options

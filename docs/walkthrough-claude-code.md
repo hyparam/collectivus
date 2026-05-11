@@ -186,6 +186,11 @@ change within `poll_interval_seconds` and hot-reloads only the changed
 listener) or when you want every gateway's recordings to land in a single S3
 archive without per-host AWS credentials.
 
+In Gateway mode, local disk is only a durable delivery outbox. Proxy and OTLP
+rows are fsynced under `central_server.outbox_dir` (default:
+`<dirname(identity.json)>/outbox`) and shipped to Central server ingest; the
+Central server's ingest directory is the canonical recording source.
+
 The interactive walkthrough exposes the Central server setup:
 
 ```bash

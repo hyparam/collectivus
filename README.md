@@ -35,6 +35,10 @@ passing the same arguments you would pass to `ctvs`:
 # Central server, gateway, or standalone: selected by role in the config file.
 docker run --rm ghcr.io/hyparam/collectivus:latest --config /config/collectivus.json
 
+# Same, but with config JSON injected as an environment variable.
+docker run --rm -e COLLECTIVUS_CONFIG_JSON ghcr.io/hyparam/collectivus:latest \
+  --config-env COLLECTIVUS_CONFIG_JSON
+
 # Hosted-discovery rendezvous server: selected by the rendezvous subcommand.
 docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
 ```
@@ -102,8 +106,9 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 |-------|---------|
 | `version` | Schema version. Required. Currently `1`. |
 | `otel`    | Enable the OTLP receiver. Omit to disable. |
-| `proxy`   | Enable the LLM proxy. Omit to disable. Requires `sink`. |
-| `sink`    | Root directory for JSONL recordings. Proxy rows land under `<sink.dir>/<gateway_id>/proxy/`; OTLP rows land under `<sink.dir>/<gateway_id>/<signal>/`. Required when `otel` or `proxy` is set. The walkthrough defaults this to `~/.hyp/collectivus/`. |
+| `proxy`   | Enable the LLM proxy. Omit to disable. Requires `sink` in Standalone mode. |
+| `sink`    | Root directory for Standalone JSONL recordings. Proxy rows land under `<sink.dir>/<gateway_id>/proxy/`; OTLP rows land under `<sink.dir>/<gateway_id>/<signal>/`. Required when `otel` or `proxy` is set in Standalone mode. Accepted but unused in Gateway mode. |
+| `central_server` | Gateway-mode Central server URL, identity settings, config poll interval, and optional `outbox_dir`. Gateway rows are first fsynced to this durable local outbox, then shipped to Central ingest. |
 | `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
 | `query`   | Optional. Configures the local `ctvs query` Parquet cache. `query.parquet.enabled` defaults to `true`; `query.parquet.dir` defaults to `<recording-root>/.collectivus-query/parquet`. |
 
@@ -133,9 +138,9 @@ npx -p collectivus ctvs --config collectivus.json --print-config
 ### v1 schema
 
 `version: 1` introduces array-shape `upstreams`, an optional `upload` block,
-and makes `sink` mandatory whenever `otel` or `proxy` is set. v0 configs
-(missing the `version` field) hard-fail with a clear error — the walkthrough
-writes v1 only.
+and makes `sink` mandatory whenever `otel` or `proxy` is set in Standalone
+mode. v0 configs (missing the `version` field) hard-fail with a clear error —
+the walkthrough writes v1 only.
 
 ## Config vending (multi-host deployments)
 
@@ -168,6 +173,13 @@ When using the container, set `server.data_dir`,
 `server.identity_issuer.bootstrap_store_path`, and any ingest `sink_dir` under
 the mounted `/data` volume, and make sure that volume is writable by UID 1000
 (`node` inside the image).
+
+Gateway mode treats Central server as the canonical recording store. Proxy and
+OTLP rows are written first to a durable delivery outbox under
+`central_server.outbox_dir` (default: `<dirname(identity.json)>/outbox`) and
+then shipped to `POST /v1/ingest/<signal>`. The outbox is a transient retry
+spool, not a local queryable archive; deleted gateway configs stop old JWTs
+from ingesting or refreshing.
 
 Operator workflow on the server host:
 
@@ -266,9 +278,10 @@ bootstrap-token issuer.
 
 ## S3 upload
 
-Collectivus always writes raw JSONL to your local sink directory. When the
-`upload` block is configured, a daily scheduler drains the previous day's
-JSONL into Parquet partitions in S3. Object keys are Hive-partitioned:
+Standalone and Central server modes write JSONL to their configured local
+recording root. When the `upload` block is configured, a daily scheduler drains
+the previous day's JSONL into Parquet partitions in S3. Object keys are
+Hive-partitioned:
 
 ```
 <prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet
@@ -293,17 +306,22 @@ uploads).
 
 ### Credentials
 
-Credentials are never stored in the config. They are resolved at daemon
-start from the environment:
+Credentials are never stored in the config. They are resolved at daemon start
+from one of these sources:
 
-- `AWS_ACCESS_KEY_ID` (required)
-- `AWS_SECRET_ACCESS_KEY` (required)
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for local/dev or explicit
+  static credentials.
+- ECS task-role credentials exposed through
+  `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI`.
+- `AWS_CONTAINER_AUTHORIZATION_TOKEN` or
+  `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` when the container credential
+  endpoint requires an auth token.
 - `AWS_SESSION_TOKEN` (optional, for temporary credentials)
 - `AWS_REGION` (optional; the `upload.region` config field overrides this)
 
-When `upload` is set in the config but `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` are missing from the environment, the daemon
-fails fast at startup rather than at the first daily tick.
+When `upload` is set in the config but no supported AWS credential source is
+available, the daemon fails fast at startup rather than at the first daily tick.
 
 ## OTLP receiver
 
@@ -472,6 +490,18 @@ Logical datasets are `logs`, `traces`, `metrics`, `proxy_exchanges`, and
 `proxy_stream_events`. `ctvs query schema <dataset>` prints the static schema,
 and `ctvs query catalog` shows which datasets have source and cached rows.
 
+### LLM skill
+
+Install the bundled `collectivus-query` skill so Claude Code and Codex know how
+to inspect local recordings with `ctvs query`:
+
+```bash
+ctvs skills install --client all
+```
+
+The skill assumes the default `~/.hyp/collectivus.json` config unless the agent
+discovers a non-default service config from `ctvs status` or the service unit.
+
 ## CLI
 
 ```text
@@ -601,6 +631,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 | `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
+| `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
 Claude Code unattended, or `--no` to skip the attach step.

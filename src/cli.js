@@ -1,16 +1,18 @@
 import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
-import { ConfigError, loadConfigAsync } from './config.js'
+import { ConfigError, loadConfigAsync, parseConfig } from './config.js'
 import { resolveStandaloneGatewayId } from './gateway_id.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
+import { OutboxSink, defaultOutboxDir } from './gateway/outbox_sink.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { ControlPlane } from './server/control_plane.js'
 import { defaultSinkDir as defaultIngestSinkDir } from './server/ingest.js'
 import { FileSink } from './sinks/file.js'
+import { hasAwsCredentialSource } from './upload/aws_credentials.js'
 import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
 
@@ -27,12 +29,14 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 /**
  * @import { Server } from 'node:http'
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from './types.js'
- * @import { ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
+ * @import { ConfigResult, ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
  * @import { ConfigChangedEvent } from './gateway/types.d.ts'
+ * @import { IngestSignal } from './server/types.d.ts'
  */
 
 const USAGE = `Usage:
   ctvs --config <path|url>                     Run with config file or http(s) URL
+  ctvs --config-env <env-var>                  Run from config JSON in an environment variable
   ctvs --config-endpoint <url>                 Run from a central-server setup URL
   ctvs --config <path|url> --print-config
                                                Load config, print resolved JSON, exit
@@ -50,6 +54,7 @@ Commands:
   ctvs status                                  Report daemon, config, recordings, attach state
   ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
   ctvs query <command> [...]                   Query local recordings through Parquet cache
+  ctvs skills install [...]                    Install the Collectivus query LLM skill
   ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs
   ctvs rendezvous [--listen <host:port>] ...   Run the hosted-discovery rendezvous service
@@ -71,6 +76,8 @@ export function parseArgs(argv) {
   let configPath
   /** @type {string | undefined} */
   let configEndpoint
+  /** @type {string | undefined} */
+  let configEnv
   let printConfig = false
   let strict = false
 
@@ -89,7 +96,19 @@ export function parseArgs(argv) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
       if (!value) return parseError('--config requires a path or URL')
       if (configEndpoint !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      if (configEnv !== undefined) return parseError('--config and --config-env are mutually exclusive')
       configPath = value
+      continue
+    }
+
+    if (arg === '--config-env' || arg.startsWith('--config-env=')) {
+      const value = arg === '--config-env' ? argv[++i] : arg.slice('--config-env='.length)
+      if (!value) return parseError('--config-env requires an environment variable name')
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return parseError('--config-env must be an environment variable name')
+      if (configPath !== undefined || configEndpoint !== undefined) {
+        return parseError('--config-env cannot be combined with --config or --config-endpoint')
+      }
+      configEnv = value
       continue
     }
 
@@ -98,6 +117,7 @@ export function parseArgs(argv) {
       if (!value) return parseError('--config-endpoint requires a URL')
       if (!isHttpUrl(value)) return parseError('--config-endpoint requires an http(s) URL')
       if (configPath !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      if (configEnv !== undefined) return parseError('--config-endpoint and --config-env are mutually exclusive')
       configEndpoint = value
       configPath = value
       continue
@@ -116,11 +136,15 @@ export function parseArgs(argv) {
     return parseError(`unknown argument: ${arg}`)
   }
 
-  if (configPath === undefined) {
-    return parseError('--config <path|url> or --config-endpoint <url> is required')
+  if (configPath === undefined && configEnv === undefined) {
+    return parseError('--config <path|url>, --config-env <env-var>, or --config-endpoint <url> is required')
   }
 
-  return { mode: 'config', configPath, printConfig, strict }
+  /** @type {ConfigResult} */
+  const result = { mode: 'config', printConfig, strict }
+  if (configPath !== undefined) result.configPath = configPath
+  if (configEnv !== undefined) result.configEnv = configEnv
+  return result
 }
 
 /**
@@ -191,7 +215,12 @@ export async function run(argv, env, hooks = {}) {
   /** @type {CollectivusConfig} */
   let config
   try {
-    config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
+    if (parsed.configEnv) {
+      config = loadConfigFromEnv(parsed.configEnv, env, { strict: parsed.strict, stderr })
+    } else {
+      if (!parsed.configPath) throw new ConfigError('config path is missing')
+      config = await loadConfigAsync(parsed.configPath, { strict: parsed.strict, stderr })
+    }
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`config error: ${err.message}\n`)
@@ -214,6 +243,18 @@ export async function run(argv, env, hooks = {}) {
 }
 
 /**
+ * @param {string} envName
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ strict?: boolean, stderr?: { write: (s: string) => void } }} opts
+ * @returns {CollectivusConfig}
+ */
+function loadConfigFromEnv(envName, env, opts) {
+  const raw = env?.[envName]
+  if (!raw) throw new ConfigError(`environment variable ${envName} is not set`)
+  return parseConfig(raw, `env:${envName}`, opts)
+}
+
+/**
  * Run the normal listener/gateway lifecycle from an already constructed
  * config object. Callers use this when the config is intentionally in memory
  * only, such as `ctvs join` after resolving a hosted-discovery join code.
@@ -233,11 +274,11 @@ export async function runWithConfig(config, env, hooks = {}) {
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
 
-  // Fail at boot rather than at the first daily uploader tick when the
-  // upload section is configured but AWS credentials aren't in the env.
-  if (config.upload && (!env?.AWS_ACCESS_KEY_ID || !env?.AWS_SECRET_ACCESS_KEY)) {
+  // Fail at boot rather than at the first daily uploader tick when the upload
+  // section is configured but no supported AWS credential source is available.
+  if (config.upload && !hasAwsCredentialSource(env ?? {})) {
     stderr.write(
-      'config error: upload.bucket is set but AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not in the environment.\n'
+      'config error: upload.bucket is set but no AWS credential source is available; set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or run with an ECS task role.\n'
     )
     return 1
   }
@@ -337,50 +378,91 @@ function buildConfigListeners(config, ctx) {
   const factories = new Map()
 
   if (config.otel) {
-    if (!config.sink) {
-      throw new Error('otel is configured but sink is missing')
-    }
     const { listen } = config.otel
-    const outputDir = config.sink.dir
     const { gatewayId } = ctx
-    factories.set('otel', async () => {
-      const { host, port } = parseListen(listen)
-      const collector = new Collector({ host, port, outputDir, gatewayId })
-      await collector.start()
-      const effective = effectiveBinding(collector.server, host, port)
-      return {
-        description: `OTLP listener bound on ${effective}, writing to ${outputDir}/${gatewayId}/<signal>/<UTC-date>.jsonl`,
-        stop: () => collector.stop(),
+    if (config.role === 'gateway') {
+      const outboxDir = resolveGatewayOutboxDir(config, ctx)
+      factories.set('otel', async () => {
+        const { host, port } = parseListen(listen)
+        const rowSinks = {
+          logs: createGatewayOutboxSink(config, ctx, 'logs'),
+          traces: createGatewayOutboxSink(config, ctx, 'traces'),
+          metrics: createGatewayOutboxSink(config, ctx, 'metrics'),
+        }
+        const collector = new Collector({ host, port, gatewayId, rowSinks })
+        await collector.start()
+        const effective = effectiveBinding(collector.server, host, port)
+        return {
+          description: `OTLP listener bound on ${effective}, spooling to ${outboxDir}/<signal> for Central ingest`,
+          stop: async () => {
+            await collector.stop()
+            await Promise.all(Object.values(rowSinks).map((sink) => sink.close()))
+          },
+        }
+      })
+    } else {
+      if (!config.sink) {
+        throw new Error('otel is configured but sink is missing')
       }
-    })
+      const outputDir = config.sink.dir
+      factories.set('otel', async () => {
+        const { host, port } = parseListen(listen)
+        const collector = new Collector({ host, port, outputDir, gatewayId })
+        await collector.start()
+        const effective = effectiveBinding(collector.server, host, port)
+        return {
+          description: `OTLP listener bound on ${effective}, writing to ${outputDir}/${gatewayId}/<signal>/<UTC-date>.jsonl`,
+          stop: () => collector.stop(),
+        }
+      })
+    }
   }
 
   if (config.proxy) {
-    if (!config.sink) {
-      throw new Error('proxy is configured but sink is missing')
-    }
     const proxyConfig = config.proxy
-    const sinkDir = config.sink.dir
     const { gatewayId } = ctx
-    factories.set('proxy', async () => {
-      const sink = new FileSink(sinkDir, gatewayId)
-      const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
-      const proxy = new Proxy(proxyConfig, { recorder })
-      await proxy.start()
-      const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
-      return {
-        description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/${gatewayId}/proxy/<UTC-date>.jsonl`,
-        // Stop accepting new connections, drain any in-flight exchanges (their
-        // finalization can be async, e.g. a gzip decoder still flushing the
-        // tail of an SSE stream), then flush+close the sink so the final
-        // `exchange` row lands before exit.
-        stop: async () => {
-          await proxy.stop()
-          await recorder.drain()
-          await sink.close()
-        },
+    if (config.role === 'gateway') {
+      const outboxDir = resolveGatewayOutboxDir(config, ctx)
+      factories.set('proxy', async () => {
+        const sink = createGatewayOutboxSink(config, ctx, 'proxy')
+        const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
+        const proxy = new Proxy(proxyConfig, { recorder })
+        await proxy.start()
+        const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
+        return {
+          description: `Proxy listener bound on ${effective}, spooling to ${outboxDir}/proxy for Central ingest`,
+          stop: async () => {
+            await proxy.stop()
+            await recorder.drain()
+            await sink.close()
+          },
+        }
+      })
+    } else {
+      if (!config.sink) {
+        throw new Error('proxy is configured but sink is missing')
       }
-    })
+      const sinkDir = config.sink.dir
+      factories.set('proxy', async () => {
+        const sink = new FileSink(sinkDir, gatewayId)
+        const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
+        const proxy = new Proxy(proxyConfig, { recorder })
+        await proxy.start()
+        const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
+        return {
+          description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/${gatewayId}/proxy/<UTC-date>.jsonl`,
+          // Stop accepting new connections, drain any in-flight exchanges (their
+          // finalization can be async, e.g. a gzip decoder still flushing the
+          // tail of an SSE stream), then flush+close the sink so the final
+          // `exchange` row lands before exit.
+          stop: async () => {
+            await proxy.stop()
+            await recorder.drain()
+            await sink.close()
+          },
+        }
+      })
+    }
   }
 
   if (config.upload) {
@@ -449,18 +531,18 @@ function buildConfigListeners(config, ctx) {
   // an orphaned setTimeout in the event loop. The hot-reload pipeline
   // subscribes to `config-changed` events emitted by this client.
   if (config.role === 'gateway' && ctx.configClient) {
-    const configClient = ctx.configClient
+    const { configClient } = ctx
     const url = config.central_server?.url ?? 'central server'
     const poll = configClient.pollIntervalSeconds
-    factories.set('configPoll', async () => {
+    factories.set('configPoll', () => {
       configClient.start()
-      return {
+      return Promise.resolve({
         description: `Config poll loop active (${url} every ${poll}s)`,
         stop: async () => {
           configClient.stop()
           await configClient.whenIdle()
         },
-      }
+      })
     })
   }
 
@@ -471,6 +553,39 @@ function buildConfigListeners(config, ctx) {
   }
 
   return factories
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {{ identityClient?: IdentityClient, stderr: { write: (s: string) => void } }} ctx
+ * @param {IngestSignal} signal
+ * @returns {OutboxSink}
+ */
+function createGatewayOutboxSink(config, ctx, signal) {
+  const centralServer = config.central_server
+  const { identityClient } = ctx
+  if (!centralServer || !identityClient) {
+    throw new Error('gateway outbox requires central_server and an acquired identity')
+  }
+  return new OutboxSink({
+    outboxDir: defaultOutboxDir(centralServer),
+    centralUrl: centralServer.url,
+    identityClient,
+    signal,
+    stderr: ctx.stderr,
+  })
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {{ identityClient?: IdentityClient }} ctx
+ * @returns {string}
+ */
+function resolveGatewayOutboxDir(config, ctx) {
+  if (!config.central_server || !ctx.identityClient) {
+    throw new Error('gateway outbox requires central_server and an acquired identity')
+  }
+  return defaultOutboxDir(config.central_server)
 }
 
 /**

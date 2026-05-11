@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ControlPlane } from '../../src/server/control_plane.js'
+import { createConfigRegistry, deleteConfig, setConfig } from '../../src/server/config_registry.js'
 import { Ingest, defaultSinkDir } from '../../src/server/ingest.js'
 import { signJwt } from '../../src/server/identity.js'
 
@@ -47,6 +48,17 @@ function ndjson(rows) {
   return rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
 }
 
+/**
+ * @returns {object}
+ */
+function gatewayConfig() {
+  return {
+    version: 1,
+    role: 'gateway',
+    central_server: { url: 'https://central.example.com', identity: {} },
+  }
+}
+
 describe('Ingest endpoint', () => {
   /** @type {string} */
   let dir
@@ -69,19 +81,21 @@ describe('Ingest endpoint', () => {
    * name is deterministic. Returns the JWT for the named gateway.
    *
    * @param {{ gatewayId?: string, clockMs?: number }} [opts]
-   * @returns {Promise<{ jwt: string, day: string, sinkDir: string, clock: ReturnType<typeof fakeClock> }>}
+   * @returns {Promise<{ jwt: string, day: string, sinkDir: string, clock: ReturnType<typeof fakeClock>, registry: ReturnType<typeof createConfigRegistry> }>}
    */
   async function boot(opts = {}) {
     const gatewayId = opts.gatewayId ?? 'gw-1'
     const clock = fakeClock(opts.clockMs ?? Date.UTC(2026, 4, 8, 12, 0, 0))
-    plane = new ControlPlane(serverConfig({ sinkDir: dir }), { now: clock.now })
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, gatewayId, gatewayConfig())
+    plane = new ControlPlane(serverConfig({ sinkDir: dir }), { now: clock.now, configRegistry: registry })
     await plane.start()
     const addr = plane.server?.address()
     if (!addr || typeof addr === 'string') throw new Error('no address')
     baseUrl = `http://127.0.0.1:${addr.port}`
     const jwt = signJwt({ gatewayId, ttlSeconds: 3600, secret: SECRET, now: clock.now })
     const day = new Date(clock.now()).toISOString().slice(0, 10)
-    return { jwt, day, sinkDir: dir, clock }
+    return { jwt, day, sinkDir: dir, clock, registry }
   }
 
   it('persists 100 NDJSON rows and tags each with `_ingest`', async () => {
@@ -113,12 +127,13 @@ describe('Ingest endpoint', () => {
   })
 
   it('routes concurrent posts from two gateways into separate directories', async () => {
-    const { jwt: jwtA, day } = await boot({ gatewayId: 'gw-a' })
+    const { jwt: jwtA, day, registry } = await boot({ gatewayId: 'gw-a' })
     const planeA = plane
     if (!planeA) throw new Error('unreachable')
 
     // Mint a second JWT for a different gatewayId on the same plane — both
     // posts hit the same listener but write to disjoint paths.
+    setConfig(registry, 'gw-b', gatewayConfig())
     const jwtB = signJwt({ gatewayId: 'gw-b', ttlSeconds: 3600, secret: SECRET, now: planeA.now })
 
     /**
@@ -195,6 +210,22 @@ describe('Ingest endpoint', () => {
     const lines = fs.readFileSync(file, 'utf8').trimEnd().split('\n').map((l) => JSON.parse(l))
     expect(lines).toHaveLength(1)
     expect(lines[0]._ingest.gateway_id).toBe('james.smith@acme.com')
+  })
+
+  it('rejects ingest after the gateway config is deleted', async () => {
+    const { jwt, registry } = await boot({ gatewayId: 'gw-offboarded' })
+    expect(deleteConfig(registry, 'gw-offboarded')).toBe(true)
+
+    const res = await fetch(`${baseUrl}/v1/ingest/logs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/x-ndjson' },
+      body: ndjson([{ msg: 'hello' }]),
+    })
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({
+      error: 'unauthorized',
+      reason: 'no config registered for this gateway',
+    })
   })
 
   it('rejects gateway_ids containing path-traversal characters', async () => {

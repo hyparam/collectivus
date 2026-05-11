@@ -4,7 +4,7 @@ import https from 'node:https'
 
 /**
  * @import { IncomingHttpHeaders, RequestOptions } from 'node:http'
- * @import { StorageConnector, S3ConnectorOptions, S3RequestOptions } from '../upload.js'
+ * @import { AwsCredentials, StorageConnector, S3ConnectorOptions, S3RequestOptions } from '../upload.js'
  */
 
 const ALGORITHM = 'AWS4-HMAC-SHA256'
@@ -55,8 +55,9 @@ export function s3Connector(options) {
  * @param {S3RequestOptions} options
  * @returns {Promise<{ statusCode: number, headers: IncomingHttpHeaders, body: Buffer }>}
  */
-function s3Request(options) {
-  const { bucket, region, accessKeyId, secretAccessKey, sessionToken, endpoint, method, key, body, contentType } = options
+async function s3Request(options) {
+  const { bucket, region, endpoint, method, key, body, contentType } = options
+  const { accessKeyId, secretAccessKey, sessionToken } = await resolveCredentials(options)
 
   const useEndpoint = endpoint && endpoint.length > 0
   const base = useEndpoint
@@ -144,6 +145,22 @@ function s3Request(options) {
     }
     req.end()
   })
+}
+
+/**
+ * @param {S3ConnectorOptions} options
+ * @returns {Promise<AwsCredentials>}
+ */
+function resolveCredentials(options) {
+  if (options.credentials) return Promise.resolve(options.credentials())
+  if (options.accessKeyId && options.secretAccessKey) {
+    return Promise.resolve({
+      accessKeyId: options.accessKeyId,
+      secretAccessKey: options.secretAccessKey,
+      sessionToken: options.sessionToken,
+    })
+  }
+  throw new Error('S3 connector requires AWS credentials')
 }
 
 /**

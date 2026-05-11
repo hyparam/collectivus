@@ -17,6 +17,7 @@ import type {
 import type { DaemonInstallOptions, DaemonUninstallOptions, MacosStatusOptions } from '../daemon/types.d.ts'
 import type { ConfigClient } from '../gateway/config_client.js'
 import type { BootstrapStore } from '../server/identity.js'
+import type { SkillInstallOptions, SkillInstallResult } from '../skills/types.d.ts'
 import type { ConfigRegistry } from '../server/types.d.ts'
 
 // ---------- CLI top-level ----------
@@ -37,7 +38,8 @@ export interface ErrorResult {
 
 export interface ConfigResult {
   mode: 'config'
-  configPath: string
+  configPath?: string
+  configEnv?: string
   printConfig: boolean
   strict: boolean
 }
@@ -117,6 +119,15 @@ export interface InstallParseResult {
 }
 
 export interface UninstallParseResult {
+  help: boolean
+  error?: string
+}
+
+export interface SkillsParseResult {
+  command: 'install'
+  client: 'claude' | 'codex' | 'all'
+  force: boolean
+  dryRun: boolean
   help: boolean
   error?: string
 }
@@ -320,6 +331,15 @@ export interface UninstallHooks {
   isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
   isClaudeAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
   isCodexAttached?: (opts?: CodexIsAttachedOptions) => Promise<boolean>
+}
+
+export interface SkillsHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  homeDir?: string
+  codexHome?: string
+  sourceDir?: string
+  installSkill?: (opts: SkillInstallOptions) => Promise<SkillInstallResult>
 }
 
 export interface InstalledPlistFields {

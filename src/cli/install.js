@@ -118,18 +118,15 @@ export async function runInstall(argv, hooks = {}) {
     throw err
   }
 
-  if (!config.proxy) {
-    stderr.write('error: config must define `proxy.listen` for daemon installation\n')
-    return 1
-  }
-
-  /** @type {number} */
+  /** @type {number | undefined} */
   let port
-  try {
-    port = parseListenPort(config.proxy.listen)
-  } catch (err) {
-    stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 1
+  if (config.proxy) {
+    try {
+      port = parseListenPort(config.proxy.listen)
+    } catch (err) {
+      stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
   }
 
   const version = hooks.version ?? readPackageVersion()
@@ -151,7 +148,9 @@ export async function runInstall(argv, hooks = {}) {
 
   /** @type {boolean} */
   let shouldAttach
-  if (parsed.yes) {
+  if (port === undefined) {
+    shouldAttach = false
+  } else if (parsed.yes) {
     shouldAttach = true
   } else if (parsed.no) {
     shouldAttach = false
@@ -177,6 +176,8 @@ export async function runInstall(argv, hooks = {}) {
       stderr.write(`error: failed to attach Claude Code: ${formatError(err)}\n`)
       return 1
     }
+  } else if (port === undefined) {
+    stdout.write('  Claude Code attach: skipped (no proxy configured)\n')
   } else {
     stdout.write('  Claude Code attach: skipped\n')
   }

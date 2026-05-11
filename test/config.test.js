@@ -464,6 +464,26 @@ describe('loadConfig - role / server / central_server', () => {
     expect(loadConfig(p)).toEqual(cfg)
   })
 
+  it('accepts role: gateway proxy/otel configs without sink', () => {
+    const cfg = {
+      version: 1,
+      role: 'gateway',
+      otel: { listen: '127.0.0.1:4318' },
+      proxy: {
+        listen: '127.0.0.1:8787',
+        upstreams: [
+          { name: 'api', base_url: 'https://api.example.com', match: { path_prefix: '/' } },
+        ],
+      },
+      central_server: {
+        url: 'https://central.example.com',
+        identity: { persisted_path: '/var/lib/collectivus/identity.json' },
+      },
+    }
+    const p = writeJson('role-gateway-no-sink.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
   it('rejects role: server without a server block', () => {
     const p = writeJson('server-missing.json', { version: 1, role: 'server' })
     expect(() => loadConfig(p)).toThrow(/server block is required when role is "server"/)
@@ -704,6 +724,27 @@ describe('loadConfig - role / server / central_server', () => {
     }
     const p = writeJson('cs-persisted.json', cfg)
     expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('accepts central_server.outbox_dir and rejects an empty value', () => {
+    const cfg = {
+      version: 1,
+      role: 'gateway',
+      central_server: {
+        url: 'https://x.test',
+        identity: {},
+        outbox_dir: '/var/lib/collectivus/outbox',
+      },
+    }
+    const p = writeJson('cs-outbox.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+
+    const bad = writeJson('cs-empty-outbox.json', {
+      version: 1,
+      role: 'gateway',
+      central_server: { url: 'https://x.test', identity: {}, outbox_dir: '' },
+    })
+    expect(() => loadConfig(bad)).toThrow(/central_server\/outbox_dir.*non-empty string/)
   })
 
   it('rejects unknown keys inside central_server', () => {

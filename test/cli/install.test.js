@@ -181,12 +181,14 @@ describe('runInstall', function() {
     expect(m.installCalls).toHaveLength(0)
   })
 
-  it('errors when config has no proxy listener', async function() {
+  it('installs and skips attach when config has no proxy listener', async function() {
     const stdout = memo()
     const stderr = memo()
-    const cfgPath = writeConfig({ otel: { listen: '0.0.0.0:4318' } })
+    const cfgPath = writeConfig({ version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } })
     const m = makeMocks({
-      loadConfigImpl() { return { otel: { listen: '0.0.0.0:4318' } } },
+      loadConfigImpl() {
+        return { version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } }
+      },
     })
     const code = await runInstall(['--config', cfgPath], {
       stdout, stderr,
@@ -195,8 +197,11 @@ describe('runInstall', function() {
       attach: m.attach,
       loadConfig: m.loadConfig,
     })
-    expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/proxy.listen/)
+    expect(code).toBe(0)
+    expect(m.installCalls).toHaveLength(1)
+    expect(m.attachCalls).toHaveLength(0)
+    expect(stderr.value()).not.toMatch(/not a TTY/)
+    expect(stdout.value()).toMatch(/no proxy configured/)
   })
 
   it('--yes installs and attaches without prompting', async function() {

@@ -12,19 +12,6 @@ function memo() {
   }
 }
 
-/**
- * @param {Record<string, unknown>} body
- * @returns {typeof fetch}
- */
-function jsonFetch(body) {
-  return function fetchJson() {
-    return Promise.resolve(new Response(
-      JSON.stringify(body),
-      { status: 200, headers: { 'content-type': 'application/json' } }
-    ))
-  }
-}
-
 describe('join CLI', () => {
   it('prints help', async () => {
     const stdout = memo()
@@ -98,6 +85,8 @@ describe('join CLI', () => {
       const globalBinPath = '/usr/local/lib/node_modules/collectivus/bin/cli.js'
       /** @type {Array<Record<string, unknown>>} */
       const daemonInstalls = []
+      /** @type {Array<{ url: string, method?: string, body?: unknown }>} */
+      const fetchCalls = []
       let globalInstallCount = 0
 
       const code = await runJoin(['secret-code', '--rendezvous', 'https://join.example'], {}, {
@@ -106,11 +95,37 @@ describe('join CLI', () => {
         binPath: '/Users/u/.npm/_npx/abc/node_modules/collectivus/bin/cli.js',
         configPath,
         logDir,
-        fetchFn: jsonFetch({
-          connect_url: 'https://central.example:8788/',
-          gateway_id: 'gw-prod-1',
-          expires_at: '2999-01-01T00:00:00.000Z',
-          display_name: 'Production gateway',
+        fetchFn: /** @type {typeof fetch} */ (async (url, init) => {
+          const requestUrl = String(url)
+          fetchCalls.push({ url: requestUrl, method: init?.method, body: init?.body })
+          if (requestUrl === 'https://join.example/v1/rendezvous/resolve') {
+            return new Response(JSON.stringify({
+              connect_url: 'https://central.example:8788/',
+              gateway_id: 'gw-prod-1',
+              expires_at: '2999-01-01T00:00:00.000Z',
+              display_name: 'Production gateway',
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          if (requestUrl === 'https://central.example:8788/v1/bootstrap-config?token=secret-code') {
+            return new Response(JSON.stringify({
+              version: 1,
+              role: 'gateway',
+              otel: { listen: '127.0.0.1:4318' },
+              proxy: {
+                listen: '127.0.0.1:8787',
+                upstreams: [{
+                  name: 'anthropic',
+                  base_url: 'https://api.anthropic.com',
+                  match: { path_prefix: '/v1/messages' },
+                }],
+              },
+              central_server: {
+                url: 'https://central.example:8788',
+                identity: {},
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          return new Response(JSON.stringify({ error: 'unexpected URL' }), { status: 404 })
         }),
         installGlobal() {
           globalInstallCount += 1
@@ -130,6 +145,15 @@ describe('join CLI', () => {
       expect(JSON.parse(fs.readFileSync(configPath, 'utf8'))).toEqual({
         version: 1,
         role: 'gateway',
+        otel: { listen: '127.0.0.1:4318' },
+        proxy: {
+          listen: '127.0.0.1:8787',
+          upstreams: [{
+            name: 'anthropic',
+            base_url: 'https://api.anthropic.com',
+            match: { path_prefix: '/v1/messages' },
+          }],
+        },
         central_server: {
           url: 'https://central.example:8788',
           identity: {
@@ -148,6 +172,11 @@ describe('join CLI', () => {
       expect(stdout.value()).toMatch(/Gateway config written/)
       expect(stdout.value()).toMatch(/Daemon installed/)
       expect(stderr.value()).toBe('')
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        'https://join.example/v1/rendezvous/resolve',
+        'https://central.example:8788/v1/bootstrap-config?token=secret-code',
+      ])
+      expect(fetchCalls[0].body).toBe(JSON.stringify({ join_code: 'secret-code' }))
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
@@ -166,10 +195,26 @@ describe('join CLI', () => {
         stderr,
         binPath: '/Users/u/.npm/_npx/abc/node_modules/collectivus/bin/cli.js',
         configPath,
-        fetchFn: jsonFetch({
-          connect_url: 'https://central.example:8788',
-          gateway_id: 'gw-prod-1',
-          expires_at: '2999-01-01T00:00:00.000Z',
+        fetchFn: /** @type {typeof fetch} */ (async (url) => {
+          const requestUrl = String(url)
+          if (requestUrl === 'https://join.example/v1/rendezvous/resolve') {
+            return new Response(JSON.stringify({
+              connect_url: 'https://central.example:8788',
+              gateway_id: 'gw-prod-1',
+              expires_at: '2999-01-01T00:00:00.000Z',
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          if (requestUrl === 'https://central.example:8788/v1/bootstrap-config?token=secret-code') {
+            return new Response(JSON.stringify({
+              version: 1,
+              role: 'gateway',
+              central_server: {
+                url: 'https://central.example:8788',
+                identity: {},
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } })
+          }
+          return new Response(JSON.stringify({ error: 'unexpected URL' }), { status: 404 })
         }),
         installGlobal() {
           return Promise.resolve(false)

@@ -438,6 +438,59 @@ describe('Identity flow end-to-end (HTTP)', () => {
       expect(verified.claims.sub).toBe('gw-setup')
     })
 
+    it('returns the registered gateway config with the bootstrap token overlaid', async () => {
+      const { store, registry } = await bootPlane({ publicUrl: 'https://collectivus.example.com' })
+      const { token } = store.register({ gatewayId: 'gw-configured', ttlSeconds: 60 })
+      setConfig(registry, 'gw-configured', {
+        version: 1,
+        role: 'gateway',
+        otel: { listen: '127.0.0.1:4318' },
+        proxy: {
+          listen: '127.0.0.1:8787',
+          upstreams: [{
+            name: 'anthropic',
+            base_url: 'https://api.anthropic.com',
+            match: { path_prefix: '/v1/messages' },
+          }],
+        },
+        central_server: {
+          url: 'https://collectivus.example.com',
+          identity: { persisted_path: '/tmp/gw-configured-identity.json' },
+        },
+      })
+
+      const res = await fetch(`${baseUrl}/v1/bootstrap-config?token=${token}`)
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body).toEqual({
+        version: 1,
+        role: 'gateway',
+        otel: { listen: '127.0.0.1:4318' },
+        proxy: {
+          listen: '127.0.0.1:8787',
+          upstreams: [{
+            name: 'anthropic',
+            base_url: 'https://api.anthropic.com',
+            match: { path_prefix: '/v1/messages' },
+          }],
+        },
+        central_server: {
+          url: 'https://collectivus.example.com',
+          identity: {
+            persisted_path: '/tmp/gw-configured-identity.json',
+            bootstrap_token: token,
+          },
+        },
+      })
+
+      const bootstrap = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ bootstrap_token: token }),
+      })
+      expect(bootstrap.status).toBe(200)
+    })
+
     it('rejects missing and unknown setup tokens', async () => {
       await bootPlane()
       const missing = await fetch(`${baseUrl}/v1/bootstrap-config`)
@@ -876,7 +929,7 @@ describe('CLI lifecycle wiring', () => {
     }
   })
 
-  it('role: gateway can start from --config-endpoint and hot-reload the registered config', async () => {
+  it('role: gateway can start from --config-endpoint using the registered config', async () => {
     const storePath = path.join(tmpDir, 'bootstrap.json')
     const store = new BootstrapStore({ path: storePath })
     const registry = createConfigRegistry({ configsDir: path.join(tmpDir, 'configs') })
@@ -911,7 +964,7 @@ describe('CLI lifecycle wiring', () => {
         identityPersistedPath: path.join(tmpDir, 'identity-one-line.json'),
         onShutdownRequested: (handler) => { trigger = handler },
       })
-      await waitFor(() => stdout.value().includes('hot reload: otel started'))
+      await waitFor(() => stdout.value().includes('OTLP listener bound'))
       trigger('SIGTERM')
       expect(await result).toBe(0)
       expect(stdout.value()).toMatch(/Identity bootstrapped for gw-one-line/)

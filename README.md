@@ -232,9 +232,9 @@ Gateway side, run the setup command printed by the token issuer:
 
 ```bash
 npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
-# → fetches a minimal gateway config, exchanges the bootstrap token for a
-#   30-day JWT, persists it to ~/.hyp/collectivus/identity.json, then begins
-#   polling /v1/config.
+# → fetches the registered gateway config with the bootstrap token overlaid,
+#   exchanges the token for a 30-day JWT, persists it to
+#   ~/.hyp/collectivus/identity.json, then begins polling /v1/config.
 ```
 
 The config endpoint does not consume the token; the token is consumed only when
@@ -285,12 +285,14 @@ npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 ```
 
 When invoked through `npx`, `ctvs join` submits the join code in a POST body,
-resolves the Central server URL, writes the gateway bootstrap config to
+resolves the Central server URL, fetches the registered gateway config from
+that server without consuming the join token, writes it to
 `~/.hyp/collectivus.json`, runs `npm install -g collectivus`, and installs the
-background daemon against that config. The long-lived JWT is persisted to
-`~/.hyp/collectivus/identity.json` after the daemon bootstraps directly against
-the customer Central server. A globally installed `ctvs join` still runs the
-gateway in the foreground for debugging.
+background daemon against that config. The written config includes the
+bootstrap token under `central_server.identity` so the daemon can exchange it
+for a long-lived JWT on first start. That JWT is persisted to
+`~/.hyp/collectivus/identity.json`. A globally installed `ctvs join` still runs
+the gateway in the foreground for debugging.
 
 Security note: in v1, rendezvous does not pin or cryptographically verify the
 Central server URL it returns. This is appropriate when gateways can reach the

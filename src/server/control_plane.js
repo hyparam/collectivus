@@ -14,7 +14,7 @@ import { SlidingWindowRateLimiter } from './rate_limit.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
- * @import { ServerConfig } from '../types.js'
+ * @import { CollectivusConfig, ServerConfig } from '../types.js'
  * @import { ConfigRegistry } from './types.d.ts'
  */
 
@@ -324,16 +324,24 @@ export class ControlPlane {
     }
 
     const centralUrl = normalizeBaseUrl(this.config.public_url ?? requestBaseUrl(req))
-    writeJson(res, 200, {
+    /** @type {CollectivusConfig} */
+    let config = {
       version: 1,
       role: 'gateway',
       central_server: {
         url: centralUrl,
-        identity: {
-          bootstrap_token: token,
-        },
+        identity: {},
       },
-    }, {
+    }
+    try {
+      const entry = getConfig(this.configRegistry, inspected.gatewayId)
+      if (entry) config = entry.config
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return writeError(res, 500, `config registry error: ${msg}`)
+    }
+
+    writeJson(res, 200, withBootstrapToken(config, centralUrl, token), {
       'cache-control': 'no-store',
     })
   }
@@ -478,6 +486,31 @@ function etagMatches(headerValue, currentEtag) {
     if (tag === '*' || tag === currentEtag) return true
   }
   return false
+}
+
+/**
+ * Return the registered gateway config with the current bootstrap token
+ * overlaid so first start can still acquire identity. When no registered
+ * config exists, callers pass the starter config built by `handleBootstrapConfig`.
+ *
+ * @param {CollectivusConfig} config
+ * @param {string} centralUrl
+ * @param {string} token
+ * @returns {CollectivusConfig}
+ */
+function withBootstrapToken(config, centralUrl, token) {
+  const central = config.central_server ?? { url: centralUrl, identity: {} }
+  return {
+    ...config,
+    central_server: {
+      ...central,
+      url: central.url ?? centralUrl,
+      identity: {
+        ...central.identity,
+        bootstrap_token: token,
+      },
+    },
+  }
 }
 
 /**

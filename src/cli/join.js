@@ -104,7 +104,7 @@ export async function runJoin(argv, env, hooks = {}) {
     },
   }
 
-  if (isNpxCollectivusBinPath(binPath)) {
+  if (isNpxCollectivusBinPath(binPath) || isNpmExecInvocation(env)) {
     return installJoinedGateway(config, resolved, {
       stdout,
       stderr,
@@ -333,6 +333,19 @@ function isNpxCollectivusBinPath(binPath) {
   if (!isNpxBinPath(binPath)) return false
   return /[/\\]node_modules[/\\]collectivus[/\\]bin[/\\]cli\.js$/.test(binPath) ||
     /[/\\]node_modules[/\\]\.bin[/\\](collectivus|ctvs)(\.cmd)?$/.test(binPath)
+}
+
+/**
+ * npm 7+ implements `npx` as `npm exec`. When a matching package is already
+ * installed, npm may execute that stable bin directly instead of an `_npx`
+ * cache path, so argv[1] alone is not enough to preserve `npx collectivus
+ * join` as the one-shot enrollment command.
+ *
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {boolean}
+ */
+function isNpmExecInvocation(env) {
+  return env.npm_command === 'exec' || env.npm_lifecycle_event === 'npx'
 }
 
 /**

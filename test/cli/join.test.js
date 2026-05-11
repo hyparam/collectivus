@@ -153,6 +153,49 @@ describe('join CLI', () => {
     }
   })
 
+  it('npm exec join installs even when npm resolves a stable global bin path', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-join-npm-exec-'))
+    try {
+      const stdout = memo()
+      const stderr = memo()
+      const configPath = path.join(tmpDir, 'collectivus.json')
+      /** @type {Array<Record<string, unknown>>} */
+      const daemonInstalls = []
+
+      const code = await runJoin(['secret-code', '--rendezvous', 'https://join.example'], {
+        npm_command: 'exec',
+        npm_lifecycle_event: 'npx',
+      }, {
+        stdout,
+        stderr,
+        binPath: '/usr/local/lib/node_modules/collectivus/bin/cli.js',
+        configPath,
+        fetchFn: jsonFetch({
+          connect_url: 'https://central.example:8788',
+          gateway_id: 'gw-prod-1',
+          expires_at: '2999-01-01T00:00:00.000Z',
+        }),
+        installGlobal() {
+          return Promise.resolve(true)
+        },
+        resolveGlobalBinPath() {
+          return Promise.resolve('/usr/local/lib/node_modules/collectivus/bin/cli.js')
+        },
+        installLaunchAgent(opts) {
+          daemonInstalls.push({ ...opts })
+          return Promise.resolve()
+        },
+      })
+
+      expect(code).toBe(0)
+      expect(daemonInstalls).toHaveLength(1)
+      expect(fs.existsSync(configPath)).toBe(true)
+      expect(stdout.value()).toMatch(/Installing collectivus globally/)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
   it('npx join stops before writing config when global install fails', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-join-npx-fail-'))
     try {

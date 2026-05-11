@@ -204,17 +204,20 @@ describe('Identity flow end-to-end (HTTP)', () => {
   /**
    * Spin up a control plane backed by a real BootstrapStore at `dir`.
    *
-   * @param {{ clock?: { now: () => number } }} [opts]
+   * @param {{ clock?: { now: () => number }, publicUrl?: string }} [opts]
    * @returns {Promise<{ store: BootstrapStore, plane: ControlPlane }>}
    */
   async function bootPlane(opts = {}) {
     const storePath = path.join(dir, 'bootstrap.json')
     const store = new BootstrapStore({ path: storePath, now: opts.clock?.now })
+    /** @type {ServerConfig} */
+    const cfg = {
+      control_plane_listen: '127.0.0.1:0',
+      identity_issuer: { secret: PLACEHOLDER_SECRET, bootstrap_store_path: storePath },
+    }
+    if (opts.publicUrl) cfg.public_url = opts.publicUrl
     plane = new ControlPlane(
-      {
-        control_plane_listen: '127.0.0.1:0',
-        identity_issuer: { secret: PLACEHOLDER_SECRET, bootstrap_store_path: storePath },
-      },
+      cfg,
       { bootstrapStore: store, now: opts.clock?.now }
     )
     await plane.start()
@@ -367,6 +370,49 @@ describe('Identity flow end-to-end (HTTP)', () => {
       body: JSON.stringify({ bootstrap_token: big }),
     })
     expect(res.status).toBe(413)
+  })
+
+  describe('GET /v1/bootstrap-config (no auth)', () => {
+    it('returns a gateway starter config for a setup URL without consuming the token', async () => {
+      const { store } = await bootPlane({ publicUrl: 'https://collectivus.example.com' })
+      const { token } = store.register({ gatewayId: 'gw-setup', ttlSeconds: 60 })
+
+      const res = await fetch(`${baseUrl}/v1/bootstrap-config?token=${token}`)
+      expect(res.status).toBe(200)
+      expect(res.headers.get('cache-control')).toBe('no-store')
+      const body = await res.json()
+      expect(body).toEqual({
+        version: 1,
+        role: 'gateway',
+        central_server: {
+          url: 'https://collectivus.example.com',
+          identity: { bootstrap_token: token },
+        },
+      })
+
+      const bootstrap = await fetch(`${baseUrl}/v1/identity/bootstrap`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ bootstrap_token: token }),
+      })
+      expect(bootstrap.status).toBe(200)
+      const bootstrapBody = await bootstrap.json()
+      const verified = verifyJwt(bootstrapBody.jwt, PLACEHOLDER_SECRET)
+      expect(verified.valid).toBe(true)
+      if (!verified.valid) throw new Error('unreachable')
+      expect(verified.claims.sub).toBe('gw-setup')
+    })
+
+    it('rejects missing and unknown setup tokens', async () => {
+      await bootPlane()
+      const missing = await fetch(`${baseUrl}/v1/bootstrap-config`)
+      expect(missing.status).toBe(400)
+
+      const unknown = await fetch(`${baseUrl}/v1/bootstrap-config?token=${'a'.repeat(64)}`)
+      expect(unknown.status).toBe(401)
+      const body = await unknown.json()
+      expect(body.error).toBe('invalid bootstrap token')
+    })
   })
 })
 
@@ -767,6 +813,52 @@ describe('CLI lifecycle wiring', () => {
         body: JSON.stringify({ bootstrap_token: token }),
       })
       expect(replay.status).toBe(401)
+    } finally {
+      await plane.stop()
+    }
+  })
+
+  it('role: gateway can start from --config-endpoint and hot-reload the registered config', async () => {
+    const storePath = path.join(tmpDir, 'bootstrap.json')
+    const store = new BootstrapStore({ path: storePath })
+    const registry = createConfigRegistry({ configsDir: path.join(tmpDir, 'configs') })
+    const plane = new ControlPlane(
+      {
+        control_plane_listen: '127.0.0.1:0',
+        identity_issuer: { secret: PLACEHOLDER_SECRET, bootstrap_store_path: storePath },
+      },
+      { bootstrapStore: store, configRegistry: registry }
+    )
+    await plane.start()
+    try {
+      const addr = plane.server?.address()
+      if (!addr || typeof addr === 'string') throw new Error('no address')
+      const base = `http://127.0.0.1:${addr.port}`
+      const { token } = store.register({ gatewayId: 'gw-one-line', ttlSeconds: 60 })
+      setConfig(registry, 'gw-one-line', {
+        version: 1,
+        role: 'gateway',
+        otel: { listen: '127.0.0.1:0' },
+        sink: { type: 'file', dir: path.join(tmpDir, 'data') },
+        central_server: { url: base, identity: {} },
+      })
+
+      const stdout = memo()
+      const stderr = memo()
+      /** @type {(signal: string) => void} */
+      let trigger = noop
+      const result = run(['--config-endpoint', `${base}/v1/bootstrap-config?token=${token}`], {}, {
+        stdout,
+        stderr,
+        identityPersistedPath: path.join(tmpDir, 'identity-one-line.json'),
+        onShutdownRequested: (handler) => { trigger = handler },
+      })
+      await waitFor(() => stdout.value().includes('hot reload: otel started'))
+      trigger('SIGTERM')
+      expect(await result).toBe(0)
+      expect(stdout.value()).toMatch(/Identity bootstrapped for gw-one-line/)
+      expect(stdout.value()).toMatch(/Config poll loop active/)
+      expect(stderr.value()).not.toMatch(/no config registered/)
     } finally {
       await plane.stop()
     }

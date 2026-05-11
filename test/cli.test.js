@@ -53,7 +53,7 @@ describe('parseArgs', () => {
   it('requires --config', () => {
     const r = parseArgs([])
     expect(r.mode).toBe('error')
-    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url> is required/)
+    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
   })
 
   it('parses --config <path>', () => {
@@ -66,6 +66,27 @@ describe('parseArgs', () => {
     expect(parseArgs(['--config=/tmp/c.json'])).toEqual({
       mode: 'config', configPath: '/tmp/c.json', printConfig: false, strict: false,
     })
+  })
+
+  it('parses --config-endpoint <url>', () => {
+    expect(parseArgs(['--config-endpoint', 'https://central.example/v1/bootstrap-config?token=t'])).toEqual({
+      mode: 'config',
+      configPath: 'https://central.example/v1/bootstrap-config?token=t',
+      printConfig: false,
+      strict: false,
+    })
+  })
+
+  it('rejects --config-endpoint without an http(s) URL', () => {
+    const r = parseArgs(['--config-endpoint', '/tmp/c.json'])
+    expect(r.mode).toBe('error')
+    if (r.mode === 'error') expect(r.message).toMatch(/http\(s\) URL/)
+  })
+
+  it('rejects --config with --config-endpoint', () => {
+    const r = parseArgs(['--config', '/tmp/c.json', '--config-endpoint', 'https://central.example/config'])
+    expect(r.mode).toBe('error')
+    if (r.mode === 'error') expect(r.message).toMatch(/mutually exclusive/)
   })
 
   it('parses --config <path> --print-config', () => {
@@ -146,7 +167,7 @@ describe('run(): help and arg errors', () => {
     const stderr = memo()
     const code = await run([], {}, { stdout, stderr })
     expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config <path\|url> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
     expect(stderr.value()).toMatch(/Usage:/)
   })
 })
@@ -177,7 +198,7 @@ describe('run(): walkthrough dispatch', () => {
     })
     expect(code).toBe(2)
     expect(initCalls).toBe(0)
-    expect(stderr.value()).toMatch(/--config <path\|url> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url> or --config-endpoint <url> is required/)
   })
 })
 

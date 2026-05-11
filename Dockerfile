@@ -8,4 +8,6 @@ COPY src ./src
 
 USER node
 
+EXPOSE 8788
+
 ENTRYPOINT ["node", "bin/cli.js"]

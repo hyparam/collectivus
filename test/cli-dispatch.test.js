@@ -71,6 +71,18 @@ describe('bin/cli.js — subcommand dispatch', function() {
     expect(r.stdout).toMatch(/Usage:\s+ctvs query/)
   })
 
+  it('dispatches `rendezvous --help`', async function() {
+    const r = await runCli(['rendezvous', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs rendezvous/)
+  })
+
+  it('dispatches `join --help`', async function() {
+    const r = await runCli(['join', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs join/)
+  })
+
   it('passes subcommand args through (install with no --config)', async function() {
     const r = await runCli(['install'])
     expect(r.exitCode).toBe(2)

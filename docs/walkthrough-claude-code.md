@@ -196,21 +196,38 @@ npx collectivus
 #   3) Central server
 ```
 
-Option 3 prompts for the central-server listen address, server data directory
-(default `~/.hyp/collectivus/server-data`), an HMAC secret for signing JWTs,
-and an optional S3 upload block — then prints the operator commands you need
-to run next:
+Option 3 prompts for the central-server listen address, the gateway-facing
+public URL, server data directory (default
+`~/.hyp/collectivus/server-data`), an HMAC secret for signing JWTs, and an
+optional S3 upload block — then prints the start and operator commands you
+need to run next:
 
 ```bash
 collectivus config bootstrap-token issue gw-prod-1 --server-config server.json
+# prints:
+npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=...'
 collectivus config set gw-prod-1 --server-config server.json --file gw-prod-1.json
 ```
 
-Option 2 prompts for the central-server URL and `poll_interval_seconds`
-(default 30) and writes a `role: gateway` config. The bootstrap token is NOT
-collected at the prompt — pasting it into readline puts it in shell history.
-Edit `central_server.identity.bootstrap_token` in the saved config by hand
-after the operator hands you the token.
+Option 2 still writes a gateway config by hand for advanced setups. The normal
+enterprise path is the one-line `--config-endpoint` command printed by the
+central server's token issuer.
+
+If gateways need a shorter hosted-discovery command, run a rendezvous service:
+
+```bash
+ctvs rendezvous --listen 0.0.0.0:8789 --data-dir ~/.hyp/collectivus/rendezvous \
+  --registration-token "$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN"
+collectivus config bootstrap-token issue gw-prod-1 --server-config server.json \
+  --rendezvous https://join.collectivus.example
+# prints:
+npx collectivus join <join-code> --rendezvous https://join.collectivus.example
+```
+
+Rendezvous stores only the join-code hash and Central server connect metadata.
+The gateway resolves the join code, keeps the bootstrap config in memory, and
+then bootstraps directly against Central. V1 does not pin the Central URL, so
+use this only when gateway egress is private or constrained.
 
 See the [Config vending](../README.md#config-vending-multi-host-deployments)
 section of the README for the full operator workflow and the on-disk schema.

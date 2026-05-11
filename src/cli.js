@@ -33,6 +33,7 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 
 const USAGE = `Usage:
   ctvs --config <path|url>                     Run with config file or http(s) URL
+  ctvs --config-endpoint <url>                 Run from a central-server setup URL
   ctvs --config <path|url> --print-config
                                                Load config, print resolved JSON, exit
   ctvs --config <path|url> --strict            Reject unknown top-level config keys
@@ -51,6 +52,8 @@ Commands:
   ctvs query <command> [...]                   Query local recordings through Parquet cache
   ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs
+  ctvs rendezvous [--listen <host:port>] ...   Run the hosted-discovery rendezvous service
+  ctvs join <join-code> --rendezvous <url>     Join a Central server through rendezvous
 
 Run \`ctvs <subcommand> --help\` for subcommand-specific options.`
 
@@ -66,6 +69,8 @@ const SELF_UPDATE_TIME_UTC = '03:00'
 export function parseArgs(argv) {
   /** @type {string | undefined} */
   let configPath
+  /** @type {string | undefined} */
+  let configEndpoint
   let printConfig = false
   let strict = false
 
@@ -83,6 +88,17 @@ export function parseArgs(argv) {
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
       if (!value) return parseError('--config requires a path or URL')
+      if (configEndpoint !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      configPath = value
+      continue
+    }
+
+    if (arg === '--config-endpoint' || arg.startsWith('--config-endpoint=')) {
+      const value = arg === '--config-endpoint' ? argv[++i] : arg.slice('--config-endpoint='.length)
+      if (!value) return parseError('--config-endpoint requires a URL')
+      if (!isHttpUrl(value)) return parseError('--config-endpoint requires an http(s) URL')
+      if (configPath !== undefined) return parseError('--config and --config-endpoint are mutually exclusive')
+      configEndpoint = value
       configPath = value
       continue
     }
@@ -101,7 +117,7 @@ export function parseArgs(argv) {
   }
 
   if (configPath === undefined) {
-    return parseError('--config <path|url> is required')
+    return parseError('--config <path|url> or --config-endpoint <url> is required')
   }
 
   return { mode: 'config', configPath, printConfig, strict }
@@ -113,6 +129,14 @@ export function parseArgs(argv) {
  */
 function parseError(message) {
   return { mode: 'error', message, exitCode: 2 }
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(value)
 }
 
 /**
@@ -130,6 +154,7 @@ function parseError(message) {
  *   onShutdownRequested?: (handler: (signal: string) => void) => void,
  *   isTTY?: boolean,
  *   runInit?: () => Promise<number>,
+ *   identityPersistedPath?: string,
  * }} [hooks]
  * @returns {Promise<number>}
  */
@@ -180,6 +205,34 @@ export async function run(argv, env, hooks = {}) {
     return 0
   }
 
+  return runWithConfig(config, env, {
+    stdout,
+    stderr,
+    onShutdownRequested,
+    identityPersistedPath: hooks.identityPersistedPath,
+  })
+}
+
+/**
+ * Run the normal listener/gateway lifecycle from an already constructed
+ * config object. Callers use this when the config is intentionally in memory
+ * only, such as `ctvs join` after resolving a hosted-discovery join code.
+ *
+ * @param {CollectivusConfig} config Validated Collectivus config.
+ * @param {NodeJS.ProcessEnv} env Environment variables (read for upload credentials).
+ * @param {{
+ *   stdout?: { write: (s: string) => void },
+ *   stderr?: { write: (s: string) => void },
+ *   onShutdownRequested?: (handler: (signal: string) => void) => void,
+ *   identityPersistedPath?: string,
+ * }} [hooks]
+ * @returns {Promise<number>}
+ */
+export async function runWithConfig(config, env, hooks = {}) {
+  const stdout = hooks.stdout ?? process.stdout
+  const stderr = hooks.stderr ?? process.stderr
+  const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
+
   // Fail at boot rather than at the first daily uploader tick when the
   // upload section is configured but AWS credentials aren't in the env.
   if (config.upload && (!env?.AWS_ACCESS_KEY_ID || !env?.AWS_SECRET_ACCESS_KEY)) {
@@ -203,7 +256,10 @@ export async function run(argv, env, hooks = {}) {
       stderr.write('config error: role: gateway requires a central_server block (validator should have caught this).\n')
       return 1
     }
-    identityClient = new IdentityClient(config.central_server)
+    identityClient = new IdentityClient(
+      config.central_server,
+      hooks.identityPersistedPath ? { persistedPath: hooks.identityPersistedPath } : {}
+    )
     try {
       const source = await identityClient.acquire()
       const id = identityClient.identity

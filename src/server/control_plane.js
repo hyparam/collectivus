@@ -181,6 +181,12 @@ export class ControlPlane {
       return
     }
 
+    if (path === '/v1/bootstrap-config') {
+      if (method !== 'GET') return writeError(res, 405, 'method not allowed')
+      this.handleBootstrapConfig(req, res, url)
+      return
+    }
+
     if (path === '/v1/config') {
       if (method !== 'GET') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
@@ -282,6 +288,52 @@ export class ControlPlane {
     })
     const expiresAt = Math.floor(this.now() / 1000) + ttlSeconds
     writeJson(res, 200, { jwt, expires_at: expiresAt })
+  }
+
+  /**
+   * Handle `GET /v1/bootstrap-config?token=...`. The URL itself is the
+   * invite: it carries a one-shot bootstrap token and returns the minimal
+   * gateway config needed for `npx collectivus --config-endpoint=...` to
+   * bootstrap identity, start the config poll loop, and hot-reload the
+   * registered per-gateway config.
+   *
+   * Fetching this endpoint does not consume the token. The token is consumed
+   * only by `POST /v1/identity/bootstrap` after the gateway process starts.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @param {URL} url
+   * @returns {void}
+   */
+  handleBootstrapConfig(req, res, url) {
+    const store = this.bootstrapStore
+    if (!store) {
+      writeJson(res, 503, { error: 'bootstrap not provisioned' })
+      return
+    }
+    const token = url.searchParams.get('token') ?? url.searchParams.get('bootstrap_token') ?? ''
+    if (token.length === 0) {
+      writeError(res, 400, 'token is required')
+      return
+    }
+    const inspected = store.inspect(token)
+    if (inspected.ok === false) {
+      return writeJson(res, 401, { error: 'invalid bootstrap token', reason: inspected.reason })
+    }
+
+    const centralUrl = normalizeBaseUrl(this.config.public_url ?? requestBaseUrl(req))
+    writeJson(res, 200, {
+      version: 1,
+      role: 'gateway',
+      central_server: {
+        url: centralUrl,
+        identity: {
+          bootstrap_token: token,
+        },
+      },
+    }, {
+      'cache-control': 'no-store',
+    })
   }
 
   /**
@@ -408,4 +460,34 @@ function stripEtagWrapping(tag) {
     t = t.slice(1, -1)
   }
   return t
+}
+
+/**
+ * @param {IncomingMessage} req
+ * @returns {string}
+ */
+function requestBaseUrl(req) {
+  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto'])
+  const forwardedHost = firstHeaderValue(req.headers['x-forwarded-host'])
+  const proto = forwardedProto ?? 'http'
+  const host = forwardedHost ?? firstHeaderValue(req.headers.host) ?? 'localhost'
+  return `${proto}://${host}`
+}
+
+/**
+ * @param {string | string[] | undefined} value
+ * @returns {string | undefined}
+ */
+function firstHeaderValue(value) {
+  if (Array.isArray(value)) return value[0]
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  return value.split(',')[0].trim()
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function normalizeBaseUrl(value) {
+  return value.replace(/\/+$/, '')
 }

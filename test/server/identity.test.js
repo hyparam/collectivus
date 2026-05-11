@@ -256,6 +256,23 @@ describe('BootstrapStore', () => {
     expect(replay.reason).toBe('already_used')
   })
 
+  it('reloads records before consuming so the running server sees operator-issued tokens', () => {
+    const serverStore = new BootstrapStore({ path: storePath })
+    const operatorStore = new BootstrapStore({ path: storePath })
+    const { token } = operatorStore.register({ gatewayId: 'gw-from-cli', ttlSeconds: 60 })
+
+    const consumed = expectConsumeOk(serverStore.tryConsume(token))
+    expect(consumed.gatewayId).toBe('gw-from-cli')
+  })
+
+  it('inspects a token without consuming it', () => {
+    const store = new BootstrapStore({ path: storePath })
+    const { token } = store.register({ gatewayId: 'gw-inspect', ttlSeconds: 60 })
+    const inspected = store.inspect(token)
+    expect(inspected).toMatchObject({ ok: true, gatewayId: 'gw-inspect' })
+    expectConsumeOk(store.tryConsume(token))
+  })
+
   it('does not store the plaintext token on disk', () => {
     const store = new BootstrapStore({ path: storePath })
     const { token } = store.register({ gatewayId: 'gw', ttlSeconds: 60 })

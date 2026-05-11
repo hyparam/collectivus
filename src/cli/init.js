@@ -814,6 +814,16 @@ async function runServerFlow(args) {
   const listenAns = (await prompt(`Central server listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
   const controlPlaneListen = listenAns === '' ? DEFAULT_CONTROL_PLANE_LISTEN : listenAns
 
+  const defaultPublicUrl = publicUrlDefault(controlPlaneListen)
+  stdout.write('\nWhat URL will gateways use to reach this server? For ECS/Docker,\n')
+  stdout.write('use the load balancer or service URL, not 0.0.0.0.\n')
+  const publicUrl = await askUrlWithDefault({
+    prompt,
+    stderr,
+    question: `Gateway-facing URL [${defaultPublicUrl}]: `,
+    defaultValue: defaultPublicUrl,
+  })
+
   // The data_dir prompt is the B.5 acceptance touchpoint: the registry stores
   // per-gateway configs under <data_dir>/configs/, and the bootstrap-token
   // store lives under it too unless overridden.
@@ -848,6 +858,7 @@ async function runServerFlow(args) {
   /** @type {ServerConfig} */
   const serverBlock = {
     control_plane_listen: controlPlaneListen,
+    public_url: publicUrl,
     identity_issuer: { secret, bootstrap_store_path: bootstrapStorePath },
     data_dir: dataDir,
     sink_dir: sinkDir,
@@ -873,11 +884,15 @@ async function runServerFlow(args) {
     stdout.write('rotating it forces every gateway to re-bootstrap.\n')
   }
 
-  stdout.write('\nNext steps:\n')
-  stdout.write(`  ctvs --config ${cfgPath}    (start the server)\n\n`)
-  stdout.write('Provision a gateway:\n')
+  stdout.write('\nStart the central server:\n')
+  stdout.write(`  npx -p collectivus ctvs --config ${cfgPath}\n`)
+  stdout.write(`  ctvs --config ${cfgPath}    (after npm install -g collectivus)\n`)
+  stdout.write('  Docker/ECS: run the collectivus image with this config and data_dir mounted,\n')
+  stdout.write('              then pass --config <container-config-path>.\n\n')
+  stdout.write('Provision each gateway:\n')
   stdout.write(`  ctvs config bootstrap-token issue <gateway-id> --server-config ${cfgPath}\n`)
-  stdout.write('     (prints a one-shot token; hand it to the gateway operator)\n')
+  stdout.write('     (prints a one-shot token and the one-line npx setup command)\n')
+  stdout.write(`  npx collectivus --config-endpoint='${bootstrapConfigUrlTemplate(publicUrl)}'\n`)
   stdout.write(`  ctvs config set <gateway-id> --server-config ${cfgPath} --file <gateway-config.json>\n`)
   stdout.write('     (registers the per-gateway config the gateway will pull)\n')
   return 0
@@ -943,6 +958,86 @@ async function askCentralServer(prompt, stdout, stderr) {
   const cs = { url, identity: {} }
   if (pollIntervalSeconds !== undefined) cs.poll_interval_seconds = pollIntervalSeconds
   return cs
+}
+
+/**
+ * @param {{
+ *   prompt: (q: string) => Promise<string>,
+ *   stderr: { write: (s: string) => void },
+ *   question: string,
+ *   defaultValue: string,
+ * }} args
+ * @returns {Promise<string>}
+ */
+async function askUrlWithDefault(args) {
+  for (;;) {
+    const raw = (await args.prompt(args.question)).trim()
+    const value = normalizeUrl(raw === '' ? args.defaultValue : raw)
+    try {
+      const url = new URL(value)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('bad protocol')
+      return value
+    } catch {
+      args.stderr.write('  url must be an http(s) URL (e.g. https://collectivus.example.com:8788)\n')
+    }
+  }
+}
+
+/**
+ * @param {string} listen
+ * @returns {string}
+ */
+function publicUrlDefault(listen) {
+  const { host, port } = parseListenAddress(listen)
+  const publicHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host
+  return `http://${formatUrlHost(publicHost)}:${port}`
+}
+
+/**
+ * @param {string} publicUrl
+ * @returns {string}
+ */
+function bootstrapConfigUrlTemplate(publicUrl) {
+  return `${normalizeUrl(publicUrl)}/v1/bootstrap-config?token=<bootstrap-token>`
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function normalizeUrl(value) {
+  return value.replace(/\/+$/, '')
+}
+
+/**
+ * @param {string} value
+ * @returns {{ host: string, port: number }}
+ */
+function parseListenAddress(value) {
+  let host
+  let portStr
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']')
+    host = close === -1 ? value : value.slice(1, close)
+    portStr = close === -1 ? '' : value.slice(close + 2)
+  } else {
+    const colon = value.lastIndexOf(':')
+    host = colon === -1 ? value : value.slice(0, colon)
+    portStr = colon === -1 ? '' : value.slice(colon + 1)
+  }
+  const port = Number.parseInt(portStr, 10)
+  return {
+    host: host || 'localhost',
+    port: Number.isInteger(port) ? port : 8788,
+  }
+}
+
+/**
+ * @param {string} host
+ * @returns {string}
+ */
+function formatUrlHost(host) {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
 }
 
 /**

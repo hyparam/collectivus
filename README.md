@@ -23,11 +23,11 @@ npm install collectivus
 ## Quick start: record claude-code
 
 The fastest path is the interactive walkthrough. Run `collectivus` with no
-arguments and it asks whether to run in single-user (local) or enterprise
-(central server) mode, where to write recordings, and whether to install
-as a daemon and attach Claude Code. Enterprise mode also prints the
-`npx collectivus --config <url>` command teammates run on their own
-machines to forward LLM traffic and OTel telemetry to the server:
+arguments and choose Standalone, Gateway, or Central server. Standalone keeps
+config and recordings on this machine; Gateway pulls config from a central
+server; Central server vendors per-gateway config and receives shipped ingest.
+The walkthrough also asks where to write recordings and whether to install as
+a daemon and attach Claude Code when the selected mode uses a local proxy:
 
 ```bash
 npx collectivus
@@ -47,7 +47,7 @@ npx collectivus --config examples/claude-code.json
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
 
 # 3. Run a prompt, then watch the recording:
-tail -f collectivus-data/proxy.jsonl
+tail -f "collectivus-data/$USER/proxy/$(date -u +%F).jsonl"
 ```
 
 Full step-by-step: [`docs/walkthrough-claude-code.md`](docs/walkthrough-claude-code.md).
@@ -80,7 +80,7 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 | `version` | Schema version. Required. Currently `1`. |
 | `otel`    | Enable the OTLP receiver. Omit to disable. |
 | `proxy`   | Enable the LLM proxy. Omit to disable. Requires `sink`. |
-| `sink`    | Where the proxy writes `proxy.jsonl`. Required when `otel` or `proxy` is set. (OTLP output also lands under `sink.dir`.) The walkthrough defaults this to `~/.hyp/collectivus/`. |
+| `sink`    | Root directory for JSONL recordings. Proxy rows land under `<sink.dir>/<gateway_id>/proxy/`; OTLP rows land under `<sink.dir>/<gateway_id>/<signal>/`. Required when `otel` or `proxy` is set. The walkthrough defaults this to `~/.hyp/collectivus/`. |
 | `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
 
 Add an `upload` block to drain JSONL to S3 once a day:
@@ -116,12 +116,12 @@ writes v1 only.
 ## Config vending (multi-host deployments)
 
 For fleets of gateways behind a single audit/storage backend, run one
-collectivus host as a `role: server` central control plane and point each
-gateway at it as `role: gateway`. The server vendors per-gateway configs over
-`GET /v1/config` (with `If-None-Match` / `ETag`) and accepts ingest from each
-gateway. Gateways pull their config every `central_server.poll_interval_seconds`
-(default 30, range 5–3600) and hot-reload only the listener whose section
-changed.
+collectivus host as the central server (`role: "server"`) and point each
+managed host at it as a gateway (`role: "gateway"`). The central server vendors
+per-gateway configs over `GET /v1/config` (with `If-None-Match` / `ETag`) and
+accepts ingest from each gateway. Gateways pull their config every
+`central_server.poll_interval_seconds` (default 30, range 5–3600) and
+hot-reload only the listener whose section changed.
 
 Operator workflow on the server host:
 
@@ -136,11 +136,15 @@ collectivus config bootstrap-token issue gw-prod-1 --server-config /etc/collecti
 #    side; an invalid file is rejected before any bytes hit disk.
 collectivus config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
 
-# 3. Inspect / list / delete as needed.
+# 3. Operator inspection / cleanup tools.
 collectivus config get gw-prod-1 --server-config /etc/collectivus-server.json
 collectivus config list --server-config /etc/collectivus-server.json
 collectivus config delete gw-prod-1 --server-config /etc/collectivus-server.json
 ```
+
+These commands are local operator tools for the central server host. They read
+the server config only to find the same on-disk config registry and bootstrap
+token store used by the running central server.
 
 Gateway side, with the token pasted into `central_server.identity.bootstrap_token`:
 
@@ -165,9 +169,8 @@ collectivus --config /etc/collectivus.json
 Once the gateway has a JWT, the bootstrap token can be removed from the config
 — refresh against the central server takes over until the JWT itself rotates.
 
-The interactive walkthrough builds either side: `npx collectivus` with no args
-offers options 4 (Gateway) and 5 (Server) alongside the standard standalone
-flow.
+The interactive walkthrough builds all three roles: Standalone, Gateway, and
+Central server.
 
 ## S3 upload
 
@@ -176,13 +179,13 @@ Collectivus always writes raw JSONL to your local sink directory. When the
 JSONL into Parquet partitions in S3. Object keys are Hive-partitioned:
 
 ```
-<prefix>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet
+<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet
 ```
 
 This is useful for long-term retention, columnar queries with
 Athena / DuckDB / Snowflake, and offsite backup of recordings that would
 otherwise live only on the daemon host. The local JSONL is the source of
-truth; the S3 drain is additive and idempotent (a per-(service, signal,
+truth; the S3 drain is additive and idempotent (a per-(gateway_id, signal,
 date) ledger and a HEAD check on the destination key prevent duplicate
 uploads).
 
@@ -222,17 +225,18 @@ Output layout under `sink.dir`:
 
 ```
 collectivus-data/
-├── traces/<UTC-date>.jsonl       # raw export envelope
-├── metrics/<UTC-date>.jsonl
-├── logs/<UTC-date>.jsonl
-└── services/<service.name>/
-    ├── traces-<UTC-date>.jsonl   # one row per span
-    ├── metrics-<UTC-date>.jsonl  # one row per data point
-    └── logs-<UTC-date>.jsonl     # one row per log record
+└── <gateway_id>/
+    ├── raw/
+    │   ├── traces/<UTC-date>.jsonl       # raw export envelope
+    │   ├── metrics/<UTC-date>.jsonl
+    │   └── logs/<UTC-date>.jsonl
+    ├── traces/<UTC-date>.jsonl           # one row per span
+    ├── metrics/<UTC-date>.jsonl          # one row per data point
+    └── logs/<UTC-date>.jsonl             # one row per log record
 ```
 
-Each row in `services/` is a normalized JSON object — span, data point, or
-log record — partitioned by `service.name`.
+Each normalized row includes the source `service.name`, while files are
+partitioned by `gateway_id`, signal, and date.
 
 ### Verify the OTLP receiver
 
@@ -250,7 +254,7 @@ The proxy is a transparent reverse proxy for Anthropic's Messages API. With
 through collectivus, gets forwarded to `https://api.anthropic.com`, and is
 recorded to JSONL.
 
-Two row kinds in `<sink.dir>/proxy.jsonl`:
+Two row kinds in `<sink.dir>/<gateway_id>/proxy/<UTC-date>.jsonl`:
 
 **Per stream event** (one per SSE event for streamed responses):
 
@@ -375,19 +379,19 @@ Two sinks are drained:
 
 | Source | Destination |
 | --- | --- |
-| `<sink.dir>/proxy.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
-| `<sink.dir>/services/<svc>/<signal>-<date>.jsonl` (OTLP) | `<out>/<svc>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
+| `<sink.dir>/<gateway_id>/proxy/<date>.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
+| `<sink.dir>/<gateway_id>/<signal>/<date>.jsonl` (OTLP) | `<out>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
 
 The two proxy row kinds (`exchange` and `stream_event`) get their own typed
 schemas. Headers are JSON columns; bodies are preserved as strings.
 
 ```text
 collectivus export --config <path> [--out <dir>] [--date YYYY-MM-DD]
-                                   [--service <name>] [--signal logs|traces|metrics]
+                                   [--gateway-id <id>] [--signal logs|traces|metrics]
 ```
 
-`--date`, `--service`, and `--signal` only filter the OTLP path; `proxy.jsonl`
-is always drained when present.
+`--date`, `--gateway-id`, and `--signal` only filter the OTLP path; proxy
+JSONL is always drained when present.
 
 ## Programmatic use
 

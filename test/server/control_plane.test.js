@@ -3,12 +3,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { run } from '../../src/cli.js'
-import { ConfigRegistry } from '../../src/server/config_registry.js'
+import { createConfigRegistry, setConfig } from '../../src/server/config_registry.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
 import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
 /**
  * @import { CollectivusConfig, ServerConfig } from '../../src/types.js'
+ * @import { ConfigRegistry } from '../../src/server/types.d.ts'
  */
 
 const PLACEHOLDER_SECRET = 'a'.repeat(32)
@@ -400,7 +401,7 @@ describe('GET /v1/config (auth required)', () => {
 
   beforeEach(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cp-cfg-'))
-    registry = new ConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
     plane = new ControlPlane(serverConfig(), { configRegistry: registry })
     await plane.start()
     const addr = plane.server?.address()
@@ -436,7 +437,7 @@ describe('GET /v1/config (auth required)', () => {
 
   it('returns 200 + JSON body + ETag on a fresh fetch', async () => {
     const cfg = gatewayCfg({ url: 'https://gw-a.example.com' })
-    registry.setConfig('gw-a', cfg)
+    setConfig(registry, 'gw-a', cfg)
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const res = await fetch(`${baseUrl}/v1/config`, {
@@ -451,7 +452,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('returns 304 with empty body when If-None-Match matches the current ETag', async () => {
-    registry.setConfig('gw-a', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const first = await fetch(`${baseUrl}/v1/config`, {
@@ -475,7 +476,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('returns 200 + new body when the stored config has changed since the cached ETag', async () => {
-    registry.setConfig('gw-a', gatewayCfg({ url: 'https://old.example.com' }))
+    setConfig(registry, 'gw-a', gatewayCfg({ url: 'https://old.example.com' }))
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const first = await fetch(`${baseUrl}/v1/config`, {
@@ -486,7 +487,7 @@ describe('GET /v1/config (auth required)', () => {
     await first.text()
 
     // Operator updates the config out-of-band.
-    registry.setConfig('gw-a', gatewayCfg({ url: 'https://new.example.com' }))
+    setConfig(registry, 'gw-a', gatewayCfg({ url: 'https://new.example.com' }))
 
     const second = await fetch(`${baseUrl}/v1/config`, {
       headers: {
@@ -502,7 +503,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('returns 200 with a stale (different) ETag rather than treating it as no-match', async () => {
-    registry.setConfig('gw-a', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const res = await fetch(`${baseUrl}/v1/config`, {
@@ -515,7 +516,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('honors the wildcard If-None-Match: *', async () => {
-    registry.setConfig('gw-a', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const res = await fetch(`${baseUrl}/v1/config`, {
@@ -528,7 +529,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('accepts a quoted ETag in If-None-Match (RFC 7232 wrapping)', async () => {
-    registry.setConfig('gw-a', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
 
     const first = await fetch(`${baseUrl}/v1/config`, {
@@ -549,8 +550,8 @@ describe('GET /v1/config (auth required)', () => {
 
   it('serves the JWT subject\'s config and never another gateway\'s by query/path', async () => {
     // Two gateways with distinct configs registered.
-    registry.setConfig('gw-a', gatewayCfg({ url: 'https://a.example.com' }))
-    registry.setConfig('gw-b', gatewayCfg({ url: 'https://b.example.com' }))
+    setConfig(registry, 'gw-a', gatewayCfg({ url: 'https://a.example.com' }))
+    setConfig(registry, 'gw-b', gatewayCfg({ url: 'https://b.example.com' }))
 
     // Gateway A's JWT.
     const jwtA = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
@@ -566,7 +567,7 @@ describe('GET /v1/config (auth required)', () => {
   })
 
   it('returns 401 when the bearer JWT is signed by a different secret', async () => {
-    registry.setConfig('gw-a', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
     const wrongJwt = signJwt({ gatewayId: 'gw-a', ttlSeconds: 60, secret: 'b'.repeat(32) })
     const res = await fetch(`${baseUrl}/v1/config`, {
       headers: { authorization: `Bearer ${wrongJwt}` },

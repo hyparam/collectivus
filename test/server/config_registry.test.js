@@ -4,15 +4,20 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  ConfigRegistry,
   canonicalJsonString,
   computeEtag,
+  createConfigRegistry,
   defaultServerDataDir,
+  deleteConfig,
+  getConfig,
+  listGateways,
   resolveConfigsDir,
+  setConfig,
 } from '../../src/server/config_registry.js'
 
 /**
  * @import { CollectivusConfig } from '../../src/types.js'
+ * @import { ConfigRegistry } from '../../src/server/types.d.ts'
  */
 
 /**
@@ -126,7 +131,7 @@ describe('ConfigRegistry', () => {
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cfg-reg-'))
-    registry = new ConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
   })
 
   afterEach(() => {
@@ -135,33 +140,33 @@ describe('ConfigRegistry', () => {
 
   it('rejects construction without a configsDir', () => {
     // @ts-expect-error - testing the runtime guard
-    expect(() => new ConfigRegistry({})).toThrow(/configsDir is required/)
-    expect(() => new ConfigRegistry({ configsDir: '' })).toThrow(/configsDir is required/)
+    expect(() => createConfigRegistry({})).toThrow(/configsDir is required/)
+    expect(() => createConfigRegistry({ configsDir: '' })).toThrow(/configsDir is required/)
   })
 
   it('getConfig returns undefined when no config is registered', () => {
-    expect(registry.getConfig('gw-1')).toBeUndefined()
+    expect(getConfig(registry, 'gw-1')).toBeUndefined()
   })
 
   it('setConfig + getConfig roundtrips a valid gateway config with a stable ETag', () => {
     const cfg = gatewayCfg()
-    const { etag } = registry.setConfig('gw-1', cfg)
+    const { etag } = setConfig(registry, 'gw-1', cfg)
     expect(etag).toMatch(/^[0-9a-f]{64}$/)
 
-    const entry = registry.getConfig('gw-1')
+    const entry = getConfig(registry, 'gw-1')
     if (!entry) throw new Error('expected entry')
     expect(entry.config).toEqual(cfg)
     expect(entry.etag).toBe(etag)
   })
 
   it('setConfig rejects a config that fails the gateway-side validator', () => {
-    expect(() => registry.setConfig('gw-1', { version: 0 })).toThrow(/version/)
-    expect(() => registry.setConfig('gw-1', { version: 1, role: 'gateway' })).toThrow(/central_server/)
-    expect(() => registry.setConfig('gw-1', null)).toThrow(/object/)
+    expect(() => setConfig(registry, 'gw-1', { version: 0 })).toThrow(/version/)
+    expect(() => setConfig(registry, 'gw-1', { version: 1, role: 'gateway' })).toThrow(/central_server/)
+    expect(() => setConfig(registry, 'gw-1', null)).toThrow(/object/)
   })
 
   it('setConfig writes atomically (no .tmp file remains after success)', () => {
-    registry.setConfig('gw-1', gatewayCfg())
+    setConfig(registry, 'gw-1', gatewayCfg())
     const files = fs.readdirSync(path.join(dir, 'configs'))
     const tmps = files.filter((f) => f.includes('.tmp.'))
     expect(tmps).toEqual([])
@@ -169,7 +174,7 @@ describe('ConfigRegistry', () => {
   })
 
   it('setConfig persists canonical JSON whose sha256 matches the returned ETag byte-for-byte', () => {
-    const { etag } = registry.setConfig('gw-1', gatewayCfg())
+    const { etag } = setConfig(registry, 'gw-1', gatewayCfg())
     const file = path.join(dir, 'configs', 'gw-1.json')
     const raw = fs.readFileSync(file, 'utf8')
     const onDiskHash = crypto.createHash('sha256').update(raw, 'utf8').digest('hex')
@@ -177,74 +182,74 @@ describe('ConfigRegistry', () => {
   })
 
   it('setConfig overwrites an existing config and returns the new ETag', () => {
-    const { etag: etagA } = registry.setConfig('gw-1', gatewayCfg({ url: 'https://a.example.com' }))
-    const { etag: etagB } = registry.setConfig('gw-1', gatewayCfg({ url: 'https://b.example.com' }))
+    const { etag: etagA } = setConfig(registry, 'gw-1', gatewayCfg({ url: 'https://a.example.com' }))
+    const { etag: etagB } = setConfig(registry, 'gw-1', gatewayCfg({ url: 'https://b.example.com' }))
     expect(etagA).not.toBe(etagB)
 
-    const entry = registry.getConfig('gw-1')
+    const entry = getConfig(registry, 'gw-1')
     if (!entry) throw new Error('expected entry')
     expect(entry.etag).toBe(etagB)
   })
 
   it('listGateways returns sorted IDs and ignores non-JSON files', () => {
-    registry.setConfig('gw-c', gatewayCfg())
-    registry.setConfig('gw-a', gatewayCfg())
-    registry.setConfig('gw-b', gatewayCfg())
+    setConfig(registry, 'gw-c', gatewayCfg())
+    setConfig(registry, 'gw-a', gatewayCfg())
+    setConfig(registry, 'gw-b', gatewayCfg())
     fs.writeFileSync(path.join(dir, 'configs', 'README.md'), 'not a config')
     fs.writeFileSync(path.join(dir, 'configs', '.hidden.json'), '{}')
     fs.writeFileSync(path.join(dir, 'configs', 'gw-x.json.tmp.123'), 'partial')
 
     // `.hidden.json` is filtered: gateway IDs must start with an alphanumeric,
     // so dot-prefixed filenames are not surfaced even if they parse as JSON.
-    expect(registry.listGateways()).toEqual(['gw-a', 'gw-b', 'gw-c'])
+    expect(listGateways(registry)).toEqual(['gw-a', 'gw-b', 'gw-c'])
   })
 
   it('listGateways returns [] when the configsDir does not exist', () => {
-    const fresh = new ConfigRegistry({ configsDir: path.join(dir, 'never-created') })
-    expect(fresh.listGateways()).toEqual([])
+    const fresh = createConfigRegistry({ configsDir: path.join(dir, 'never-created') })
+    expect(listGateways(fresh)).toEqual([])
   })
 
   it('deleteConfig returns true on existing, false on missing', () => {
-    registry.setConfig('gw-1', gatewayCfg())
-    expect(registry.deleteConfig('gw-1')).toBe(true)
-    expect(registry.getConfig('gw-1')).toBeUndefined()
-    expect(registry.deleteConfig('gw-1')).toBe(false)
+    setConfig(registry, 'gw-1', gatewayCfg())
+    expect(deleteConfig(registry, 'gw-1')).toBe(true)
+    expect(getConfig(registry, 'gw-1')).toBeUndefined()
+    expect(deleteConfig(registry, 'gw-1')).toBe(false)
   })
 
   it('rejects gatewayIds that contain path-traversal characters', () => {
-    expect(() => registry.setConfig('../etc/passwd', gatewayCfg())).toThrow(/invalid gatewayId/)
-    expect(() => registry.getConfig('../etc/passwd')).toThrow(/invalid gatewayId/)
-    expect(() => registry.setConfig('gw/with/slash', gatewayCfg())).toThrow(/invalid gatewayId/)
-    expect(() => registry.setConfig('', gatewayCfg())).toThrow(/gatewayId is required/)
-    expect(() => registry.setConfig('.', gatewayCfg())).toThrow(/invalid gatewayId/)
-    expect(() => registry.setConfig('..', gatewayCfg())).toThrow(/invalid gatewayId/)
-    expect(() => registry.setConfig('.hidden', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => setConfig(registry, '../etc/passwd', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => getConfig(registry, '../etc/passwd')).toThrow(/invalid gatewayId/)
+    expect(() => setConfig(registry, 'gw/with/slash', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => setConfig(registry, '', gatewayCfg())).toThrow(/gatewayId is required/)
+    expect(() => setConfig(registry, '.', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => setConfig(registry, '..', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => setConfig(registry, '.hidden', gatewayCfg())).toThrow(/invalid gatewayId/)
   })
 
   it('accepts email-shaped gatewayIds', () => {
-    registry.setConfig('james.smith@acme.com', gatewayCfg())
-    expect(registry.getConfig('james.smith@acme.com')).toBeDefined()
-    registry.setConfig('alice+work@example.co.uk', gatewayCfg())
-    expect(registry.getConfig('alice+work@example.co.uk')).toBeDefined()
+    setConfig(registry, 'james.smith@acme.com', gatewayCfg())
+    expect(getConfig(registry, 'james.smith@acme.com')).toBeDefined()
+    setConfig(registry, 'alice+work@example.co.uk', gatewayCfg())
+    expect(getConfig(registry, 'alice+work@example.co.uk')).toBeDefined()
   })
 
   it('getConfig surfaces invalid JSON from disk as a thrown error', () => {
     fs.mkdirSync(path.join(dir, 'configs'), { recursive: true })
     fs.writeFileSync(path.join(dir, 'configs', 'gw-1.json'), '{not json')
-    expect(() => registry.getConfig('gw-1')).toThrow(/invalid JSON/)
+    expect(() => getConfig(registry, 'gw-1')).toThrow(/invalid JSON/)
   })
 
   it('getConfig surfaces a config that no longer satisfies the validator', () => {
     fs.mkdirSync(path.join(dir, 'configs'), { recursive: true })
     fs.writeFileSync(path.join(dir, 'configs', 'gw-1.json'), JSON.stringify({ version: 999 }))
-    expect(() => registry.getConfig('gw-1')).toThrow(/version/)
+    expect(() => getConfig(registry, 'gw-1')).toThrow(/version/)
   })
 
   it('isolates configs across gateways (B cannot see A by name)', () => {
-    registry.setConfig('gw-a', gatewayCfg({ url: 'https://a.example.com' }))
-    registry.setConfig('gw-b', gatewayCfg({ url: 'https://b.example.com' }))
-    const a = registry.getConfig('gw-a')
-    const b = registry.getConfig('gw-b')
+    setConfig(registry, 'gw-a', gatewayCfg({ url: 'https://a.example.com' }))
+    setConfig(registry, 'gw-b', gatewayCfg({ url: 'https://b.example.com' }))
+    const a = getConfig(registry, 'gw-a')
+    const b = getConfig(registry, 'gw-b')
     if (!a || !b) throw new Error('expected entries')
     expect(a.config.central_server?.url).toBe('https://a.example.com')
     expect(b.config.central_server?.url).toBe('https://b.example.com')

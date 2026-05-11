@@ -6,13 +6,14 @@ import { ConfigError } from '../../src/config.js'
 import { ConfigClient } from '../../src/gateway/config_client.js'
 import { applyDiff, diffConfig } from '../../src/gateway/hot_reload.js'
 import { IdentityClient } from '../../src/gateway/identity.js'
-import { ConfigRegistry } from '../../src/server/config_registry.js'
+import { createConfigRegistry, setConfig } from '../../src/server/config_registry.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
 import { BootstrapStore } from '../../src/server/identity.js'
 
 /**
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from '../../src/types.js'
  * @import { ConfigChangedEvent } from '../../src/gateway/types.d.ts'
+ * @import { ConfigRegistry } from '../../src/server/types.d.ts'
  */
 
 const PLACEHOLDER_SECRET = 'a'.repeat(32)
@@ -175,7 +176,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     configsDir = path.join(tmpDir, 'configs')
     bootstrapStorePath = path.join(tmpDir, 'bootstrap.json')
     store = new BootstrapStore({ path: bootstrapStorePath })
-    registry = new ConfigRegistry({ configsDir })
+    registry = createConfigRegistry({ configsDir })
     plane = new ControlPlane(
       {
         control_plane_listen: '127.0.0.1:0',
@@ -238,7 +239,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     // operator CLI uses this same path; this is the in-process equivalent of
     // `collectivus config set gw-e2e --file ...`). ===
     const cfgV1 = gatewayCfg()
-    const setResult = registry.setConfig('gw-e2e', cfgV1)
+    const setResult = setConfig(registry, 'gw-e2e', cfgV1)
     expect(setResult.etag).toMatch(/^[0-9a-f]{64}$/)
 
     // === 6. Gateway picks up the config on the next tick. ===
@@ -256,7 +257,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     const cfgV2 = gatewayCfg({
       proxy: { listen: '127.0.0.1:18999' },
     })
-    registry.setConfig('gw-e2e', cfgV2)
+    setConfig(registry, 'gw-e2e', cfgV2)
 
     // === 8. Hot reload pipeline: feed every config-changed event through
     // applyDiff against a stub listener registry. After cfgV1 lands, all
@@ -326,7 +327,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     // surface lives at the operator-CLI / registry boundary, re-asserted
     // here so a regression in either layer is caught by the e2e suite, not
     // just the per-component unit tests.
-    expect(() => registry.setConfig('gw-e2e', { version: 999 })).toThrow(ConfigError)
+    expect(() => setConfig(registry, 'gw-e2e', { version: 999 })).toThrow(ConfigError)
     // Filesystem must remain empty: no half-written file from a rejected
     // setConfig.
     expect(fs.existsSync(path.join(configsDir, 'gw-e2e.json'))).toBe(false)
@@ -336,8 +337,8 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     // Operator provisions both gateways and writes both configs.
     const { token: tokA } = store.register({ gatewayId: 'gw-a', ttlSeconds: 60 })
     store.register({ gatewayId: 'gw-b', ttlSeconds: 60 })
-    registry.setConfig('gw-a', gatewayCfg())
-    registry.setConfig('gw-b', gatewayCfg({ proxy: { listen: '127.0.0.1:18800' } }))
+    setConfig(registry, 'gw-a', gatewayCfg())
+    setConfig(registry, 'gw-b', gatewayCfg({ proxy: { listen: '127.0.0.1:18800' } }))
 
     // gw-a bootstraps, gets its JWT.
     const idA = new IdentityClient({

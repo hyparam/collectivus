@@ -25,7 +25,8 @@
   },
   "files": [
     "src",
-    "types"
+    "types",
+    "skills"
   ],
   "sideEffects": false,
   "scripts": {

@@ -2,7 +2,7 @@
 
 import process from 'node:process'
 
-const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'export', 'query', 'rendezvous', 'join'])
+const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'export', 'query', 'rendezvous', 'join', 'skills'])
 
 const argv = process.argv.slice(2)
 const subcommand = argv[0]
@@ -83,6 +83,10 @@ async function loadSubcommand(name) {
   case 'join': {
     const { runJoin } = await import('../src/cli/join.js')
     return (args) => runJoin(args, process.env)
+  }
+  case 'skills': {
+    const { runSkills } = await import('../src/cli/skills.js')
+    return runSkills
   }
   default:
     throw new Error(`unknown subcommand: ${name}`)

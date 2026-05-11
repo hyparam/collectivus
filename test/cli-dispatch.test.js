@@ -83,6 +83,12 @@ describe('bin/cli.js — subcommand dispatch', function() {
     expect(r.stdout).toMatch(/Usage:\s+ctvs join/)
   })
 
+  it('dispatches `skills --help`', async function() {
+    const r = await runCli(['skills', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs skills install/)
+  })
+
   it('passes subcommand args through (install with no --config)', async function() {
     const r = await runCli(['install'])
     expect(r.exitCode).toBe(2)

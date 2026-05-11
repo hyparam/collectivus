@@ -7,7 +7,7 @@ import { defaultServerDataDir } from '../server/config_registry.js'
 import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
- * @import { CentralServerConfig, CollectivusConfig, FileSinkConfig, OtelConfig, ProxyConfig, ServerConfig, UploadConfig } from '../types.js'
+ * @import { CollectivusConfig, FileSinkConfig, ServerConfig, UploadConfig } from '../types.js'
  * @import { InitHooks } from './types.d.ts'
  */
 
@@ -41,12 +41,7 @@ const DEFAULT_REDACT = [
 ]
 
 const SINGLE_PROXY_LISTEN = '127.0.0.1:8787'
-const DEFAULT_PROXY_LISTEN = SINGLE_PROXY_LISTEN
-const DEFAULT_OTEL_LISTEN = '0.0.0.0:4318'
 const DEFAULT_CONTROL_PLANE_LISTEN = '0.0.0.0:8788'
-const DEFAULT_POLL_INTERVAL_SECONDS = 30
-const POLL_INTERVAL_MIN_SECONDS = 5
-const POLL_INTERVAL_MAX_SECONDS = 3600
 const IDENTITY_SECRET_BYTES = 32
 
 const DEFAULT_UPLOAD_REGION = 'us-east-1'
@@ -60,8 +55,6 @@ const DEFAULT_UPLOAD_SIGNALS_INPUT = ALLOWED_UPLOAD_SIGNALS.join(',')
 // produce the 3..63 length bound.
 const BUCKET_PATTERN = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/
 const TIME_PATTERN = /^([01][0-9]|2[0-3]):[0-5][0-9]$/
-
-const UPSTREAM_SLUG_PATTERN = /^[a-z][a-z0-9-]*$/
 
 const BANNER = [
   '        ╱────────╲',
@@ -91,8 +84,8 @@ function defaultSinkDir(homeDir) {
 
 /**
  * Run the no-arg interactive walkthrough. The top-level question chooses
- * between standalone local capture, a managed gateway, and a central server.
- * Each branch asks just the questions it needs, builds a v1
+ * between standalone local capture and a central server. Each branch asks just
+ * the questions it needs, builds a v1
  * `CollectivusConfig`, writes it to disk, and (for proxy setups on
  * darwin/linux) chains into `runInstall` to install the daemon and optionally
  * attach Claude Code.
@@ -146,36 +139,24 @@ export async function runInit(hooks = {}) {
   stdout.write('  1) Standalone\n')
   stdout.write('     Run on this machine only. The proxy listens on localhost and\n')
   stdout.write('     recordings stay on disk here. Best for personal dev work.\n\n')
-  stdout.write('  2) Gateway\n')
-  stdout.write('     Records locally, pulls per-gateway config from a central server,\n')
-  stdout.write('     hot-reloads config changes, and ships ingest back to the server.\n\n')
-  stdout.write('  3) Central server\n')
+  stdout.write('  2) Central server\n')
   stdout.write('     Vendors per-gateway configs over /v1/config, accepts ingest from\n')
   stdout.write('     gateways, and issues JWTs from one-shot bootstrap tokens.\n\n')
 
-  /** @type {'single' | 'gateway' | 'server'} */
+  /** @type {'single' | 'server'} */
   let kind
   for (;;) {
     const raw = (await prompt('Choose [1]: ')).trim()
     const c = raw === '' ? '1' : raw
     if (c === '1') { kind = 'single'; break }
-    if (c === '2') { kind = 'gateway'; break }
-    if (c === '3') { kind = 'server'; break }
-    stderr.write(`error: please choose 1, 2, or 3 (got ${JSON.stringify(raw)})\n`)
+    if (c === '2') { kind = 'server'; break }
+    stderr.write(`error: please choose 1 or 2 (got ${JSON.stringify(raw)})\n`)
   }
 
   if (kind === 'single') {
     return runSingleUserFlow({
       stdout, stderr, prompt, writeFile, platform, binPath, cwd,
       defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
-    })
-  }
-  if (kind === 'gateway') {
-    return runGatewayFlow({
-      stdout, stderr, prompt, cwd,
-      defaultCfgPath, defaultSink,
-      writeFile, platform, binPath,
-      runInstall: hooks.runInstall,
     })
   }
   return runServerFlow({
@@ -188,7 +169,7 @@ export async function runInit(hooks = {}) {
  * Minimal standalone walkthrough. Defaults the proxy to 127.0.0.1:8787
  * forwarding to Anthropic and asks only where to keep recordings and where
  * to save the config. Users wanting a different upstream, an OTLP receiver,
- * or S3 upload edit the config (or re-run init and choose gateway mode).
+ * or S3 upload edit the config.
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
@@ -286,84 +267,6 @@ async function confirmAndWrite(args) {
   } catch (err) {
     stderr.write(`error: failed to write config: ${formatError(err)}\n`)
     return false
-  }
-}
-
-/**
- * Prompt the user to pick an LLM provider (or supply a custom upstream).
- * Returns a `{ name, baseUrl, prefix }` triple suitable for slotting into the
- * `proxy.upstreams` array.
- *
- * For custom upstreams, derives a default name slug from the base URL and
- * lets the user override it (validated against `[a-z][a-z0-9-]*`).
- *
- * @param {(q: string) => Promise<string>} prompt
- * @param {{ write: (s: string) => void }} stdout
- * @param {{ write: (s: string) => void }} stderr
- * @returns {Promise<{ name: string, baseUrl: string, prefix: string }>}
- */
-async function askProvider(prompt, stdout, stderr) {
-  stdout.write('\nWhich LLM provider should the proxy forward to?\n')
-  PROVIDERS.forEach(function(p, i) {
-    stdout.write(`  ${i + 1}) ${p.name.padEnd(22)} → ${p.baseUrl}${p.prefix}\n`)
-  })
-  stdout.write(`  ${PROVIDERS.length + 1}) ${'Custom'.padEnd(22)} → enter your own base URL + path prefix\n`)
-
-  for (;;) {
-    const provRaw = (await prompt('Provider [1]: ')).trim()
-    const provIdx = provRaw === '' ? 1 : Number.parseInt(provRaw, 10)
-
-    if (Number.isInteger(provIdx) && provIdx >= 1 && provIdx <= PROVIDERS.length) {
-      const p = PROVIDERS[provIdx - 1]
-      return { name: p.id, baseUrl: p.baseUrl, prefix: p.prefix }
-    }
-    if (provIdx === PROVIDERS.length + 1) {
-      let baseUrl = ''
-      while (baseUrl === '') {
-        baseUrl = (await prompt('Upstream base URL (e.g. https://api.example.com): ')).trim()
-        if (baseUrl === '') stderr.write('error: base URL is required\n')
-      }
-      const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
-      const prefix = prefAns === '' ? '/v1' : prefAns
-      const derivedName = deriveUpstreamName(baseUrl)
-      stdout.write('\nName for this upstream. Appears in recorded rows and logs.\n')
-      stdout.write('Slug: lowercase letters, digits, hyphens; must start with a letter.\n')
-      for (;;) {
-        const nameAns = (await prompt(`Upstream name [${derivedName}]: `)).trim()
-        if (nameAns === '') return { name: derivedName, baseUrl, prefix }
-        if (isValidUpstreamSlug(nameAns)) return { name: nameAns, baseUrl, prefix }
-        stderr.write(`error: name must match [a-z][a-z0-9-]* (got ${JSON.stringify(nameAns)})\n`)
-      }
-    }
-    stderr.write(`error: invalid provider choice ${JSON.stringify(provRaw)}\n`)
-  }
-}
-
-/**
- * Prompt for a proxy listener and upstream provider.
- *
- * @param {(q: string) => Promise<string>} prompt
- * @param {{ write: (s: string) => void }} stdout
- * @param {{ write: (s: string) => void }} stderr
- * @returns {Promise<ProxyConfig>}
- */
-async function askProxy(prompt, stdout, stderr) {
-  stdout.write('\nLLM proxy setup\n')
-  stdout.write('The proxy records request and response bodies while forwarding to\n')
-  stdout.write('the upstream provider you choose below.\n')
-  const upstream = await askProvider(prompt, stdout, stderr)
-  const listenAns = (await prompt(`Proxy listen address [${DEFAULT_PROXY_LISTEN}]: `)).trim()
-  const listen = listenAns === '' ? DEFAULT_PROXY_LISTEN : listenAns
-  return {
-    listen,
-    upstreams: [
-      {
-        name: upstream.name,
-        base_url: upstream.baseUrl,
-        match: { path_prefix: upstream.prefix },
-      },
-    ],
-    redact_headers: DEFAULT_REDACT,
   }
 }
 
@@ -656,131 +559,6 @@ function formatError(err) {
 }
 
 /**
- * @param {string} s
- * @returns {boolean}
- */
-function isValidUpstreamSlug(s) {
-  return UPSTREAM_SLUG_PATTERN.test(s)
-}
-
-/**
- * Derive a default upstream name from a base URL. Strips `api.` / `www.`
- * prefixes and takes the first remaining hostname label, lowercased and
- * stripped of slug-incompatible characters. Falls back to `upstream` when the
- * URL doesn't parse, the hostname is bare-IP, or the derived label doesn't
- * start with a letter.
- *
- * @param {string} baseUrl
- * @returns {string}
- */
-function deriveUpstreamName(baseUrl) {
-  let host
-  try {
-    host = new URL(baseUrl).hostname
-  } catch {
-    return 'upstream'
-  }
-  if (!host) return 'upstream'
-  const stripped = host.replace(/^(api|www)\./, '')
-  const label = stripped.split('.')[0] ?? ''
-  const slug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
-  return isValidUpstreamSlug(slug) ? slug : 'upstream'
-}
-
-/**
- * Walkthrough sub-flow for `role: gateway` deployments. The gateway has its
- * config vended by a central server; local prompts collect the `central_server`
- * block and any local listeners to record. The closing summary tells the
- * operator the explicit `collectivus config set` step they need to run on the
- * server side before this gateway will see anything to load (without it the
- * gateway boots, bootstraps a JWT, then hangs on 404 every poll cycle).
- *
- * @param {{
- *   stdout: { write: (s: string) => void },
- *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
- *   cwd: string,
- *   defaultCfgPath: string,
- *   defaultSink: string,
- *   writeFile: (p: string, contents: string) => void,
- *   platform: NodeJS.Platform,
- *   binPath: string,
- *   runInstall?: (args: string[]) => Promise<number>,
- * }} args
- * @returns {Promise<number>}
- */
-async function runGatewayFlow(args) {
-  const { stdout, stderr, prompt, cwd, defaultCfgPath, defaultSink, writeFile, platform, binPath } = args
-
-  stdout.write('\nGateway\n')
-  stdout.write('────────────\n')
-  stdout.write('This binary will pull its configuration from a central collectivus\n')
-  stdout.write('server and ship its recordings there as ingest.\n')
-
-  /** @type {CentralServerConfig} */
-  const centralServer = await askCentralServer(prompt, stdout, stderr)
-
-  stdout.write('\nWhat should this gateway capture locally?\n')
-  stdout.write('  1) LLM proxy only\n')
-  stdout.write('  2) OTLP receiver only\n')
-  stdout.write('  3) Both\n')
-  /** @type {string} */
-  let captureMode
-  for (;;) {
-    const raw = (await prompt('Choose [1]: ')).trim()
-    const candidate = raw === '' ? '1' : raw
-    if (candidate === '1' || candidate === '2' || candidate === '3') {
-      captureMode = candidate
-      break
-    }
-    stderr.write(`error: please choose 1, 2, or 3 (got ${JSON.stringify(raw)})\n`)
-  }
-  const wantProxy = captureMode === '1' || captureMode === '3'
-  const wantOtel = captureMode === '2' || captureMode === '3'
-
-  /** @type {CollectivusConfig} */
-  const config = { version: 1, role: 'gateway', central_server: centralServer }
-  if (wantProxy) config.proxy = await askProxy(prompt, stdout, stderr)
-  if (wantOtel) {
-    stdout.write('\nThe OTLP receiver will accept POSTs at /v1/traces, /v1/metrics,\n')
-    stdout.write('and /v1/logs. Point your OTel SDKs / collector exporters at this\n')
-    stdout.write('address.\n')
-    const ans = (await prompt(`OTLP listen address [${DEFAULT_OTEL_LISTEN}]: `)).trim()
-    /** @type {OtelConfig} */
-    const otel = { listen: ans === '' ? DEFAULT_OTEL_LISTEN : ans }
-    config.otel = otel
-  }
-
-  stdout.write('\nWhere should this gateway keep its durable delivery outbox?\n')
-  stdout.write('Central server remains the canonical recording store; this directory\n')
-  stdout.write('is only a local retry spool.\n')
-  const outboxAns = (await prompt(`Outbox directory [${defaultSink}/outbox]: `)).trim()
-  if (outboxAns !== '') centralServer.outbox_dir = outboxAns
-
-  const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
-  if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
-
-  // Help the operator avoid the "I started it, why is nothing happening" trap.
-  stdout.write('\nNext steps:\n')
-  stdout.write(`  1. On the central server (${centralServer.url}), the operator must:\n`)
-  stdout.write('       ctvs config bootstrap-token issue <gateway-id> --server-config <server.json>\n')
-  stdout.write('       ctvs config set <gateway-id> --server-config <server.json> --file <gateway-config.json>\n')
-  stdout.write('     before this gateway will see anything to load.\n')
-  stdout.write('  2. Point this gateway at its bootstrap token by editing\n')
-  stdout.write(`     central_server.identity.bootstrap_token in ${cfgPath}\n`)
-  stdout.write('     (the token can only be redeemed once; we do not collect it during\n')
-  stdout.write('     this walkthrough so it never lands in shell history).\n')
-  stdout.write(`  3. Then run: ctvs --config ${cfgPath}\n`)
-
-  return offerDaemonInstall({
-    configPath: cfgPath, wantProxy,
-    stdout, prompt, platform, binPath,
-    runInstall: args.runInstall,
-    offerClaudeCode: true,
-  })
-}
-
-/**
  * Walkthrough sub-flow for central server (`role: server`) deployments. The server vendors
  * per-gateway configs and accepts ingest. Operators do not point apps at this
  * binary directly (there is no proxy listener), so the daemon-install offer
@@ -891,68 +669,6 @@ async function runServerFlow(args) {
   stdout.write(`  ctvs config set <gateway-id> --server-config ${cfgPath} --file <gateway-config.json>\n`)
   stdout.write('     (registers the per-gateway config the gateway will pull)\n')
   return 0
-}
-
-/**
- * Prompt for the `central_server` block of a gateway config.
- *
- * The bootstrap token is intentionally NOT collected here; the operator
- * issues tokens out-of-band on the server side, hands the token to the
- * gateway via a secure channel, and the gateway operator pastes it into the
- * saved config (or sets `central_server.identity.bootstrap_token` via env-
- * var rendering, etc). Capturing it through readline would put the token in
- * shell history; the closing summary surfaces this nuance.
- *
- * @param {(q: string) => Promise<string>} prompt
- * @param {{ write: (s: string) => void }} stdout
- * @param {{ write: (s: string) => void }} stderr
- * @returns {Promise<CentralServerConfig>}
- */
-async function askCentralServer(prompt, stdout, stderr) {
-  stdout.write('\nWhat is the central server URL? Include scheme + port (e.g.\n')
-  stdout.write('https://collectivus.internal:8788).\n')
-  /** @type {string} */
-  let url
-  for (;;) {
-    const raw = (await prompt('Central server URL: ')).trim()
-    if (raw === '') {
-      stderr.write('  url is required\n')
-      continue
-    }
-    try {
-      new URL(raw)
-      url = raw
-      break
-    } catch {
-      stderr.write('  url must be a valid URL (e.g. https://central.example.com:8788)\n')
-    }
-  }
-
-  // poll_interval_seconds is the bead's named knob. The validator floors this
-  // at 5s and ceils it at 3600s; anything smaller is a stress test, anything
-  // larger drifts hot-reload semantics. Default 30s matches the DEFAULT
-  // constant in the gateway client.
-  stdout.write('\nHow often should the gateway poll for config changes? 30s is the\n')
-  stdout.write('default; lower values speed up "hot reload" semantics; the validator\n')
-  stdout.write(`accepts ${POLL_INTERVAL_MIN_SECONDS}–${POLL_INTERVAL_MAX_SECONDS} seconds.\n`)
-  /** @type {number | undefined} */
-  let pollIntervalSeconds
-  for (;;) {
-    const raw = (await prompt(`Poll interval seconds [${DEFAULT_POLL_INTERVAL_SECONDS}]: `)).trim()
-    if (raw === '') { pollIntervalSeconds = undefined; break }
-    const n = Number.parseInt(raw, 10)
-    if (Number.isInteger(n) && String(n) === raw
-        && n >= POLL_INTERVAL_MIN_SECONDS && n <= POLL_INTERVAL_MAX_SECONDS) {
-      pollIntervalSeconds = n
-      break
-    }
-    stderr.write(`  must be an integer between ${POLL_INTERVAL_MIN_SECONDS} and ${POLL_INTERVAL_MAX_SECONDS}\n`)
-  }
-
-  /** @type {CentralServerConfig} */
-  const cs = { url, identity: {} }
-  if (pollIntervalSeconds !== undefined) cs.poll_interval_seconds = pollIntervalSeconds
-  return cs
 }
 
 /**

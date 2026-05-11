@@ -1,5 +1,5 @@
 import type { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders } from 'node:http'
-import type { LaunchctlResult, SystemctlResult } from '../src/types.js'
+import type { LaunchctlResult, SystemctlResult } from '../src/daemon/types.d.ts'
 
 // ---------- recorder.test.js ----------
 

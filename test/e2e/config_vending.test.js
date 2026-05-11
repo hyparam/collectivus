@@ -12,6 +12,7 @@ import { BootstrapStore } from '../../src/server/identity.js'
 
 /**
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from '../../src/types.js'
+ * @import { ConfigChangedEvent } from '../../src/gateway/types.d.ts'
  */
 
 const PLACEHOLDER_SECRET = 'a'.repeat(32)
@@ -220,7 +221,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
       { etagPath, stderr }
     )
 
-    /** @type {import('../../src/types.js').ConfigChangedEvent[]} */
+    /** @type {ConfigChangedEvent[]} */
     const events = []
     configClient.on('config-changed', (e) => { events.push(e) })
 
@@ -356,7 +357,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
       idA,
       { etagPath: path.join(tmpDir, 'etag-a.json'), stderr }
     )
-    /** @type {import('../../src/types.js').ConfigChangedEvent[]} */
+    /** @type {ConfigChangedEvent[]} */
     const events = []
     clientA.on('config-changed', (e) => { events.push(e) })
     await clientA.tick()

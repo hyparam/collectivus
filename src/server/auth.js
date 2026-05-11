@@ -2,7 +2,8 @@ import { verifyJwt } from './identity.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
- * @import { IdentityIssuerConfig, JwtClaims } from '../types.js'
+ * @import { IdentityIssuerConfig } from '../types.js'
+ * @import { JwtClaims } from './types.d.ts'
  */
 
 /**

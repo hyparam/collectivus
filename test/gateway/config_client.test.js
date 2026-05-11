@@ -10,7 +10,8 @@ import {
 } from '../../src/gateway/config_client.js'
 
 /**
- * @import { CentralServerConfig, CollectivusConfig, ConfigChangedEvent } from '../../src/types.js'
+ * @import { CentralServerConfig, CollectivusConfig } from '../../src/types.js'
+ * @import { ConfigChangedEvent } from '../../src/gateway/types.d.ts'
  */
 
 /**

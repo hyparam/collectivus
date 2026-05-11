@@ -7,7 +7,7 @@ import {
 } from '../../src/gateway/shipping_sink.js'
 
 /**
- * @import { ShippingSinkIdentitySource } from '../../src/types.js'
+ * @import { ShippingSinkIdentitySource } from '../../src/gateway/types.d.ts'
  */
 
 /**

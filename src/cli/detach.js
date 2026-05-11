@@ -3,7 +3,7 @@ import { detach as defaultDetachClaude, defaultSettingsPath } from '../claude-co
 import { defaultConfigPath as defaultCodexConfigPath, detach as defaultDetachCodex } from '../codex/settings.js'
 
 /**
- * @import { DetachParseResult, DetachHooks } from '../types.js'
+ * @import { DetachHooks, DetachParseResult } from './types.d.ts'
  */
 
 const USAGE = `Usage:

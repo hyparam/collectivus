@@ -8,7 +8,7 @@ import { ControlPlane } from '../../src/server/control_plane.js'
 import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
 /**
- * @import { ServerConfig } from '../../src/types.js'
+ * @import { CollectivusConfig, ServerConfig } from '../../src/types.js'
  */
 
 const PLACEHOLDER_SECRET = 'a'.repeat(32)
@@ -381,7 +381,7 @@ describe('GET /v1/config (auth required)', () => {
 
   /**
    * @param {{ url?: string }} [opts]
-   * @returns {import('../../src/types.js').CollectivusConfig}
+   * @returns {CollectivusConfig}
    */
   function gatewayCfg(opts = {}) {
     return {

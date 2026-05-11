@@ -3,7 +3,7 @@ import * as linux from './linux.js'
 import * as macos from './macos.js'
 
 /**
- * @import { DaemonInstallOptions, DaemonUninstallOptions } from '../types.js'
+ * @import { DaemonInstallOptions, DaemonUninstallOptions } from './types.d.ts'
  */
 
 export class DaemonError extends Error {

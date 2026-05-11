@@ -12,7 +12,7 @@ import process from 'node:process'
  *   MacosInstallOptions,
  *   MacosUninstallOptions,
  *   MacosStatusOptions,
- * } from '../types.js'
+ * } from './types.d.ts'
  */
 
 const DEFAULT_PLIST_DIR = path.join(os.homedir(), 'Library', 'LaunchAgents')

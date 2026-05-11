@@ -5,7 +5,7 @@ import { LAUNCH_AGENT_LABEL, daemonKindLabel } from './common.js'
 import { uninstallDaemon } from '../daemon/index.js'
 
 /**
- * @import { UninstallParseResult, UninstallHooks } from '../types.js'
+ * @import { UninstallHooks, UninstallParseResult } from './types.d.ts'
  */
 
 const USAGE = `Usage:

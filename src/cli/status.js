@@ -14,7 +14,8 @@ import {
 import { isLaunchAgentInstalled as defaultIsLaunchAgentInstalled, launchAgentStatus as defaultLaunchAgentStatus } from '../daemon/macos.js'
 
 /**
- * @import { CollectivusConfig, StatusParseResult, StatusHooks, CollectivusMarker, InstalledPlistFields } from '../types.js'
+ * @import { CollectivusConfig, CollectivusMarker } from '../types.js'
+ * @import { InstalledPlistFields, StatusHooks, StatusParseResult } from './types.d.ts'
  */
 
 const USAGE = `Usage:

@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { createBearerAuth, getClaims } from '../../src/server/auth.js'
 import { signJwt } from '../../src/server/identity.js'
 
+/**
+ * @import { IncomingMessage, ServerResponse } from 'node:http'
+ */
+
 const SECRET = 'a'.repeat(32)
 
 /**
@@ -10,16 +14,16 @@ const SECRET = 'a'.repeat(32)
  * synchronous and free of network-port flakiness.
  *
  * @param {Record<string, string>} [headers]
- * @returns {import('node:http').IncomingMessage}
+ * @returns {IncomingMessage}
  */
 function makeReq(headers = {}) {
   /** @type {Record<string, string>} */
   const lower = {}
   for (const [k, v] of Object.entries(headers)) lower[k.toLowerCase()] = v
-  return /** @type {import('node:http').IncomingMessage} */ (/** @type {unknown} */ ({ headers: lower }))
+  return /** @type {IncomingMessage} */ (/** @type {unknown} */ ({ headers: lower }))
 }
 
-/** @returns {{ res: import('node:http').ServerResponse, status: () => number, body: () => any }} */
+/** @returns {{ res: ServerResponse, status: () => number, body: () => any }} */
 function makeRes() {
   let status = 0
   let body = ''
@@ -43,7 +47,7 @@ function makeRes() {
     },
   }
   return {
-    res: /** @type {import('node:http').ServerResponse} */ (res),
+    res: /** @type {ServerResponse} */ (res),
     status: () => status,
     body: () => body.length ? JSON.parse(body) : undefined,
   }

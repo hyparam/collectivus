@@ -3,7 +3,7 @@ import path from 'node:path'
 import readline from 'node:readline'
 
 /**
- * @import { Signal } from './upload.d.ts'
+ * @import { PartitionFile, Signal } from './upload.d.ts'
  */
 
 const DATE_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -53,17 +53,6 @@ export async function* readPartitionRows(filePath, partition) {
     yield { ...row, _partition: tag }
   }
 }
-
-/** A single partitioned JSONL file discovered during a directory walk. */
-/**
- * @typedef {object} PartitionFile
- * @property {string} filePath  Absolute path to the file.
- * @property {Readonly<Record<string, string>>} partition Dimension → value
- *   for each level walked under `outputDir`.
- * @property {Signal} signal Convenience copy of `partition.signal` (always
- *   set; `walkPartitionFiles` requires `signal` in `partitionDimensions`).
- * @property {string} date YYYY-MM-DD UTC parsed from the filename.
- */
 
 /**
  * Walk a partitioned directory tree under `outputDir` and yield every

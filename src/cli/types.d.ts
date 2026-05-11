@@ -1,0 +1,320 @@
+import type {
+  AttachOptions,
+  AttachResult,
+  CodexAttachOptions,
+  CodexAttachResult,
+  CodexDetachOptions,
+  CodexDetachResult,
+  CodexIsAttachedOptions,
+  CollectivusConfig,
+  DetachOptions,
+  DetachResult,
+  IsAttachedOptions,
+  ListenerFactory,
+  ServerConfig,
+  UploadSignal,
+} from '../types.js'
+import type { DaemonInstallOptions, DaemonUninstallOptions, MacosStatusOptions } from '../daemon/types.d.ts'
+import type { ConfigClient } from '../gateway/config_client.js'
+import type { ConfigRegistry } from '../server/config_registry.js'
+import type { BootstrapStore } from '../server/identity.js'
+
+// ---------- CLI top-level ----------
+
+export interface HelpResult {
+  mode: 'help'
+}
+
+export interface VersionResult {
+  mode: 'version'
+}
+
+export interface ErrorResult {
+  mode: 'error'
+  message: string
+  exitCode: number
+}
+
+export interface ConfigResult {
+  mode: 'config'
+  configPath: string
+  printConfig: boolean
+  strict: boolean
+}
+
+export type ParseResult = HelpResult | VersionResult | ErrorResult | ConfigResult
+
+export interface HotReloadWiring {
+  initialConfig: CollectivusConfig
+  configClient: ConfigClient
+  factoryBuilder: (cfg: CollectivusConfig) => Map<string, ListenerFactory>
+}
+
+// ---------- CLI export ----------
+
+export interface ExportParseResult {
+  help: boolean
+  error?: string
+  configPath?: string
+  outDir?: string
+  date?: string
+  service?: string
+  signal?: UploadSignal
+}
+
+export interface ExportHooks {
+  stdout?: { write(chunk: string): unknown }
+  stderr?: { write(chunk: string): unknown }
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+}
+
+export interface ExportFileResult {
+  rows: number
+  bytes: number
+  outPath: string
+}
+
+export interface ProxyExportResult {
+  files: ExportFileResult[]
+  skipped: Array<'exchange' | 'stream_event'>
+}
+
+export interface ExportJob {
+  service: string
+  signal: UploadSignal
+  date: string
+  jsonlPath: string
+}
+
+// ---------- CLI subcommand parse results / hooks ----------
+
+export interface AttachParseResult {
+  configPath?: string
+  port?: number
+  client?: 'claude' | 'codex' | 'all'
+  help: boolean
+  error?: string
+}
+
+export interface DetachParseResult {
+  client: 'claude' | 'codex' | 'all'
+  help: boolean
+  error?: string
+}
+
+export interface StatusParseResult {
+  help: boolean
+  error?: string
+}
+
+export interface InstallParseResult {
+  configPath?: string
+  yes: boolean
+  no: boolean
+  help: boolean
+  error?: string
+}
+
+export interface UninstallParseResult {
+  help: boolean
+  error?: string
+}
+
+export interface ConfigCliHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  isTTY?: boolean
+  prompt?: (q: string) => Promise<string>
+  loadConfig?: (p: string) => CollectivusConfig
+  readFile?: (p: string) => string
+  makeRegistry?: (server: ServerConfig) => ConfigRegistry
+  makeBootstrapStore?: (storePath: string) => BootstrapStore
+}
+
+export interface ParsedHelp {
+  kind: 'help'
+}
+
+export interface ParsedError {
+  kind: 'error'
+  message: string
+  exitCode: 2
+}
+
+export interface ParsedSet {
+  kind: 'set'
+  gatewayId: string
+  serverConfig: string
+  file: string
+}
+
+export interface ParsedGet {
+  kind: 'get'
+  gatewayId: string
+  serverConfig: string
+}
+
+export interface ParsedList {
+  kind: 'list'
+  serverConfig: string
+}
+
+export interface ParsedDelete {
+  kind: 'delete'
+  gatewayId: string
+  serverConfig: string
+  yes: boolean
+}
+
+export interface ParsedTokenIssue {
+  kind: 'token-issue'
+  gatewayId: string
+  serverConfig: string
+  ttlSeconds?: number
+}
+
+export interface ParsedTokenRevoke {
+  kind: 'token-revoke'
+  gatewayId: string
+  serverConfig: string
+}
+
+export type ParsedConfigArgs =
+  | ParsedHelp
+  | ParsedError
+  | ParsedSet
+  | ParsedGet
+  | ParsedList
+  | ParsedDelete
+  | ParsedTokenIssue
+  | ParsedTokenRevoke
+
+export interface WriteStream {
+  write(s: string): void
+}
+
+export interface AttachHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  version?: string
+  /** Override for `~/.claude/settings.json`. */
+  settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for attachClaude. */
+  attach?: (opts: AttachOptions) => Promise<AttachResult>
+  attachClaude?: (opts: AttachOptions) => Promise<AttachResult>
+  attachCodex?: (opts: CodexAttachOptions) => Promise<CodexAttachResult>
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+}
+
+export interface DetachHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `~/.claude/settings.json`. */
+  settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  /** Back-compat alias for detachClaude. */
+  detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
+}
+
+export interface StatusHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  plistPath?: string
+  logDir?: string
+  settingsPath?: string
+  /** Default config path used when the LaunchAgent plist doesn't supply one. */
+  configPath?: string
+  launchAgentStatus?: (opts: MacosStatusOptions) => Promise<{ loaded: boolean, pid?: number }>
+  isLaunchAgentInstalled?: (opts: { label: string, plistDir?: string }) => Promise<boolean>
+  isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  readInstalledPlist?: (plistPath: string) => InstalledPlistFields | undefined
+  /** Override for raw read of settings.json (returns undefined on ENOENT). */
+  readSettingsRaw?: (p: string) => Promise<string | undefined>
+  /** Load and validate a config; throws on parse/validation errors. */
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+  /** Stat a file; resolve to undefined when missing. */
+  statFile?: (p: string) => Promise<{ size: number, mtimeMs: number } | undefined>
+  /** Count `*.jsonl` files under `dir` (recursive). Undefined when dir is missing. */
+  countSinkFiles?: (dir: string) => Promise<number | undefined>
+  /** Override for reading the collectivus version from package.json. */
+  readVersion?: () => string
+}
+
+export interface InitHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `process.argv[1]` in tests. Drives npx-detection. */
+  binPath?: string
+  /** Override the readline prompt. */
+  prompt?: (question: string) => Promise<string>
+  /** Override file write. */
+  writeFile?: (path: string, contents: string) => void
+  /** Override the read used to detect an existing config at the default path. */
+  readConfig?: (path: string) => CollectivusConfig | undefined
+  /** Override `collectivus install` chain entry. */
+  runInstall?: (args: string[]) => Promise<number>
+  /** Override `process.platform`. */
+  platform?: NodeJS.Platform
+  /** Override `process.cwd()`. */
+  cwd?: string
+  /** Override the default `~/.hyp/collectivus.json` save path. */
+  defaultConfigPath?: string
+  /** Override the default `~/.hyp/collectivus` sink directory. */
+  defaultSinkDir?: string
+}
+
+export interface InstallHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `process.argv[1]` in tests. */
+  binPath?: string
+  /** Override for the version recorded in the marker. */
+  version?: string
+  /** Override for `~/.hyp/collectivus`. */
+  logDir?: string
+  /** Forwarded to installDaemon (`~/Library/LaunchAgents` override). */
+  plistDir?: string
+  /** Override for `~/.claude/settings.json`. */
+  settingsPath?: string
+  /** Force the TTY decision in tests. */
+  isTTY?: boolean
+  /** Override the readline prompt. */
+  prompt?: (question: string) => Promise<string>
+  installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>
+  attach?: (opts: AttachOptions) => Promise<AttachResult>
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+}
+
+export interface UninstallHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Forwarded to uninstallDaemon (`~/Library/LaunchAgents` override). */
+  plistDir?: string
+  /** Override for `~/.claude/settings.json`. */
+  settingsPath?: string
+  /** Override for `~/.codex/config.toml`. */
+  codexConfigPath?: string
+  uninstallLaunchAgent?: (opts: DaemonUninstallOptions) => Promise<void>
+  /** Back-compat alias for detachClaude. */
+  detach?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachClaude?: (opts?: DetachOptions) => Promise<DetachResult>
+  detachCodex?: (opts?: CodexDetachOptions) => Promise<CodexDetachResult>
+  /** Back-compat alias for isClaudeAttached. */
+  isAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isClaudeAttached?: (opts?: IsAttachedOptions) => Promise<boolean>
+  isCodexAttached?: (opts?: CodexIsAttachedOptions) => Promise<boolean>
+}
+
+export interface InstalledPlistFields {
+  /** Path passed via `--config` in ProgramArguments. */
+  configPath?: string
+  /** Value of `StandardOutPath`. */
+  stdoutPath?: string
+  /** Value of `StandardErrorPath`. */
+  stderrPath?: string
+}

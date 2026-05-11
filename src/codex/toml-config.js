@@ -1,5 +1,9 @@
 import { CodexSettingsError } from './errors.js'
 
+/**
+ * @import { TomlMultilineStringDelimiter } from '../types.js'
+ */
+
 const PROVIDER_ID = 'collectivus'
 const ROOT_BEGIN = '# BEGIN collectivus codex model_provider'
 const ROOT_END = '# END collectivus codex model_provider'
@@ -486,10 +490,6 @@ function tomlString(value) {
 function isTableHeader(line) {
   return TOML_TABLE_HEADER_RE.test(line) || TOML_TABLE_ARRAY_HEADER_RE.test(line)
 }
-
-/**
- * @typedef {'"""' | "'''"} TomlMultilineStringDelimiter
- */
 
 /**
  * @param {string} line

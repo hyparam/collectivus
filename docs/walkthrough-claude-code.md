@@ -230,6 +230,12 @@ docker run --rm -p 8789:8789 \
   rendezvous --listen 0.0.0.0:8789 --data-dir /data/rendezvous
 ```
 
+The GHCR image uses `ctvs` as its entrypoint. Use `--config <path>` for
+Central server, gateway, or standalone configs, and use the `rendezvous`
+subcommand for hosted discovery. If one host should run both Central server and
+rendezvous, run two containers from the same image with separate ports and data
+volumes.
+
 Then issue a join code from the Central server host:
 
 ```bash

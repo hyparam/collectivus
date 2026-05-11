@@ -2,14 +2,15 @@ import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
 import { createBearerAuth, getClaims } from './auth.js'
 import { ConfigRegistry, resolveConfigsDir } from './config_registry.js'
+import { clientIp, readJsonBody, writeError, writeJson, writeRetryAfterJson } from './http.js'
 import {
   BootstrapStore,
   DEFAULT_JWT_TTL_SECONDS,
-  SlidingWindowRateLimiter,
   issueFromBootstrap,
   signJwt,
 } from './identity.js'
 import { Ingest, defaultSinkDir } from './ingest.js'
+import { SlidingWindowRateLimiter } from './rate_limit.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
@@ -318,11 +319,7 @@ export class ControlPlane {
       res.end()
       return
     }
-    res.writeHead(200, {
-      'content-type': 'application/json',
-      'etag': entry.etag,
-    })
-    res.end(JSON.stringify(entry.config))
+    writeJson(res, 200, entry.config, { 'etag': entry.etag })
   }
 }
 
@@ -360,134 +357,12 @@ function parseListen(value) {
 }
 
 /**
- * Read the request body as JSON, capped at `maxBytes`. Returns a discriminated
- * `{ value, error }` so callers can map errors to status codes without
- * differentiating `try/catch` flow.
- *
- * Body-size enforcement is two-layered: when `Content-Length` is present and
- * already exceeds the limit, we resolve immediately without reading. When the
- * header is absent (chunked transfer) or lies, we accumulate up to `maxBytes`
- * and abort. We do NOT destroy the socket on overflow — destroying mid-request
- * prevents the caller from writing a 413 response back. We instead drop
- * incoming chunks until the client finishes uploading, then resolve.
- *
- * @param {IncomingMessage} req
- * @param {number} maxBytes
- * @returns {Promise<{ value: unknown, status: 200, error?: undefined } | { value?: undefined, status: 400 | 413, error: string }>}
- */
-function readJsonBody(req, maxBytes) {
-  return new Promise((resolve) => {
-    const contentLength = parseContentLength(req.headers['content-length'])
-    if (contentLength !== undefined && contentLength > maxBytes) {
-      // We can short-circuit before reading a single byte. The client may
-      // continue sending until it sees the response, but the kernel buffers
-      // are bounded.
-      resolve({ status: 413, error: 'request body too large' })
-      return
-    }
-    /** @type {Buffer[]} */
-    const chunks = []
-    let size = 0
-    let overflowed = false
-    let resolved = false
-    /** @param {{ status: 200, value: unknown } | { status: 400 | 413, error: string }} v */
-    function done(v) {
-      if (resolved) return
-      resolved = true
-      resolve(v)
-    }
-    req.on('data', (chunk) => {
-      if (overflowed) return
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-      size += buf.length
-      if (size > maxBytes) {
-        overflowed = true
-        chunks.length = 0
-        return
-      }
-      chunks.push(buf)
-    })
-    req.on('end', () => {
-      if (overflowed) {
-        done({ status: 413, error: 'request body too large' })
-        return
-      }
-      const raw = Buffer.concat(chunks).toString('utf8')
-      if (raw.length === 0) {
-        done({ status: 400, error: 'empty request body' })
-        return
-      }
-      try {
-        done({ status: 200, value: JSON.parse(raw) })
-      } catch {
-        done({ status: 400, error: 'invalid JSON body' })
-      }
-    })
-    req.on('error', (err) => {
-      done({ status: 400, error: `request error: ${err.message}` })
-    })
-  })
-}
-
-/**
- * Parse a `Content-Length` header value. Returns `undefined` for missing,
- * malformed, or negative values — caller should fall through to streaming
- * accumulation in those cases.
- *
- * @param {string | string[] | undefined} value
- * @returns {number | undefined}
- */
-function parseContentLength(value) {
-  if (typeof value !== 'string') return undefined
-  const n = Number.parseInt(value, 10)
-  if (!Number.isFinite(n) || n < 0 || String(n) !== value.trim()) return undefined
-  return n
-}
-
-/**
- * Determine the client IP for rate-limiting. v0 honors only the socket-level
- * remote address — we do not parse `X-Forwarded-For` because any deployment
- * with a trusted reverse proxy should be configured at that proxy. Trusting
- * the header without an explicit allow-list lets a single attacker rotate
- * IPs cheaply and bypass the per-IP limit.
- *
- * @param {IncomingMessage} req
- * @returns {string}
- */
-function clientIp(req) {
-  return req.socket.remoteAddress ?? 'unknown'
-}
-
-/**
- * @param {ServerResponse} res
- * @param {number} status
- * @param {object} body
- */
-function writeJson(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(body))
-}
-
-/**
- * @param {ServerResponse} res
- * @param {number} status
- * @param {string} message
- */
-function writeError(res, status, message) {
-  writeJson(res, status, { error: message })
-}
-
-/**
  * @param {ServerResponse} res
  * @param {number} retryAfterMs
  */
 function writeRateLimited(res, retryAfterMs) {
   const retryAfterSec = Math.max(1, Math.ceil(retryAfterMs / 1000))
-  res.writeHead(429, {
-    'content-type': 'application/json',
-    'retry-after': String(retryAfterSec),
-  })
-  res.end(JSON.stringify({ error: 'rate limited', retry_after_seconds: retryAfterSec }))
+  writeRetryAfterJson(res, 429, { error: 'rate limited', retry_after_seconds: retryAfterSec }, retryAfterSec)
 }
 
 /**

@@ -1,4 +1,5 @@
 import { verifyJwt } from './identity.js'
+import { writeJson } from './http.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
@@ -97,6 +98,5 @@ function errorReason(code) {
  * @param {string} reason
  */
 function writeUnauthorized(res, reason) {
-  res.writeHead(401, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ error: 'unauthorized', reason }))
+  writeJson(res, 401, { error: 'unauthorized', reason })
 }

@@ -5,11 +5,11 @@ import path from 'node:path'
 import {
   BootstrapStore,
   DEFAULT_JWT_TTL_SECONDS,
-  SlidingWindowRateLimiter,
   issueFromBootstrap,
   signJwt,
   verifyJwt,
 } from '../../src/server/identity.js'
+import { SlidingWindowRateLimiter } from '../../src/server/rate_limit.js'
 
 /**
  * @import { JwtVerifyResult, IssueFromBootstrapResult } from '../../src/server/types.d.ts'

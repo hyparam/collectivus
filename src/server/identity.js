@@ -342,58 +342,6 @@ export function issueFromBootstrap(token, store, issuer, opts = {}) {
 }
 
 /**
- * Sliding-window rate limiter keyed by an arbitrary string (IP, gatewayId,
- * etc). On each `check` call the limiter drops timestamps older than
- * `windowMs`, decides whether the new event is allowed, and (on allow)
- * records it. There is no LRU/eviction beyond the per-key window; for the
- * workloads this serves (bootstrap = rare, refresh = once/min/gateway), the
- * in-memory footprint stays bounded.
- */
-export class SlidingWindowRateLimiter {
-  /**
-   * @param {{ windowMs: number, max: number, now?: () => number }} opts
-   */
-  constructor(opts) {
-    if (!Number.isInteger(opts?.windowMs) || opts.windowMs <= 0) {
-      throw new Error('SlidingWindowRateLimiter: windowMs must be a positive integer')
-    }
-    if (!Number.isInteger(opts.max) || opts.max <= 0) {
-      throw new Error('SlidingWindowRateLimiter: max must be a positive integer')
-    }
-    /** @type {number} */
-    this.windowMs = opts.windowMs
-    /** @type {number} */
-    this.max = opts.max
-    /** @type {() => number} */
-    this.now = opts.now ?? Date.now
-    /** @type {Map<string, number[]>} */
-    this.events = new Map()
-  }
-
-  /**
-   * Decide whether `key` may proceed. On allow, records the event.
-   *
-   * @param {string} key
-   * @returns {{ allowed: boolean, retryAfterMs: number }}
-   */
-  check(key) {
-    const nowMs = this.now()
-    const cutoff = nowMs - this.windowMs
-    const stamps = this.events.get(key) ?? []
-    const fresh = stamps.filter((t) => t > cutoff)
-    if (fresh.length >= this.max) {
-      const oldest = fresh[0]
-      const retryAfterMs = Math.max(0, oldest + this.windowMs - nowMs)
-      this.events.set(key, fresh)
-      return { allowed: false, retryAfterMs }
-    }
-    fresh.push(nowMs)
-    this.events.set(key, fresh)
-    return { allowed: true, retryAfterMs: 0 }
-  }
-}
-
-/**
  * @param {string} input
  * @returns {string}
  */

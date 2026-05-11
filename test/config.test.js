@@ -149,6 +149,37 @@ describe('loadConfig - schema errors', () => {
     expect(() => loadConfig(p, { stderr: memoStderr() })).toThrow(/unknown key "upsteams"/)
   })
 
+  it('accepts optional query.parquet config', () => {
+    const p = writeJson('query.json', {
+      version: 1,
+      query: { parquet: { enabled: true, dir: '/tmp/collectivus-query' } },
+    })
+    expect(loadConfig(p)).toEqual({
+      version: 1,
+      query: { parquet: { enabled: true, dir: '/tmp/collectivus-query' } },
+    })
+  })
+
+  it('rejects unknown query keys and invalid query.parquet types', () => {
+    const unknown = writeJson('query-unknown.json', {
+      version: 1,
+      query: { mystery: true },
+    })
+    expect(() => loadConfig(unknown)).toThrow(/\/query\/mystery.*unknown key/)
+
+    const badEnabled = writeJson('query-enabled.json', {
+      version: 1,
+      query: { parquet: { enabled: 'yes' } },
+    })
+    expect(() => loadConfig(badEnabled)).toThrow(/\/query\/parquet\/enabled.*boolean/)
+
+    const badDir = writeJson('query-dir.json', {
+      version: 1,
+      query: { parquet: { dir: '' } },
+    })
+    expect(() => loadConfig(badDir)).toThrow(/\/query\/parquet\/dir.*non-empty string/)
+  })
+
   it('requires sink when proxy is present', () => {
     const p = writeJson('no-sink.json', {
       version: 1,

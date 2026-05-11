@@ -117,6 +117,18 @@ export interface UploadConfig {
   endpoint?: string
 }
 
+export interface QueryParquetConfig {
+  /** Enable the local query Parquet cache. Default true. */
+  enabled?: boolean
+  /** Cache directory. Default `<recording-root>/.collectivus-query/parquet`. */
+  dir?: string
+}
+
+export interface QueryConfig {
+  /** Local query-cache materialization settings. */
+  parquet?: QueryParquetConfig
+}
+
 /**
  * Operating mode for this collectivus instance. `standalone` (default when
  * `role` is absent) preserves single-binary behavior. `server` and `gateway`
@@ -234,6 +246,8 @@ export interface CollectivusConfig {
   sink?: FileSinkConfig
   /** Reserved upload section. Schema-validated only; uploader wires up later. */
   upload?: UploadConfig
+  /** Optional local query-cache settings. */
+  query?: QueryConfig
   /** Server-mode (control-plane) settings. Required iff `role === 'server'`. */
   server?: ServerConfig
   /** Gateway-mode central-server settings. Required iff `role === 'gateway'`. */

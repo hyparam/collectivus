@@ -235,6 +235,7 @@ async function runSingleUserFlow(args) {
       redact_headers: DEFAULT_REDACT,
     },
     sink: { type: 'file', dir: sinkDir },
+    query: { parquet: { enabled: true } },
   }
 
   const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
@@ -486,12 +487,12 @@ async function offerDaemonInstall(args) {
   const viaNpx = isNpxBinPath(binPath)
   if (wantProxy && (platform === 'darwin' || platform === 'linux') && !viaNpx) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
-    stdout.write('\nRun collectivus as a background daemon?\n')
+    stdout.write('\nRun ctvs as a background daemon?\n')
     stdout.write(`  Yes → installs a ${daemonKind} that starts at login and respawns\n`)
     stdout.write('        if it crashes. Logs go to ~/.hyp/collectivus/. Reversible\n')
-    stdout.write('        with `collectivus uninstall`.\n')
+    stdout.write('        with `ctvs uninstall`.\n')
     stdout.write('  No  → only runs while you launch it manually with\n')
-    stdout.write('        `collectivus --config <path>` in a terminal.\n')
+    stdout.write('        `ctvs --config <path>` in a terminal.\n')
     const dAns = (await prompt('Install as background daemon? [Y/n]: ')).trim()
     if (isYes(dAns)) {
       let installFlag
@@ -499,9 +500,9 @@ async function offerDaemonInstall(args) {
         stdout.write('\nConfigure Claude Code to route through this proxy?\n')
         stdout.write('  Yes → adds ANTHROPIC_BASE_URL=http://127.0.0.1:<port> to\n')
         stdout.write('        ~/.claude/settings.json so the `claude` CLI uses the proxy.\n')
-        stdout.write('        Reversible with `collectivus detach`.\n')
+        stdout.write('        Reversible with `ctvs detach`.\n')
         stdout.write('  No  → leaves Claude Code untouched; attach later with\n')
-        stdout.write('        `collectivus attach`.\n')
+        stdout.write('        `ctvs attach`.\n')
         const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
         installFlag = isYes(cAns) ? '--yes' : '--no'
       } else {
@@ -517,17 +518,17 @@ async function offerDaemonInstall(args) {
 
   stdout.write('\nNext steps:\n')
   if (viaNpx) {
-    stdout.write(`  npx collectivus --config ${configPath}\n`)
+    stdout.write(`  npx -p collectivus ctvs --config ${configPath}\n`)
   } else {
-    stdout.write(`  collectivus --config ${configPath}\n`)
+    stdout.write(`  ctvs --config ${configPath}\n`)
   }
   if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
     if (viaNpx) {
-      stdout.write('\nTo run collectivus as a background daemon, install it globally first:\n')
+      stdout.write('\nTo run ctvs as a background daemon, install it globally first:\n')
       stdout.write('  npm install -g collectivus\n')
-      stdout.write(`  collectivus install --config ${configPath}\n`)
+      stdout.write(`  ctvs install --config ${configPath}\n`)
     } else {
-      stdout.write(`  collectivus install --config ${configPath}   (run as a background daemon)\n`)
+      stdout.write(`  ctvs install --config ${configPath}   (run as a background daemon)\n`)
     }
   }
   return 0
@@ -590,6 +591,10 @@ function printConfigSummary(stdout, config) {
     const prefix = u.prefix ?? DEFAULT_UPLOAD_PREFIX
     const time = u.time ?? DEFAULT_UPLOAD_TIME
     stdout.write(`  upload: s3://${u.bucket}/${prefix} daily at ${time} UTC\n`)
+  }
+  if (config.query?.parquet) {
+    const enabled = config.query.parquet.enabled !== false
+    stdout.write(`  query:  parquet cache ${enabled ? 'enabled' : 'disabled'}\n`)
   }
 }
 
@@ -753,20 +758,24 @@ async function runGatewayFlow(args) {
   const sink = { type: 'file', dir: sinkAns === '' ? defaultSink : sinkAns }
   config.sink = sink
 
+  stdout.write('\nKeep a local Parquet query cache for `ctvs query`? [Y/n]\n')
+  const queryAns = (await prompt('Enable local query cache? [Y/n]: ')).trim()
+  config.query = { parquet: { enabled: isYes(queryAns) } }
+
   const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
   if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
 
   // Help the operator avoid the "I started it, why is nothing happening" trap.
   stdout.write('\nNext steps:\n')
   stdout.write(`  1. On the central server (${centralServer.url}), the operator must:\n`)
-  stdout.write('       collectivus config bootstrap-token issue <gateway-id> --server-config <server.json>\n')
-  stdout.write('       collectivus config set <gateway-id> --server-config <server.json> --file <gateway-config.json>\n')
+  stdout.write('       ctvs config bootstrap-token issue <gateway-id> --server-config <server.json>\n')
+  stdout.write('       ctvs config set <gateway-id> --server-config <server.json> --file <gateway-config.json>\n')
   stdout.write('     before this gateway will see anything to load.\n')
   stdout.write('  2. Point this gateway at its bootstrap token by editing\n')
   stdout.write(`     central_server.identity.bootstrap_token in ${cfgPath}\n`)
   stdout.write('     (the token can only be redeemed once; we do not collect it during\n')
   stdout.write('     this walkthrough so it never lands in shell history).\n')
-  stdout.write(`  3. Then run: collectivus --config ${cfgPath}\n`)
+  stdout.write(`  3. Then run: ctvs --config ${cfgPath}\n`)
 
   return offerDaemonInstall({
     configPath: cfgPath, wantProxy,
@@ -844,7 +853,12 @@ async function runServerFlow(args) {
     sink_dir: sinkDir,
   }
   /** @type {CollectivusConfig} */
-  const config = { version: 1, role: 'server', server: serverBlock }
+  const config = {
+    version: 1,
+    role: 'server',
+    server: serverBlock,
+    query: { parquet: { enabled: true } },
+  }
 
   // Optional upload. Central server mode drains the multi-tenant ingest spool to S3.
   const upload = await askUpload(prompt, stdout, stderr)
@@ -860,11 +874,11 @@ async function runServerFlow(args) {
   }
 
   stdout.write('\nNext steps:\n')
-  stdout.write(`  collectivus --config ${cfgPath}    (start the server)\n\n`)
+  stdout.write(`  ctvs --config ${cfgPath}    (start the server)\n\n`)
   stdout.write('Provision a gateway:\n')
-  stdout.write(`  collectivus config bootstrap-token issue <gateway-id> --server-config ${cfgPath}\n`)
+  stdout.write(`  ctvs config bootstrap-token issue <gateway-id> --server-config ${cfgPath}\n`)
   stdout.write('     (prints a one-shot token; hand it to the gateway operator)\n')
-  stdout.write(`  collectivus config set <gateway-id> --server-config ${cfgPath} --file <gateway-config.json>\n`)
+  stdout.write(`  ctvs config set <gateway-id> --server-config ${cfgPath} --file <gateway-config.json>\n`)
   stdout.write('     (registers the per-gateway config the gateway will pull)\n')
   return 0
 }

@@ -19,7 +19,7 @@ import { isLaunchAgentInstalled as defaultIsLaunchAgentInstalled, launchAgentSta
  */
 
 const USAGE = `Usage:
-  collectivus status
+  ctvs status
 
 Options:
   --help, -h        Show this help`

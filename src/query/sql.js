@@ -1,0 +1,270 @@
+import fs from 'node:fs'
+import { asyncRow, collect, executeSql, extractTables, parseSql } from 'squirreling'
+import { parquetReadObjects } from 'hyparquet'
+import { compressors } from 'hyparquet-compressors'
+import {
+  QUERY_DATASETS,
+  columnsForDataset,
+  fallbackTimestampColumns,
+  isQueryDataset,
+} from './schema.js'
+import { expectedCachePartitions } from './paths.js'
+
+/**
+ * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
+ * @import { CachePartition, QueryDataset, QueryPaths, QueryResultSet, QueryScope } from './types.js'
+ */
+
+/**
+ * @param {string} sql
+ * @param {number} defaultLimit
+ * @returns {{ statement: Statement, datasets: QueryDataset[] }}
+ */
+export function prepareReadOnlySql(sql, defaultLimit) {
+  const trimmed = sql.trim()
+  if (trimmed.length === 0) throw new Error('SQL query is required')
+  /** @type {Statement} */
+  let statement
+  try {
+    statement = parseSql({ query: trimmed })
+  } catch (err) {
+    throw new Error(`SQL must be a single read-only SELECT statement: ${formatError(err)}`)
+  }
+  const tables = extractTables(statement)
+  /** @type {QueryDataset[]} */
+  const datasets = []
+  for (const table of tables) {
+    if (!isQueryDataset(table)) {
+      throw new Error(`SQL can only reference logical query tables (${QUERY_DATASETS.join(', ')}); got "${table}"`)
+    }
+    if (!datasets.includes(table)) datasets.push(table)
+  }
+  applyDefaultLimit(statement, defaultLimit)
+  return { statement, datasets }
+}
+
+/**
+ * @param {{
+ *   paths: QueryPaths,
+ *   scope: QueryScope,
+ *   statement: Statement,
+ *   datasets: QueryDataset[],
+ * }} args
+ * @returns {Promise<QueryResultSet>}
+ */
+export async function executeLogicalSql(args) {
+  const tables = buildTables(args.paths, {
+    ...args.scope,
+    datasets: args.datasets.length === 0 ? [...QUERY_DATASETS] : args.datasets,
+  })
+  const results = executeSql({ tables, query: args.statement })
+  const rows = await collect(results)
+  return { columns: results.columns, rows }
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @returns {Record<string, AsyncDataSource>}
+ */
+export function buildTables(paths, scope) {
+  /** @type {Record<string, CachePartition[]>} */
+  const byDataset = {}
+  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : [...QUERY_DATASETS])
+  for (const dataset of datasets) byDataset[dataset] = []
+  for (const partition of expectedCachePartitions(paths, scope)) {
+    if (!byDataset[partition.dataset]) byDataset[partition.dataset] = []
+    byDataset[partition.dataset].push(partition)
+  }
+
+  /** @type {Record<string, AsyncDataSource>} */
+  const tables = {}
+  for (const dataset of datasets) {
+    tables[dataset] = parquetDataSource(dataset, byDataset[dataset] ?? [], scope)
+  }
+  return tables
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {CachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @returns {AsyncDataSource}
+ */
+export function parquetDataSource(dataset, partitions, scope) {
+  const columns = columnsForDataset(dataset).map((column) => column.name)
+  const numRows = partitions.reduce((sum, partition) => sum + readRowCountHint(partition), 0)
+  return {
+    columns,
+    numRows,
+    scan(options) {
+      return {
+        rows: () => scanRows(dataset, partitions, scope, options),
+        appliedWhere: false,
+        appliedLimitOffset: false,
+      }
+    },
+  }
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {CachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @param {ScanOptions} options
+ * @returns {AsyncGenerator<AsyncRow>}
+ */
+async function* scanRows(dataset, partitions, scope, options) {
+  const requestedColumns = options.columns && options.columns.length > 0
+    ? options.columns
+    : columnsForDataset(dataset).map((column) => column.name)
+  for (const partition of partitions) {
+    if (options.signal?.aborted) return
+    const rows = await readParquetRows(partition)
+    for (const row of rows) {
+      if (options.signal?.aborted) return
+      const logical = normalizeLogicalRow(row, partition)
+      if (!rowMatchesScope(dataset, logical, scope)) continue
+      yield asyncRow(projectRow(logical, requestedColumns), requestedColumns)
+    }
+  }
+}
+
+/**
+ * @param {CachePartition} partition
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function readParquetRows(partition) {
+  const buf = fs.readFileSync(partition.parquetPath)
+  const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+  return parquetReadObjects({ file, compressors })
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {CachePartition} partition
+ * @returns {Record<string, import('squirreling').SqlPrimitive>}
+ */
+function normalizeLogicalRow(row, partition) {
+  /** @type {Record<string, import('squirreling').SqlPrimitive>} */
+  const out = {}
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = normalizeCell(value)
+  }
+  out.gateway_id = typeof out.gateway_id === 'string' ? out.gateway_id : partition.gatewayId
+  out.date = partition.date
+  return out
+}
+
+/**
+ * @param {unknown} value
+ * @returns {import('squirreling').SqlPrimitive}
+ */
+function normalizeCell(value) {
+  if (value === undefined || value === null) return null
+  if (value instanceof Date) return value
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeCell(entry))
+  }
+  if (typeof value === 'object') return /** @type {Record<string, unknown>} */ (value)
+  return String(value)
+}
+
+/**
+ * @param {Record<string, import('squirreling').SqlPrimitive>} row
+ * @param {string[]} columns
+ * @returns {Record<string, import('squirreling').SqlPrimitive>}
+ */
+function projectRow(row, columns) {
+  /** @type {Record<string, import('squirreling').SqlPrimitive>} */
+  const out = {}
+  for (const column of columns) out[column] = row[column] ?? null
+  return out
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {Record<string, import('squirreling').SqlPrimitive>} row
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function rowMatchesScope(dataset, row, scope) {
+  if (scope.gatewayId && row.gateway_id !== scope.gatewayId) return false
+  if (scope.date && row.date !== scope.date) return false
+  if (scope.service && 'serviceName' in row && row.serviceName !== scope.service) return false
+  if (!scope.from && !scope.to) return true
+  const timestampMs = rowTimestampMs(dataset, row)
+  if (timestampMs === undefined) return true
+  if (scope.from && timestampMs < Date.parse(scope.from)) return false
+  if (scope.to && timestampMs > Date.parse(scope.to)) return false
+  return true
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {Record<string, import('squirreling').SqlPrimitive>} row
+ * @returns {number | undefined}
+ */
+function rowTimestampMs(dataset, row) {
+  for (const column of fallbackTimestampColumns(dataset)) {
+    const ms = timestampMs(row[column])
+    if (ms !== undefined) return ms
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | undefined}
+ */
+function timestampMs(value) {
+  if (value instanceof Date) return value.getTime()
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
+    const n = Date.parse(String(value))
+    if (Number.isFinite(n)) return n
+  }
+}
+
+/**
+ * @param {CachePartition} partition
+ * @returns {number}
+ */
+function readRowCountHint(partition) {
+  try {
+    const raw = fs.readFileSync(partition.metaPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    return typeof parsed.row_count === 'number' ? parsed.row_count : 0
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * @param {Statement} statement
+ * @param {number} limit
+ */
+function applyDefaultLimit(statement, limit) {
+  const target = topLevelStatement(statement)
+  if (target && 'limit' in target && target.limit === undefined) {
+    target.limit = limit
+  }
+}
+
+/**
+ * @param {Statement} statement
+ * @returns {Statement | undefined}
+ */
+function topLevelStatement(statement) {
+  if (statement.type === 'with') return statement.query
+  return statement
+}
+
+/**
+ * @param {unknown} err
+ * @returns {string}
+ */
+function formatError(err) {
+  return err instanceof Error ? err.message : String(err)
+}

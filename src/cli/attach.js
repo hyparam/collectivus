@@ -11,7 +11,7 @@ import { pathMatchesPrefix } from '../proxy.js'
  */
 
 const USAGE = `Usage:
-  collectivus attach (--config <path|url> | --port <n>) [--client claude|codex|all]
+  ctvs attach (--config <path|url> | --port <n>) [--client claude|codex|all]
 
 Options:
   --config <path|url>  Read the proxy port from this collectivus config (path or http(s) URL)

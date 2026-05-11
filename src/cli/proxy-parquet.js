@@ -38,6 +38,30 @@ const STREAM_EVENT_COLUMNS = [
 ]
 
 /**
+ * @type {ColumnSpec}
+ */
+const GATEWAY_ID_COLUMN = { name: 'gateway_id', type: 'STRING', nullable: false }
+
+/**
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @returns {boolean}
+ */
+function hasGatewayIdColumn(partitionDimensions) {
+  return Array.isArray(partitionDimensions) && partitionDimensions.includes('gateway_id')
+}
+
+/**
+ * @param {'exchange' | 'stream_event'} kind
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @returns {ReadonlyArray<ColumnSpec>}
+ */
+export function columnsForProxyKind(kind, partitionDimensions) {
+  const columns = kind === 'exchange' ? EXCHANGE_COLUMNS : STREAM_EVENT_COLUMNS
+  if (hasGatewayIdColumn(partitionDimensions)) return [GATEWAY_ID_COLUMN, ...columns]
+  return columns
+}
+
+/**
  * Pull a value out of a flat row by spec name. Handles the dotted column
  * names that flatten `client.*`, `request.*`, `response.*` into top-level
  * columns.
@@ -48,6 +72,7 @@ const STREAM_EVENT_COLUMNS = [
  */
 function extractExchangeCell(name, row) {
   switch (name) {
+  case 'gateway_id': return readPartitionValue(row, 'gateway_id')
   case 'exchangeId': return row.exchange_id
   case 'tsStart': return row.ts_start
   case 'tsEnd': return row.ts_end
@@ -75,6 +100,7 @@ function extractExchangeCell(name, row) {
  */
 function extractStreamEventCell(name, row) {
   switch (name) {
+  case 'gateway_id': return readPartitionValue(row, 'gateway_id')
   case 'exchangeId': return row.exchange_id
   case 'tMs': return row.t_ms
   case 'event': return row.event
@@ -89,12 +115,14 @@ function extractStreamEventCell(name, row) {
  *
  * @param {'exchange' | 'stream_event'} kind
  * @param {ReadonlyArray<Record<string, unknown>>} rows
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @param {{ allowEmpty?: boolean }} [opts]
  * @returns {Promise<Uint8Array | undefined>}
  */
-export async function proxyRowsToParquet(kind, rows) {
-  if (rows.length === 0) return undefined
+export async function proxyRowsToParquet(kind, rows, partitionDimensions, opts = {}) {
+  if (rows.length === 0 && !opts.allowEmpty) return undefined
   const { parquetWriteBuffer } = await import('hyparquet-writer')
-  const columns = kind === 'exchange' ? EXCHANGE_COLUMNS : STREAM_EVENT_COLUMNS
+  const columns = columnsForProxyKind(kind, partitionDimensions)
   const extract = kind === 'exchange' ? extractExchangeCell : extractStreamEventCell
   const columnData = columns.map((spec) => ({
     name: spec.name,
@@ -104,6 +132,17 @@ export async function proxyRowsToParquet(kind, rows) {
   }))
   const arrayBuffer = parquetWriteBuffer({ columnData })
   return new Uint8Array(arrayBuffer)
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {string} key
+ * @returns {unknown}
+ */
+function readPartitionValue(row, key) {
+  const partition = row._partition
+  if (!partition || typeof partition !== 'object') return undefined
+  return /** @type {Record<string, unknown>} */ (partition)[key]
 }
 
 /**

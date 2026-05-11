@@ -32,26 +32,27 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
  */
 
 const USAGE = `Usage:
-  collectivus --config <path|url>              Run with config file or http(s) URL
-  collectivus --config <path|url> --print-config
+  ctvs --config <path|url>                     Run with config file or http(s) URL
+  ctvs --config <path|url> --print-config
                                                Load config, print resolved JSON, exit
-  collectivus --config <path|url> --strict     Reject unknown top-level config keys
-  collectivus --help                           Show this help
-  collectivus --version                        Print program version
+  ctvs --config <path|url> --strict            Reject unknown top-level config keys
+  ctvs --help                                  Show this help
+  ctvs --version                               Print program version
 
 Commands:
-  collectivus install [--config <path|url>]    Install the background daemon
-  collectivus uninstall                        Remove the daemon and detach attached clients
-  collectivus attach [--config <path|url>] [--port <n>] [--client claude|codex|all]
+  ctvs install [--config <path|url>]           Install the background daemon
+  ctvs uninstall                               Remove the daemon and detach attached clients
+  ctvs attach [--config <path|url>] [--port <n>] [--client claude|codex|all]
                                                Point Claude Code or Codex at the local proxy
-  collectivus detach [--client claude|codex|all]
+  ctvs detach [--client claude|codex|all]
                                                Restore Claude Code and/or Codex config
-  collectivus status                           Report daemon, config, recordings, attach state
-  collectivus export --config <path|url> [...] Convert recorded JSONL to Parquet
-  collectivus config <set|get|list|delete|bootstrap-token> ...
+  ctvs status                                  Report daemon, config, recordings, attach state
+  ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
+  ctvs query <command> [...]                   Query local recordings through Parquet cache
+  ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs
 
-Run \`collectivus <subcommand> --help\` for subcommand-specific options.`
+Run \`ctvs <subcommand> --help\` for subcommand-specific options.`
 
 const DRAIN_TIMEOUT_MS = 5000
 const SELF_UPDATE_TIME_UTC = '03:00'

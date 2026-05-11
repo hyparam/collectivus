@@ -124,6 +124,16 @@ describe('parseConfigArgs', () => {
       expect(parseConfigArgs(['set', '..', '--server-config', 'x', '--file', 'y']).kind).toBe('error')
     })
 
+    it('accepts email-shaped gateway-id', () => {
+      const r = parseConfigArgs([
+        'set', 'james.smith@acme.com',
+        '--server-config', '/etc/c.json',
+        '--file', '/tmp/g.json',
+      ])
+      expect(r.kind).toBe('set')
+      if (r.kind === 'set') expect(r.gatewayId).toBe('james.smith@acme.com')
+    })
+
     it('rejects extra positionals', () => {
       const r = parseConfigArgs(['set', 'gw-1', 'gw-2', '--server-config', 'x', '--file', 'y'])
       expect(r.kind).toBe('error')

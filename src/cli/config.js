@@ -25,7 +25,7 @@ Options:
   --ttl-seconds <n>        For \`bootstrap-token issue\`: TTL override in seconds
   --help, -h               Show this help`
 
-const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9_.-]+$/
+const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+@-]*$/
 const GATEWAY_ID_MAX_LENGTH = 128
 
 /**
@@ -263,7 +263,7 @@ function parseError(message) {
 function validateGatewayId(id) {
   if (id.length > GATEWAY_ID_MAX_LENGTH || !GATEWAY_ID_PATTERN.test(id) || id === '.' || id === '..') {
     return parseError(
-      `invalid gateway-id ${JSON.stringify(id)}: must match [A-Za-z0-9_.-]{1,${GATEWAY_ID_MAX_LENGTH}} and not be "." or ".."`
+      `invalid gateway-id ${JSON.stringify(id)}: must start with [A-Za-z0-9] and contain only [A-Za-z0-9._+@-] (max ${GATEWAY_ID_MAX_LENGTH} chars); cannot be "." or ".."`
     )
   }
   return undefined

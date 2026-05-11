@@ -2,13 +2,14 @@ import fs from 'node:fs'
 import process from 'node:process'
 import { ConfigError, loadConfig as defaultLoadConfig, validateCollectivusConfig } from '../config.js'
 import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from '../gateway_id.js'
-import { ConfigRegistry, resolveConfigsDir } from '../server/config_registry.js'
+import { createConfigRegistry, deleteConfig, getConfig, listGateways, resolveConfigsDir, setConfig } from '../server/config_registry.js'
 import { BootstrapStore } from '../server/identity.js'
 import { defaultPrompt } from './common.js'
 
 /**
  * @import { CollectivusConfig, ServerConfig } from '../types.js'
  * @import { ConfigCliHooks, ParsedConfigArgs, ParsedDelete, ParsedError, ParsedGet, ParsedHelp, ParsedList, ParsedSet, ParsedTokenIssue, ParsedTokenRevoke } from './types.d.ts'
+ * @import { ConfigRegistry } from '../server/types.d.ts'
  */
 
 const USAGE = `Usage:
@@ -286,7 +287,7 @@ export async function runConfig(argv, hooks = {}) {
   const promptFn = hooks.prompt ?? defaultPrompt
   const loadConfigFn = hooks.loadConfig ?? defaultLoadConfig
   const readFileFn = hooks.readFile ?? ((/** @type {string} */ p) => fs.readFileSync(p, 'utf8'))
-  const makeRegistry = hooks.makeRegistry ?? ((/** @type {ServerConfig} */ s) => new ConfigRegistry({ configsDir: resolveConfigsDir(s) }))
+  const makeRegistry = hooks.makeRegistry ?? ((/** @type {ServerConfig} */ s) => createConfigRegistry({ configsDir: resolveConfigsDir(s) }))
   const makeBootstrapStore = hooks.makeBootstrapStore ?? ((/** @type {string} */ p) => new BootstrapStore({ path: p }))
 
   const parsed = parseConfigArgs(argv)
@@ -384,7 +385,7 @@ function runSet(parsed, server, ctx) {
   /** @type {{ etag: string }} */
   let result
   try {
-    result = registry.setConfig(parsed.gatewayId, parsedConfig)
+    result = setConfig(registry, parsed.gatewayId, parsedConfig)
   } catch (err) {
     ctx.stderr.write(`error: failed to write config: ${formatError(err)}\n`)
     return 1
@@ -405,10 +406,10 @@ function runSet(parsed, server, ctx) {
  */
 function runGet(parsed, server, ctx) {
   const registry = ctx.makeRegistry(server)
-  /** @type {ReturnType<ConfigRegistry['getConfig']>} */
+  /** @type {ReturnType<typeof getConfig>} */
   let entry
   try {
-    entry = registry.getConfig(parsed.gatewayId)
+    entry = getConfig(registry, parsed.gatewayId)
   } catch (err) {
     ctx.stderr.write(`error: ${formatError(err)}\n`)
     return 1
@@ -433,7 +434,7 @@ function runGet(parsed, server, ctx) {
 function runList(parsed, server, ctx) {
   void parsed
   const registry = ctx.makeRegistry(server)
-  const ids = registry.listGateways()
+  const ids = listGateways(registry)
   for (const id of ids) ctx.stdout.write(id + '\n')
   return 0
 }
@@ -466,7 +467,7 @@ async function runDelete(parsed, server, ctx) {
   /** @type {boolean} */
   let removed
   try {
-    removed = registry.deleteConfig(parsed.gatewayId)
+    removed = deleteConfig(registry, parsed.gatewayId)
   } catch (err) {
     ctx.stderr.write(`error: ${formatError(err)}\n`)
     return 1

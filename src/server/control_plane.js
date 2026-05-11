@@ -1,7 +1,7 @@
 import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
 import { createBearerAuth, getClaims } from './auth.js'
-import { ConfigRegistry, resolveConfigsDir } from './config_registry.js'
+import { createConfigRegistry, getConfig, resolveConfigsDir } from './config_registry.js'
 import { clientIp, readJsonBody, writeError, writeJson, writeRetryAfterJson } from './http.js'
 import {
   BootstrapStore,
@@ -15,6 +15,7 @@ import { SlidingWindowRateLimiter } from './rate_limit.js'
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
  * @import { ServerConfig } from '../types.js'
+ * @import { ConfigRegistry } from './types.d.ts'
  */
 
 /** Maximum bytes accepted in an identity request body. */
@@ -73,7 +74,7 @@ export class ControlPlane {
     }
 
     /** @type {ConfigRegistry} */
-    this.configRegistry = opts.configRegistry ?? new ConfigRegistry({
+    this.configRegistry = opts.configRegistry ?? createConfigRegistry({
       configsDir: resolveConfigsDir(config),
     })
 
@@ -302,10 +303,10 @@ export class ControlPlane {
     if (!claims) {
       return writeError(res, 500, 'auth claims missing after authorize')
     }
-    /** @type {ReturnType<ConfigRegistry['getConfig']>} */
+    /** @type {ReturnType<typeof getConfig>} */
     let entry
     try {
-      entry = this.configRegistry.getConfig(claims.sub)
+      entry = getConfig(this.configRegistry, claims.sub)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       return writeError(res, 500, `config registry error: ${msg}`)

@@ -6,7 +6,7 @@ import { ConfigError, validateCollectivusConfig } from '../config.js'
 
 /**
  * @import { CollectivusConfig, ServerConfig } from '../types.js'
- * @import { ConfigRegistryEntry } from './types.d.ts'
+ * @import { ConfigRegistry, ConfigRegistryEntry } from './types.d.ts'
  */
 
 /**
@@ -34,12 +34,10 @@ export function resolveConfigsDir(serverConfig, opts = {}) {
 }
 
 /**
- * File-backed registry of per-gateway configs. One JSON file per gateway lives
- * at `<configsDir>/<gateway_id>.json`. The registry is process-local in-memory
- * cache only so the operator CLI (Epic B.2) and the running server can share
- * the directory cooperatively — the running `ConfigRegistry` always re-reads
- * from disk on `getConfig`, so an out-of-band `setConfig` from another process
- * is visible on the next read.
+ * Build a file-backed registry of per-gateway configs. One JSON file per
+ * gateway lives at `<configsDir>/<gateway_id>.json`. The registry object is a
+ * serializable data holder only; operations always re-read from disk so an
+ * out-of-band write from another process is visible on the next read.
  *
  * Concurrency: writes are tmp+rename, atomic on POSIX. There is no
  * inter-process locking; if two writers race on the same gateway the last
@@ -48,137 +46,139 @@ export function resolveConfigsDir(serverConfig, opts = {}) {
  * Authorization: the registry has no concept of authentication. Callers
  * (`control_plane.js` for the GET endpoint, `cli/config.js` for the operator
  * CLI) enforce access control above this layer.
+ *
+ * @param {{ configsDir: string }} opts
+ * @returns {ConfigRegistry}
  */
-export class ConfigRegistry {
-  /**
-   * @param {{ configsDir: string }} opts
-   */
-  constructor(opts) {
-    if (typeof opts?.configsDir !== 'string' || opts.configsDir.length === 0) {
-      throw new Error('ConfigRegistry: configsDir is required')
-    }
-    /** @type {string} */
-    this.configsDir = opts.configsDir
+export function createConfigRegistry(opts) {
+  if (typeof opts?.configsDir !== 'string' || opts.configsDir.length === 0) {
+    throw new Error('ConfigRegistry: configsDir is required')
   }
+  return { configsDir: opts.configsDir }
+}
 
-  /**
-   * Read a gateway's config off disk. Returns `undefined` when no file exists.
-   * Throws when the file exists but the JSON is unparseable or the recorded
-   * config no longer satisfies the gateway-side validator (e.g. schema drift
-   * after an upgrade) — in that case the operator must repair the file.
-   *
-   * @param {string} gatewayId
-   * @returns {ConfigRegistryEntry | undefined}
-   */
-  getConfig(gatewayId) {
-    assertGatewayId(gatewayId)
-    const file = this.fileFor(gatewayId)
-    /** @type {string} */
-    let raw
-    try {
-      raw = fs.readFileSync(file, 'utf8')
-    } catch (err) {
-      if (isEnoent(err)) return undefined
-      throw err
-    }
-    /** @type {unknown} */
-    let parsed
-    try {
-      parsed = JSON.parse(raw)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`ConfigRegistry: invalid JSON in ${file}: ${msg}`)
-    }
-    validateCollectivusConfig(parsed)
-    const config = parsed
-    const etag = computeEtag(config)
-    return { config, etag }
+/**
+ * Read a gateway's config off disk. Returns `undefined` when no file exists.
+ * Throws when the file exists but the JSON is unparseable or the recorded
+ * config no longer satisfies the gateway-side validator (e.g. schema drift
+ * after an upgrade) — in that case the operator must repair the file.
+ *
+ * @param {ConfigRegistry} registry
+ * @param {string} gatewayId
+ * @returns {ConfigRegistryEntry | undefined}
+ */
+export function getConfig(registry, gatewayId) {
+  assertGatewayId(gatewayId)
+  const file = configFileFor(registry, gatewayId)
+  /** @type {string} */
+  let raw
+  try {
+    raw = fs.readFileSync(file, 'utf8')
+  } catch (err) {
+    if (isEnoent(err)) return undefined
+    throw err
   }
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`ConfigRegistry: invalid JSON in ${file}: ${msg}`)
+  }
+  validateCollectivusConfig(parsed)
+  const config = /** @type {CollectivusConfig} */ (parsed)
+  const etag = computeEtag(config)
+  return { config, etag }
+}
 
-  /**
-   * Persist a config for a gateway. The config is validated against the same
-   * schema a gateway would use to load it; an invalid config is rejected
-   * before any file is written. Returns the new entry's ETag.
-   *
-   * @param {string} gatewayId
-   * @param {unknown} configObj
-   * @returns {{ etag: string }}
-   */
-  setConfig(gatewayId, configObj) {
-    assertGatewayId(gatewayId)
-    try {
-      validateCollectivusConfig(configObj)
-    } catch (err) {
-      if (err instanceof ConfigError) throw err
-      throw err
-    }
-    const config = configObj
-    fs.mkdirSync(this.configsDir, { recursive: true })
-    const file = this.fileFor(gatewayId)
-    const canonical = canonicalJsonString(config)
-    const tmp = `${file}.tmp.${process.pid}.${Date.now()}`
-    fs.writeFileSync(tmp, canonical, { mode: 0o600 })
-    fs.renameSync(tmp, file)
-    return { etag: sha256Hex(canonical) }
+/**
+ * Persist a config for a gateway. The config is validated against the same
+ * schema a gateway would use to load it; an invalid config is rejected
+ * before any file is written. Returns the new entry's ETag.
+ *
+ * @param {ConfigRegistry} registry
+ * @param {string} gatewayId
+ * @param {unknown} configObj
+ * @returns {{ etag: string }}
+ */
+export function setConfig(registry, gatewayId, configObj) {
+  assertGatewayId(gatewayId)
+  try {
+    validateCollectivusConfig(configObj)
+  } catch (err) {
+    if (err instanceof ConfigError) throw err
+    throw err
   }
+  const config = /** @type {CollectivusConfig} */ (configObj)
+  fs.mkdirSync(registry.configsDir, { recursive: true })
+  const file = configFileFor(registry, gatewayId)
+  const canonical = canonicalJsonString(config)
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`
+  fs.writeFileSync(tmp, canonical, { mode: 0o600 })
+  fs.renameSync(tmp, file)
+  return { etag: sha256Hex(canonical) }
+}
 
-  /**
-   * List all gateway IDs that have a config registered.
-   *
-   * Filenames must match `<gateway_id>.json` exactly. Files that don't conform
-   * (hidden files, partial tmp files from a crash mid-write, stray text) are
-   * silently skipped — the registry is not a directory listing.
-   *
-   * @returns {string[]}
-   */
-  listGateways() {
-    /** @type {string[]} */
-    let entries
-    try {
-      entries = fs.readdirSync(this.configsDir)
-    } catch (err) {
-      if (isEnoent(err)) return []
-      throw err
-    }
-    /** @type {string[]} */
-    const gateways = []
-    for (const name of entries) {
-      if (!name.endsWith('.json')) continue
-      const gateway = name.slice(0, -'.json'.length)
-      if (gateway.length === 0) continue
-      if (!isValidGatewayId(gateway)) continue
-      gateways.push(gateway)
-    }
-    gateways.sort()
-    return gateways
+/**
+ * List all gateway IDs that have a config registered.
+ *
+ * Filenames must match `<gateway_id>.json` exactly. Files that don't conform
+ * (hidden files, partial tmp files from a crash mid-write, stray text) are
+ * silently skipped — the registry is not a directory listing.
+ *
+ * @param {ConfigRegistry} registry
+ * @returns {string[]}
+ */
+export function listGateways(registry) {
+  /** @type {string[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(registry.configsDir)
+  } catch (err) {
+    if (isEnoent(err)) return []
+    throw err
   }
+  /** @type {string[]} */
+  const gateways = []
+  for (const name of entries) {
+    if (!name.endsWith('.json')) continue
+    const gateway = name.slice(0, -'.json'.length)
+    if (gateway.length === 0) continue
+    if (!isValidGatewayId(gateway)) continue
+    gateways.push(gateway)
+  }
+  gateways.sort()
+  return gateways
+}
 
-  /**
-   * Remove a gateway's config. Returns true if the file existed and was
-   * deleted, false when no config was registered for the gateway.
-   *
-   * @param {string} gatewayId
-   * @returns {boolean}
-   */
-  deleteConfig(gatewayId) {
-    assertGatewayId(gatewayId)
-    const file = this.fileFor(gatewayId)
-    try {
-      fs.unlinkSync(file)
-      return true
-    } catch (err) {
-      if (isEnoent(err)) return false
-      throw err
-    }
+/**
+ * Remove a gateway's config. Returns true if the file existed and was
+ * deleted, false when no config was registered for the gateway.
+ *
+ * @param {ConfigRegistry} registry
+ * @param {string} gatewayId
+ * @returns {boolean}
+ */
+export function deleteConfig(registry, gatewayId) {
+  assertGatewayId(gatewayId)
+  const file = configFileFor(registry, gatewayId)
+  try {
+    fs.unlinkSync(file)
+    return true
+  } catch (err) {
+    if (isEnoent(err)) return false
+    throw err
   }
+}
 
-  /**
-   * @param {string} gatewayId
-   * @returns {string}
-   */
-  fileFor(gatewayId) {
-    return path.join(this.configsDir, `${gatewayId}.json`)
-  }
+/**
+ * @param {ConfigRegistry} registry
+ * @param {string} gatewayId
+ * @returns {string}
+ */
+export function configFileFor(registry, gatewayId) {
+  return path.join(registry.configsDir, `${gatewayId}.json`)
 }
 
 /**

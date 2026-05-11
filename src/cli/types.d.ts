@@ -16,8 +16,8 @@ import type {
 } from '../types.js'
 import type { DaemonInstallOptions, DaemonUninstallOptions, MacosStatusOptions } from '../daemon/types.d.ts'
 import type { ConfigClient } from '../gateway/config_client.js'
-import type { ConfigRegistry } from '../server/config_registry.js'
 import type { BootstrapStore } from '../server/identity.js'
+import type { ConfigRegistry } from '../server/types.d.ts'
 
 // ---------- CLI top-level ----------
 

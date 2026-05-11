@@ -64,14 +64,14 @@ afterEach(function() {
 })
 
 describe('runInit', function() {
-  describe('single-user mode', function() {
+  describe('standalone mode', function() {
     it('writes a v1 config with localhost proxy + Anthropic upstream array', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt, asked } = scriptedPrompt([
-        '1', // single-user
+        '1', // standalone
         '', // accept default sink (resolves to override below)
         cfgPath, // save path
         'y', // confirm write
@@ -107,7 +107,7 @@ describe('runInit', function() {
       expect(written.otel).toBeUndefined()
       expect(written.upload).toBeUndefined()
       expect(stdout.value()).toMatch(/Wrote/)
-      // Single-user does not ask about provider, OTLP, upload, or proxy listen.
+      // Standalone does not ask about provider, OTLP, upload, or proxy listen.
       expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /OTLP/i.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Upload daily/i.test(q) })).toBe(false)
@@ -140,7 +140,7 @@ describe('runInit', function() {
       const fakeHome = path.join(tmpDir, 'home')
       const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', // single-user
+        '1', // standalone
         '', // default sink
         '', // accept default save path
         'y', // confirm write
@@ -272,7 +272,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        'oops', '7', '', // two bad answers, then accept default (1 = single-user)
+        'oops', '7', '', // two bad answers, then accept default (1 = standalone)
         '', cfgPath, 'y', 'n',
       ])
       const code = await runInit({
@@ -282,279 +282,10 @@ describe('runInit', function() {
         defaultConfigPath: absentDefaultCfg,
       })
       expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/please choose 1, 2, 3, or 4 \(got "oops"\)/)
-      expect(stderr.value()).toMatch(/please choose 1, 2, 3, or 4 \(got "7"\)/)
+      expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "oops"\)/)
+      expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "7"\)/)
       expect(asked.filter(function(q) { return q === 'Choose [1]: ' })).toHaveLength(3)
       expect(fs.existsSync(cfgPath)).toBe(true)
-    })
-  })
-
-  describe('enterprise mode', function() {
-    it('writes a 0.0.0.0 server config and prints the ASCII-boxed client install command', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const sinkDir = path.join(tmpDir, 'sink')
-      const { prompt, asked } = scriptedPrompt([
-        '2', // enterprise
-        'collectivus.acme.com', // public host (no scheme — should be normalized to https://)
-        '1', // Anthropic
-        'y', // enable OTLP
-        '', // default OTLP listen 0.0.0.0:4318
-        sinkDir,
-        '', // no upload (default N)
-        cfgPath,
-        'y', // confirm write
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.version).toBe(1)
-      expect(written.proxy.listen).toBe('0.0.0.0:8787')
-      expect(written.proxy.upstreams).toEqual([
-        {
-          name: 'anthropic',
-          base_url: 'https://api.anthropic.com',
-          match: { path_prefix: '/v1/messages' },
-        },
-      ])
-      expect(written.otel).toEqual({ listen: '0.0.0.0:4318' })
-      expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
-      expect(written.upload).toBeUndefined()
-
-      const out = stdout.value()
-      expect(out).toMatch(/Run this on each client machine/)
-      expect(out).toContain('npx collectivus --config https://collectivus.acme.com/collectivus.json')
-      expect(out).toMatch(/╔/) // ASCII-art frame
-      expect(out).toMatch(/╚/)
-
-      // Enterprise asks the public host and provider.
-      expect(asked.some(function(q) { return /Public host/.test(q) })).toBe(true)
-      expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(true)
-    })
-
-    it('preserves an explicit https URL with a port and trailing slash gets stripped', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '2',
-        'https://collectivus.example.com:9000/', // scheme + port + trailing slash
-        '1', // Anthropic
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '', // no upload
-        cfgPath,
-        'y',
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.otel).toBeUndefined()
-      expect(stdout.value()).toContain('npx collectivus --config https://collectivus.example.com:9000/collectivus.json')
-    })
-
-    it('re-prompts when public host is empty', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '2',
-        '', // empty
-        'collectivus.example.com',
-        '1', // Anthropic
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '', // no upload
-        cfgPath,
-        'y',
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/public host is required/)
-    })
-
-    it('chains into runInstall with --no (no Claude Code attach prompt) on the server', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt, asked } = scriptedPrompt([
-        '2',
-        'collectivus.example.com',
-        '2', // OpenAI
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '', // no upload
-        cfgPath,
-        'y',
-        'y', // install daemon
-      ])
-      /** @type {string[][]} */
-      const installCalls = []
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'linux',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
-      })
-      expect(code).toBe(0)
-      expect(installCalls).toEqual([['--config', cfgPath, '--no']])
-      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
-    })
-
-    it('custom upstream prompts for base URL, prefix, and name (defaulted from URL)', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '2',
-        'collectivus.example.com',
-        '4', // custom
-        'https://api.example.com',
-        '/v2/chat',
-        '', // accept derived upstream name
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '', // no upload
-        cfgPath,
-        'y',
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.proxy.upstreams).toEqual([
-        {
-          name: 'example', // derived from api.example.com
-          base_url: 'https://api.example.com',
-          match: { path_prefix: '/v2/chat' },
-        },
-      ])
-    })
-
-    it('custom upstream re-prompts on invalid name slug', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '2',
-        'collectivus.example.com',
-        '4',
-        'https://api.example.com',
-        '/v1',
-        'BadName', // uppercase rejected
-        '1bad', // leading digit rejected
-        'good-name', // accepted
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '',
-        cfgPath,
-        'y',
-        'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(stderr.value().match(/name must match \[a-z\]\[a-z0-9-\]\*/g)).toHaveLength(2)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.proxy.upstreams[0].name).toBe('good-name')
-    })
-
-    it('re-prompts on invalid provider choice until a valid one is given', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt, asked } = scriptedPrompt([
-        '2',
-        'collectivus.example.com',
-        '99', 'nah', '2', // two bad provider answers, then OpenAI
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        '', // no upload
-        cfgPath,
-        'y',
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/invalid provider choice "99"/)
-      expect(stderr.value()).toMatch(/invalid provider choice "nah"/)
-      expect(asked.filter(function(q) { return q === 'Provider [1]: ' })).toHaveLength(3)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.proxy.upstreams[0].name).toBe('openai')
-      expect(written.proxy.upstreams[0].base_url).toBe('https://api.openai.com')
-    })
-
-    it('opt-in S3 upload writes the upload block and prints credential note', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '2',
-        'collectivus.example.com',
-        '1', // Anthropic
-        'n', // skip OTLP
-        path.join(tmpDir, 'sink'),
-        'y', // enable upload
-        'my-bucket', // bucket
-        '', // default region
-        '', // default prefix
-        '', // default time
-        '', // default signals
-        '', // no endpoint
-        cfgPath,
-        'y',
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.upload).toEqual({
-        bucket: 'my-bucket',
-        region: 'us-east-1',
-        prefix: 'collectivus',
-        time: '00:10',
-        signals: ['logs', 'traces', 'metrics'],
-      })
-      expect(stdout.value()).toMatch(/AWS_ACCESS_KEY_ID/)
     })
   })
 
@@ -565,7 +296,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'gw.json')
       const sinkDir = path.join(tmpDir, 'gw-sink')
       const { prompt, asked } = scriptedPrompt([
-        '3', // gateway mode
+        '2', // gateway
         'https://central.example.com:8788', // central server URL
         '60', // poll_interval_seconds override
         '1', // capture mode: proxy only
@@ -607,7 +338,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gw.json')
       const { prompt } = scriptedPrompt([
-        '3', // gateway mode
+        '2', // gateway
         'https://central.example.com:8788',
         '', // accept default poll interval (omitted from config)
         '2', // capture: otel only
@@ -634,7 +365,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gw.json')
       const { prompt, asked } = scriptedPrompt([
-        '3',
+        '2',
         'https://central.example.com:8788',
         '0', // below 5
         '4000', // above 3600
@@ -664,7 +395,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gw.json')
       const { prompt, asked } = scriptedPrompt([
-        '3',
+        '2',
         '', // empty rejected
         'not a url', // unparseable rejected
         'https://central.example.com:8788',
@@ -687,15 +418,15 @@ describe('runInit', function() {
     })
   })
 
-  describe('server-mode walkthrough', function() {
+  describe('central-server walkthrough', function() {
     it('writes a valid role:server config with the operator-supplied data_dir', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const dataDir = path.join(tmpDir, 'server-data')
       const { prompt } = scriptedPrompt([
-        '4', // server mode
-        '', // accept default control-plane listen
+        '3', // central server
+        '', // accept default central-server listen
         dataDir, // server data directory
         '', // generate identity-issuer secret
         '', // no S3 upload
@@ -730,8 +461,8 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '4',
-        '127.0.0.1:9999', // explicit control-plane listen
+        '3',
+        '127.0.0.1:9999', // explicit central-server listen
         '', // default data_dir
         'too-short', // shorter than 32 chars
         '', // no upload
@@ -756,7 +487,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '4',
+        '3',
         '', // default listen
         path.join(tmpDir, 'server-data'),
         '', // generate secret
@@ -871,7 +602,7 @@ describe('runInit', function() {
       }
       const { prompt } = scriptedPrompt([
         '2', // reject reuse
-        '1', // single-user
+        '1', // standalone
         '', // default sink
         newCfgPath, // save to a new path
         'y', // confirm write

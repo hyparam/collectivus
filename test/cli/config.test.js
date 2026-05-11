@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { ConfigError } from '../../src/config.js'
 import { parseConfigArgs, runConfig } from '../../src/cli/config.js'
-import { ConfigRegistry, resolveConfigsDir } from '../../src/server/config_registry.js'
+import { createConfigRegistry, getConfig, resolveConfigsDir, setConfig } from '../../src/server/config_registry.js'
 import { BootstrapStore, issueFromBootstrap } from '../../src/server/identity.js'
 
 /**
@@ -386,10 +386,10 @@ describe('runConfig', () => {
   describe('list (acceptance #2)', () => {
     it('lists registered gateway IDs sorted, one per line', async () => {
       const m = makeHooks()
-      const registry = new ConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
-      registry.setConfig('gw-z', gatewayConfig())
-      registry.setConfig('gw-a', gatewayConfig())
-      registry.setConfig('gw-m', gatewayConfig())
+      const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+      setConfig(registry, 'gw-z', gatewayConfig())
+      setConfig(registry, 'gw-a', gatewayConfig())
+      setConfig(registry, 'gw-m', gatewayConfig())
 
       const code = await runConfig(['list', '--server-config', m.serverConfigPath], m.hooks)
       expect(code).toBe(0)
@@ -407,8 +407,8 @@ describe('runConfig', () => {
   describe('delete (acceptance #4)', () => {
     it('--yes deletes the file; subsequent get reports "no config found"', async () => {
       const m = makeHooks()
-      const registry = new ConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
-      registry.setConfig('gw-prod-1', gatewayConfig())
+      const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+      setConfig(registry, 'gw-prod-1', gatewayConfig())
 
       const delCode = await runConfig(
         ['delete', 'gw-prod-1', '--server-config', m.serverConfigPath, '--yes'],
@@ -438,8 +438,8 @@ describe('runConfig', () => {
 
     it('refuses to delete without --yes when not a TTY', async () => {
       const m = makeHooks()
-      const registry = new ConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
-      registry.setConfig('gw-1', gatewayConfig())
+      const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+      setConfig(registry, 'gw-1', gatewayConfig())
 
       const code = await runConfig(
         ['delete', 'gw-1', '--server-config', m.serverConfigPath],
@@ -448,13 +448,13 @@ describe('runConfig', () => {
       expect(code).toBe(1)
       expect(m.stderr.value()).toMatch(/refusing to delete without --yes/)
       // File survives the refused delete.
-      expect(registry.getConfig('gw-1')).toBeDefined()
+      expect(getConfig(registry, 'gw-1')).toBeDefined()
     })
 
     it('TTY without --yes prompts and deletes on confirm', async () => {
       const m = makeHooks()
-      const registry = new ConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
-      registry.setConfig('gw-1', gatewayConfig())
+      const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+      setConfig(registry, 'gw-1', gatewayConfig())
 
       /** @type {string[]} */
       const prompts = []
@@ -469,13 +469,13 @@ describe('runConfig', () => {
       expect(code).toBe(0)
       expect(prompts).toHaveLength(1)
       expect(prompts[0]).toMatch(/Delete config for gw-1\?/)
-      expect(registry.getConfig('gw-1')).toBeUndefined()
+      expect(getConfig(registry, 'gw-1')).toBeUndefined()
     })
 
     it('TTY without --yes cancels on negative answer', async () => {
       const m = makeHooks()
-      const registry = new ConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
-      registry.setConfig('gw-1', gatewayConfig())
+      const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+      setConfig(registry, 'gw-1', gatewayConfig())
 
       const code = await runConfig(
         ['delete', 'gw-1', '--server-config', m.serverConfigPath],
@@ -487,7 +487,7 @@ describe('runConfig', () => {
       )
       expect(code).toBe(0)
       expect(m.stdout.value()).toMatch(/Cancelled/)
-      expect(registry.getConfig('gw-1')).toBeDefined()
+      expect(getConfig(registry, 'gw-1')).toBeDefined()
     })
   })
 

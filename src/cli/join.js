@@ -4,6 +4,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { runWithConfig } from '../cli.js'
 import { defaultConfigPath, isNpxBinPath } from './common.js'
+import { validateCollectivusConfig } from '../config.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
@@ -93,15 +94,12 @@ export async function runJoin(argv, env, hooks = {}) {
   }
 
   /** @type {CollectivusConfig} */
-  const config = {
-    version: 1,
-    role: 'gateway',
-    central_server: {
-      url: resolved.connect_url,
-      identity: {
-        bootstrap_token: opts.joinCode,
-      },
-    },
+  let config
+  try {
+    config = await fetchJoinedGatewayConfig(opts.joinCode, resolved.connect_url, hooks.fetchFn ?? fetch)
+  } catch (err) {
+    stderr.write(`error: ${formatError(err)}\n`)
+    return 1
   }
 
   if (isNpxCollectivusBinPath(binPath)) {
@@ -244,6 +242,75 @@ export async function resolveJoinCode(joinCode, rendezvousUrl, fetchFn = fetch) 
     resolved.display_name = body.display_name
   }
   return resolved
+}
+
+/**
+ * Fetch the Central server's bootstrap config without consuming the one-shot
+ * join token, then overlay that token locally so first daemon start can
+ * acquire identity even when the registered config keeps identity empty.
+ *
+ * @param {string} joinCode
+ * @param {string} centralUrl
+ * @param {typeof fetch} fetchFn
+ * @returns {Promise<CollectivusConfig>}
+ */
+async function fetchJoinedGatewayConfig(joinCode, centralUrl, fetchFn = fetch) {
+  const url = new URL(joinUrl(centralUrl, '/v1/bootstrap-config'))
+  url.searchParams.set('token', joinCode)
+
+  let response
+  try {
+    response = await fetchFn(url.toString(), { method: 'GET' })
+  } catch (err) {
+    throw new Error(`failed to fetch gateway config from ${centralUrl}: ${formatError(err)}`)
+  }
+
+  if (!response.ok) {
+    throw new Error(`failed to fetch gateway config from ${centralUrl}: ${await readErrorDetail(response)}`)
+  }
+
+  /** @type {unknown} */
+  let body
+  try {
+    body = await response.json()
+  } catch (err) {
+    throw new Error(`failed to fetch gateway config from ${centralUrl}: invalid JSON response: ${formatError(err)}`)
+  }
+  if (!isPlainObject(body)) {
+    throw new Error(`failed to fetch gateway config from ${centralUrl}: response is not an object`)
+  }
+
+  const config = withBootstrapToken(body, joinCode, centralUrl)
+  try {
+    validateCollectivusConfig(config)
+  } catch (err) {
+    throw new Error(`failed to fetch gateway config from ${centralUrl}: invalid config: ${formatError(err)}`)
+  }
+  return /** @type {CollectivusConfig} */ (config)
+}
+
+/**
+ * @param {Record<string, unknown>} config
+ * @param {string} joinCode
+ * @param {string} centralUrl
+ * @returns {Record<string, unknown>}
+ */
+function withBootstrapToken(config, joinCode, centralUrl) {
+  const central = isPlainObject(config.central_server)
+    ? config.central_server
+    : { url: centralUrl, identity: {} }
+  const identity = isPlainObject(central.identity) ? central.identity : {}
+  return {
+    ...config,
+    central_server: {
+      ...central,
+      url: typeof central.url === 'string' ? central.url : centralUrl,
+      identity: {
+        ...identity,
+        bootstrap_token: joinCode,
+      },
+    },
+  }
 }
 
 /**

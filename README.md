@@ -28,6 +28,20 @@ docker pull ghcr.io/hyparam/collectivus:latest
 docker run --rm ghcr.io/hyparam/collectivus:latest --help
 ```
 
+The image entrypoint is the `ctvs` CLI. Choose what the container runs by
+passing the same arguments you would pass to `ctvs`:
+
+```bash
+# Central server, gateway, or standalone: selected by role in the config file.
+docker run --rm ghcr.io/hyparam/collectivus:latest --config /config/collectivus.json
+
+# Hosted-discovery rendezvous server: selected by the rendezvous subcommand.
+docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
+```
+
+To run Central server and rendezvous on the same host, run two containers from
+the same image with separate commands, ports, and data volumes.
+
 ## Quick start: record claude-code
 
 The fastest path is the interactive walkthrough. Run `ctvs` with no

@@ -9,6 +9,7 @@ import {
   defaultLogDir,
   defaultPlistPath,
   readInstalledPlist as defaultReadInstalledPlist,
+  readPackageVersion,
 } from './common.js'
 import { isLaunchAgentInstalled as defaultIsLaunchAgentInstalled, launchAgentStatus as defaultLaunchAgentStatus } from '../daemon/macos.js'
 
@@ -77,6 +78,15 @@ export async function runStatus(argv, hooks = {}) {
   const fallbackConfigPath = hooks.configPath ?? defaultConfigPath()
 
   let exitCode = 0
+
+  /** @type {string | undefined} */
+  let version
+  try {
+    version = (hooks.readVersion ?? readPackageVersion)()
+  } catch (err) {
+    stderr.write(`warning: failed to read collectivus version: ${formatError(err)}\n`)
+  }
+  stdout.write(`collectivus${version ? ` v${version}` : ''}\n\n`)
 
   // --- Daemon section ---
   stdout.write('Daemon\n')

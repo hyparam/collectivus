@@ -618,6 +618,8 @@ export interface StatusHooks {
   statFile?: (p: string) => Promise<{ size: number, mtimeMs: number } | undefined>
   /** Count `*.jsonl` files under `dir` (recursive). Undefined when dir is missing. */
   countSinkFiles?: (dir: string) => Promise<number | undefined>
+  /** Override for reading the collectivus version from package.json. */
+  readVersion?: () => string
 }
 
 export interface InitHooks {

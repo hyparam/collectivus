@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import packageJson from '../package.json' with { type: 'json' }
 
 describe('package.json', () => {
@@ -29,5 +31,12 @@ describe('package.json', () => {
       'hyparquet-compressors': '1.1.1',
       squirreling: '0.12.19',
     })
+  })
+  it('ships the bundled Collectivus query skill', () => {
+    expect(packageJson.files).toContain('skills')
+    const skillPath = fileURLToPath(new URL('../skills/collectivus-query/SKILL.md', import.meta.url))
+    const referencePath = fileURLToPath(new URL('../skills/collectivus-query/references/query-cli.md', import.meta.url))
+    expect(fs.readFileSync(skillPath, 'utf8')).toMatch(/name: collectivus-query/)
+    expect(fs.readFileSync(referencePath, 'utf8')).toMatch(/ctvs query/)
   })
 })

@@ -471,6 +471,18 @@ Logical datasets are `logs`, `traces`, `metrics`, `proxy_exchanges`, and
 `proxy_stream_events`. `ctvs query schema <dataset>` prints the static schema,
 and `ctvs query catalog` shows which datasets have source and cached rows.
 
+### LLM skill
+
+Install the bundled `collectivus-query` skill so Claude Code and Codex know how
+to inspect local recordings with `ctvs query`:
+
+```bash
+ctvs skills install --client all
+```
+
+The skill assumes the default `~/.hyp/collectivus.json` config unless the agent
+discovers a non-default service config from `ctvs status` or the service unit.
+
 ## CLI
 
 ```text
@@ -600,6 +612,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 | `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
+| `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
 Claude Code unattended, or `--no` to skip the attach step.

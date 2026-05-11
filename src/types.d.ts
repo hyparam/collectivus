@@ -138,7 +138,9 @@ export type CollectivusRole = 'server' | 'gateway' | 'standalone'
 
 export interface IdentityIssuerConfig {
   /** HMAC secret used to sign control-plane JWTs. Must be ≥32 chars. */
-  secret: string
+  secret?: string
+  /** Environment variable containing the HMAC secret at runtime. */
+  secret_env?: string
   /** TTL applied to issued gateway JWTs. */
   jwt_ttl_seconds?: number
   /** TTL applied to operator-provisioned bootstrap tokens. */

@@ -46,6 +46,21 @@ docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
 To run Central server and rendezvous on the same host, run two containers from
 the same image with separate commands, ports, and data volumes.
 
+### AWS ECS
+
+This repo includes an AWS CDK app for running Central server and rendezvous as
+two ECS Fargate services backed by encrypted EFS state and a new private S3
+archive bucket:
+
+```bash
+cd infra/aws
+npm install
+npm run deploy -- -c imageUri=ghcr.io/hyparam/collectivus:latest
+```
+
+See [`infra/aws/README.md`](infra/aws/README.md) for TLS, VPC, ECS Exec, and
+operator-command details.
+
 ## Quick start: record claude-code
 
 The fastest path is the interactive walkthrough. Run `ctvs` with no
@@ -203,6 +218,15 @@ ctvs config delete gw-prod-1 --server-config /etc/collectivus-server.json
 These commands are local operator tools for the central server host. They read
 the server config only to find the same on-disk config registry and bootstrap
 token store used by the running central server.
+
+When the Central server config is injected through an environment variable
+(for example Docker/ECS with `--config-env COLLECTIVUS_SERVER_CONFIG`), use the
+matching operator flag:
+
+```bash
+ctvs config bootstrap-token issue gw-prod-1 \
+  --server-config-env COLLECTIVUS_SERVER_CONFIG
+```
 
 Gateway side, run the setup command printed by the token issuer:
 

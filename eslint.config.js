@@ -4,6 +4,15 @@ import globals from 'globals'
 
 export default [
   {
+    ignores: [
+      '.codex/**',
+      'cdk.out/**',
+      'infra/aws/cdk.out/**',
+      'infra/aws/node_modules/**',
+      'node_modules/**',
+    ],
+  },
+  {
     plugins: {
       jsdoc,
     },

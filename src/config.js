@@ -38,7 +38,7 @@ const ALLOWED_INGEST_KEYS = new Set([
   'max_pending_rows', 'high_water_pct', 'retry_after_seconds', 'max_bytes_per_second',
 ])
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
-  'secret', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
+  'secret', 'secret_env', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
 const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds', 'outbox_dir'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
@@ -370,12 +370,25 @@ function validateIngest(ingest) {
 function validateIdentityIssuer(issuer) {
   assertObject(issuer, '/server/identity_issuer')
   assertOnlyKeys(issuer, ALLOWED_IDENTITY_ISSUER_KEYS, '/server/identity_issuer')
-  assertNonEmptyString(issuer.secret, '/server/identity_issuer/secret')
-  if (issuer.secret.length < IDENTITY_SECRET_MIN_LENGTH) {
+  const hasSecret = issuer.secret !== undefined
+  const hasSecretEnv = issuer.secret_env !== undefined
+  if (hasSecret === hasSecretEnv) {
     throw new ConfigError(
-      `must be at least ${IDENTITY_SECRET_MIN_LENGTH} characters`,
-      { pointer: '/server/identity_issuer/secret' }
+      'must set exactly one of secret or secret_env',
+      { pointer: '/server/identity_issuer' }
     )
+  }
+  if (hasSecret) {
+    assertNonEmptyString(issuer.secret, '/server/identity_issuer/secret')
+    if (issuer.secret.length < IDENTITY_SECRET_MIN_LENGTH) {
+      throw new ConfigError(
+        `must be at least ${IDENTITY_SECRET_MIN_LENGTH} characters`,
+        { pointer: '/server/identity_issuer/secret' }
+      )
+    }
+  }
+  if (hasSecretEnv) {
+    assertNonEmptyString(issuer.secret_env, '/server/identity_issuer/secret_env')
   }
   if (issuer.jwt_ttl_seconds !== undefined) {
     assertPositiveInteger(issuer.jwt_ttl_seconds, '/server/identity_issuer/jwt_ttl_seconds')
@@ -385,6 +398,43 @@ function validateIdentityIssuer(issuer) {
   }
   if (issuer.bootstrap_store_path !== undefined) {
     assertNonEmptyString(issuer.bootstrap_store_path, '/server/identity_issuer/bootstrap_store_path')
+  }
+}
+
+/**
+ * Resolve runtime-only secret references after config inspection but before
+ * listeners start. This keeps config JSON safe for ECS task definitions while
+ * still giving the server the concrete secret it needs for JWT signing.
+ *
+ * @param {CollectivusConfig} config
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {CollectivusConfig}
+ */
+export function resolveRuntimeSecrets(config, env = process.env) {
+  const issuer = config.server?.identity_issuer
+  if (!issuer?.secret_env) return config
+  const secret = env[issuer.secret_env]
+  if (!secret) {
+    throw new ConfigError(
+      `environment variable ${issuer.secret_env} is not set`,
+      { pointer: '/server/identity_issuer/secret_env' }
+    )
+  }
+  if (secret.length < IDENTITY_SECRET_MIN_LENGTH) {
+    throw new ConfigError(
+      `environment variable ${issuer.secret_env} must be at least ${IDENTITY_SECRET_MIN_LENGTH} characters`,
+      { pointer: '/server/identity_issuer/secret_env' }
+    )
+  }
+  return {
+    ...config,
+    server: {
+      ...config.server,
+      identity_issuer: {
+        ...issuer,
+        secret,
+      },
+    },
   }
 }
 

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { ConfigError, isConfigUrl, loadConfig, loadConfigAsync } from '../src/config.js'
+import { ConfigError, isConfigUrl, loadConfig, loadConfigAsync, resolveRuntimeSecrets } from '../src/config.js'
 
 /** @type {string} */
 let tmpDir
@@ -619,7 +619,67 @@ describe('loadConfig - role / server / central_server', () => {
         identity_issuer: {},
       },
     })
-    expect(() => loadConfig(p)).toThrow(/identity_issuer\/secret/)
+    expect(() => loadConfig(p)).toThrow(/identity_issuer.*secret or secret_env/)
+  })
+
+  it('accepts identity_issuer.secret_env for runtime secret injection', () => {
+    const cfg = {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        identity_issuer: { secret_env: 'COLLECTIVUS_IDENTITY_ISSUER_SECRET' },
+      },
+    }
+    const p = writeJson('issuer-secret-env.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects identity_issuer with both secret and secret_env', () => {
+    const p = writeJson('issuer-secret-both.json', {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        identity_issuer: { secret: SECRET, secret_env: 'COLLECTIVUS_IDENTITY_ISSUER_SECRET' },
+      },
+    })
+    expect(() => loadConfig(p)).toThrow(/identity_issuer.*exactly one/)
+  })
+
+  it('resolves identity_issuer.secret_env from runtime env', () => {
+    /** @type {import('../src/types.js').CollectivusConfig} */
+    const cfg = {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        identity_issuer: { secret_env: 'COLLECTIVUS_IDENTITY_ISSUER_SECRET' },
+      },
+    }
+    expect(resolveRuntimeSecrets(cfg, { COLLECTIVUS_IDENTITY_ISSUER_SECRET: SECRET })).toEqual({
+      ...cfg,
+      server: {
+        ...cfg.server,
+        identity_issuer: {
+          ...cfg.server.identity_issuer,
+          secret: SECRET,
+        },
+      },
+    })
+  })
+
+  it('rejects unresolved identity_issuer.secret_env at runtime', () => {
+    /** @type {import('../src/types.js').CollectivusConfig} */
+    const cfg = {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        identity_issuer: { secret_env: 'COLLECTIVUS_IDENTITY_ISSUER_SECRET' },
+      },
+    }
+    expect(() => resolveRuntimeSecrets(cfg, {})).toThrow(/COLLECTIVUS_IDENTITY_ISSUER_SECRET is not set/)
   })
 
   it('accepts optional jwt_ttl_seconds and bootstrap_ttl_seconds', () => {

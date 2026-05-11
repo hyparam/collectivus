@@ -1,6 +1,11 @@
 import fs from 'node:fs'
 import process from 'node:process'
-import { ConfigError, loadConfig as defaultLoadConfig, validateCollectivusConfig } from '../config.js'
+import {
+  ConfigError,
+  loadConfig as defaultLoadConfig,
+  parseConfig as parseCollectivusConfig,
+  validateCollectivusConfig,
+} from '../config.js'
 import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from '../gateway_id.js'
 import { sha256Hex } from '../rendezvous/store.js'
 import { createConfigRegistry, deleteConfig, getConfig, listGateways, resolveConfigsDir, setConfig } from '../server/config_registry.js'
@@ -23,7 +28,8 @@ const USAGE = `Usage:
   ctvs config bootstrap-token revoke <gateway-id> --server-config <path>
 
 Options:
-  --server-config <path>   Path to the server's collectivus.json config (required)
+  --server-config <path>   Path to the server's collectivus.json config
+  --server-config-env <e>  Environment variable containing the server config JSON
   --file <path>            For \`set\`: path to the JSON config to register
   --yes, -y                For \`delete\`: skip the interactive confirmation
   --ttl-seconds <n>        For \`bootstrap-token issue\`: TTL override in seconds
@@ -33,6 +39,7 @@ Options:
   --help, -h               Show this help`
 
 const RENDEZVOUS_TOKEN_ENV = 'COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN'
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * Parse the argument list of `collectivus config <subcommand>`.
@@ -64,14 +71,17 @@ export function parseConfigArgs(argv) {
 function parseSet(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   /** @type {string | undefined} */ let file
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     if (arg === '--file' || arg.startsWith('--file=')) {
@@ -87,9 +97,10 @@ function parseSet(argv) {
   if (!gatewayId) return parseError('gateway-id is required')
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
-  if (!serverConfig) return parseError('--server-config is required')
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
   if (!file) return parseError('--file is required')
-  return { kind: 'set', gatewayId, serverConfig, file }
+  return withServerConfigSource({ kind: 'set', gatewayId, file }, serverConfig, serverConfigEnv)
 }
 
 /**
@@ -99,13 +110,16 @@ function parseSet(argv) {
 function parseGet(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     if (arg.startsWith('-')) return parseError(`unknown argument: ${arg}`)
@@ -115,8 +129,9 @@ function parseGet(argv) {
   if (!gatewayId) return parseError('gateway-id is required')
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
-  if (!serverConfig) return parseError('--server-config is required')
-  return { kind: 'get', gatewayId, serverConfig }
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
+  return withServerConfigSource({ kind: 'get', gatewayId }, serverConfig, serverConfigEnv)
 }
 
 /**
@@ -125,19 +140,23 @@ function parseGet(argv) {
  */
 function parseList(argv) {
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     return parseError(`unknown argument: ${arg}`)
   }
-  if (!serverConfig) return parseError('--server-config is required')
-  return { kind: 'list', serverConfig }
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
+  return withServerConfigSource({ kind: 'list' }, serverConfig, serverConfigEnv)
 }
 
 /**
@@ -147,14 +166,17 @@ function parseList(argv) {
 function parseDelete(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   let yes = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     if (arg === '--yes' || arg === '-y') { yes = true; continue }
@@ -165,8 +187,9 @@ function parseDelete(argv) {
   if (!gatewayId) return parseError('gateway-id is required')
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
-  if (!serverConfig) return parseError('--server-config is required')
-  return { kind: 'delete', gatewayId, serverConfig, yes }
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
+  return withServerConfigSource({ kind: 'delete', gatewayId, yes }, serverConfig, serverConfigEnv)
 }
 
 /**
@@ -189,16 +212,19 @@ function parseBootstrapToken(argv) {
 function parseTokenIssue(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   /** @type {number | undefined} */ let ttlSeconds
   /** @type {string | undefined} */ let rendezvous
   /** @type {string | undefined} */ let rendezvousToken
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     if (arg === '--ttl-seconds' || arg.startsWith('--ttl-seconds=')) {
@@ -231,10 +257,11 @@ function parseTokenIssue(argv) {
   if (!gatewayId) return parseError('gateway-id is required')
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
-  if (!serverConfig) return parseError('--server-config is required')
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
   if (rendezvousToken && !rendezvous) return parseError('--rendezvous-token requires --rendezvous')
   /** @type {ParsedTokenIssue} */
-  const result = { kind: 'token-issue', gatewayId, serverConfig }
+  const result = withServerConfigSource({ kind: 'token-issue', gatewayId }, serverConfig, serverConfigEnv)
   if (ttlSeconds !== undefined) result.ttlSeconds = ttlSeconds
   if (rendezvous !== undefined) result.rendezvous = rendezvous
   if (rendezvousToken !== undefined) result.rendezvousToken = rendezvousToken
@@ -248,13 +275,16 @@ function parseTokenIssue(argv) {
 function parseTokenRevoke(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
+  /** @type {string | undefined} */ let serverConfigEnv
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
-    if (arg === '--server-config' || arg.startsWith('--server-config=')) {
-      const value = arg === '--server-config' ? argv[++i] : arg.slice('--server-config='.length)
-      if (!value) return parseError('--server-config requires a path')
-      serverConfig = value
+    const sourceFlag = parseServerConfigSourceFlag(arg, argv, i)
+    if (sourceFlag.matched) {
+      if (sourceFlag.error) return parseError(sourceFlag.error)
+      if (sourceFlag.serverConfig !== undefined) serverConfig = sourceFlag.serverConfig
+      if (sourceFlag.serverConfigEnv !== undefined) serverConfigEnv = sourceFlag.serverConfigEnv
+      i = sourceFlag.index
       continue
     }
     if (arg.startsWith('-')) return parseError(`unknown argument: ${arg}`)
@@ -264,8 +294,59 @@ function parseTokenRevoke(argv) {
   if (!gatewayId) return parseError('gateway-id is required')
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
-  if (!serverConfig) return parseError('--server-config is required')
-  return { kind: 'token-revoke', gatewayId, serverConfig }
+  const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
+  if (sourceError) return sourceError
+  return withServerConfigSource({ kind: 'token-revoke', gatewayId }, serverConfig, serverConfigEnv)
+}
+
+/**
+ * @param {string} arg
+ * @param {string[]} argv
+ * @param {number} index
+ * @returns {{ matched: false } | { matched: true, index: number, serverConfig?: string, serverConfigEnv?: string, error?: string }}
+ */
+function parseServerConfigSourceFlag(arg, argv, index) {
+  if (arg === '--server-config' || arg.startsWith('--server-config=')) {
+    const value = arg === '--server-config' ? argv[index + 1] : arg.slice('--server-config='.length)
+    if (!value) return { matched: true, index, error: '--server-config requires a path' }
+    return { matched: true, index: arg === '--server-config' ? index + 1 : index, serverConfig: value }
+  }
+  if (arg === '--server-config-env' || arg.startsWith('--server-config-env=')) {
+    const value = arg === '--server-config-env' ? argv[index + 1] : arg.slice('--server-config-env='.length)
+    if (!value) return { matched: true, index, error: '--server-config-env requires an environment variable name' }
+    if (!ENV_NAME_PATTERN.test(value)) {
+      return { matched: true, index, error: '--server-config-env must be an environment variable name' }
+    }
+    return { matched: true, index: arg === '--server-config-env' ? index + 1 : index, serverConfigEnv: value }
+  }
+  return { matched: false }
+}
+
+/**
+ * @param {string | undefined} serverConfig
+ * @param {string | undefined} serverConfigEnv
+ * @returns {ParsedError | undefined}
+ */
+function validateServerConfigSource(serverConfig, serverConfigEnv) {
+  if (!serverConfig && !serverConfigEnv) return parseError('--server-config or --server-config-env is required')
+  if (serverConfig && serverConfigEnv) {
+    return parseError('--server-config and --server-config-env are mutually exclusive')
+  }
+  return undefined
+}
+
+/**
+ * @template {object} T
+ * @param {T} result
+ * @param {string | undefined} serverConfig
+ * @param {string | undefined} serverConfigEnv
+ * @returns {T & { serverConfig?: string, serverConfigEnv?: string }}
+ */
+function withServerConfigSource(result, serverConfig, serverConfigEnv) {
+  const out = /** @type {T & { serverConfig?: string, serverConfigEnv?: string }} */ (result)
+  if (serverConfig !== undefined) out.serverConfig = serverConfig
+  if (serverConfigEnv !== undefined) out.serverConfigEnv = serverConfigEnv
+  return out
 }
 
 /**
@@ -330,7 +411,7 @@ export async function runConfig(argv, hooks = {}) {
   /** @type {CollectivusConfig} */
   let serverConfig
   try {
-    serverConfig = loadConfigFn(parsed.serverConfig)
+    serverConfig = loadServerConfig(parsed, { env, loadConfig: loadConfigFn })
   } catch (err) {
     if (err instanceof ConfigError) {
       stderr.write(`error: server config: ${err.message}\n`)
@@ -340,7 +421,7 @@ export async function runConfig(argv, hooks = {}) {
   }
 
   if (serverConfig.role !== 'server' || !serverConfig.server) {
-    stderr.write('error: --server-config must point at a config with role: "server" (the operator CLI runs on the server host)\n')
+    stderr.write('error: server config must have role: "server" (the operator CLI runs on the server host)\n')
     return 1
   }
   const server = serverConfig.server
@@ -358,6 +439,21 @@ export async function runConfig(argv, hooks = {}) {
     return 1
   }
   }
+}
+
+/**
+ * @param {{ serverConfig?: string, serverConfigEnv?: string }} parsed
+ * @param {{ env: NodeJS.ProcessEnv, loadConfig: (p: string) => CollectivusConfig }} ctx
+ * @returns {CollectivusConfig}
+ */
+function loadServerConfig(parsed, ctx) {
+  if (parsed.serverConfigEnv) {
+    const raw = ctx.env[parsed.serverConfigEnv]
+    if (!raw) throw new ConfigError(`environment variable ${parsed.serverConfigEnv} is not set`)
+    return parseCollectivusConfig(raw, `env:${parsed.serverConfigEnv}`)
+  }
+  if (!parsed.serverConfig) throw new ConfigError('missing server config source')
+  return ctx.loadConfig(parsed.serverConfig)
 }
 
 /**

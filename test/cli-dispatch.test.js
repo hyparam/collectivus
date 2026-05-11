@@ -53,6 +53,12 @@ describe('bin/cli.js — subcommand dispatch', function() {
     expect(r.stdout).toMatch(/Usage:\s+collectivus status/)
   })
 
+  it('dispatches `config --help`', async function() {
+    const r = await runCli(['config', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+collectivus config set/)
+  })
+
   it('dispatches `export --help`', async function() {
     const r = await runCli(['export', '--help'])
     expect(r.exitCode).toBe(0)

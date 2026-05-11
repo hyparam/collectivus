@@ -53,7 +53,7 @@ describe('parseArgs', () => {
   it('requires --config', () => {
     const r = parseArgs([])
     expect(r.mode).toBe('error')
-    if (r.mode === 'error') expect(r.message).toMatch(/--config <path> is required/)
+    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url> is required/)
   })
 
   it('parses --config <path>', () => {
@@ -146,7 +146,7 @@ describe('run() — help and arg errors', () => {
     const stderr = memo()
     const code = await run([], {}, { stdout, stderr })
     expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config <path> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url> is required/)
     expect(stderr.value()).toMatch(/Usage:/)
   })
 })
@@ -177,7 +177,7 @@ describe('run() — walkthrough dispatch', () => {
     })
     expect(code).toBe(2)
     expect(initCalls).toBe(0)
-    expect(stderr.value()).toMatch(/--config <path> is required/)
+    expect(stderr.value()).toMatch(/--config <path\|url> is required/)
   })
 })
 

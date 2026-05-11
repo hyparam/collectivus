@@ -282,8 +282,8 @@ describe('runInit', function() {
         defaultConfigPath: absentDefaultCfg,
       })
       expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "oops"\)/)
-      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "7"\)/)
+      expect(stderr.value()).toMatch(/please choose 1, 2, 3, or 4 \(got "oops"\)/)
+      expect(stderr.value()).toMatch(/please choose 1, 2, 3, or 4 \(got "7"\)/)
       expect(asked.filter(function(q) { return q === 'Choose [1]: ' })).toHaveLength(3)
       expect(fs.existsSync(cfgPath)).toBe(true)
     })
@@ -555,6 +555,230 @@ describe('runInit', function() {
         signals: ['logs', 'traces', 'metrics'],
       })
       expect(stdout.value()).toMatch(/AWS_ACCESS_KEY_ID/)
+    })
+  })
+
+  describe('gateway-mode walkthrough', function() {
+    it('writes a valid role:gateway config with central_server + poll_interval_seconds', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gw.json')
+      const sinkDir = path.join(tmpDir, 'gw-sink')
+      const { prompt, asked } = scriptedPrompt([
+        '3', // gateway mode
+        'https://central.example.com:8788', // central server URL
+        '60', // poll_interval_seconds override
+        '1', // capture mode: proxy only
+        '1', // anthropic
+        '', // default proxy listen
+        sinkDir,
+        cfgPath, // save path
+        'y', // confirm write
+        'n', // decline daemon install
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+        defaultSinkDir: sinkDir,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.version).toBe(1)
+      expect(written.role).toBe('gateway')
+      expect(written.central_server.url).toBe('https://central.example.com:8788')
+      expect(written.central_server.poll_interval_seconds).toBe(60)
+      expect(written.central_server.identity).toEqual({})
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.proxy.upstreams[0].name).toBe('anthropic')
+      expect(written.sink.dir).toBe(sinkDir)
+      expect(written.otel).toBeUndefined()
+      const loaded = loadConfig(cfgPath)
+      expect(loaded.role).toBe('gateway')
+      expect(stdout.value()).toMatch(/collectivus config set <gateway-id>/)
+      expect(stdout.value()).toMatch(/before this gateway will see anything to load/)
+      expect(stdout.value()).toMatch(/bootstrap_token in/)
+      expect(asked.some(function(q) { return /bootstrap.token/i.test(q) })).toBe(false)
+    })
+
+    it('omits poll_interval_seconds when the user accepts the default', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gw.json')
+      const { prompt } = scriptedPrompt([
+        '3', // gateway mode
+        'https://central.example.com:8788',
+        '', // accept default poll interval (omitted from config)
+        '2', // capture: otel only
+        '127.0.0.1:4319', // otel listen override
+        path.join(tmpDir, 'gw-sink'),
+        cfgPath,
+        'y',
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.central_server.poll_interval_seconds).toBeUndefined()
+      expect(written.proxy).toBeUndefined()
+      expect(written.otel.listen).toBe('127.0.0.1:4319')
+    })
+
+    it('re-prompts on out-of-range poll_interval_seconds', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gw.json')
+      const { prompt, asked } = scriptedPrompt([
+        '3',
+        'https://central.example.com:8788',
+        '0', // below 5
+        '4000', // above 3600
+        'banana', // not a number
+        '15', // valid
+        '1', // capture: proxy only
+        '1', '', // anthropic, default listen
+        path.join(tmpDir, 'gw-sink'),
+        cfgPath,
+        'y', 'n',
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.central_server.poll_interval_seconds).toBe(15)
+      expect(stderr.value()).toMatch(/must be an integer between 5 and 3600/)
+      expect(asked.filter(function(q) { return q.startsWith('Poll interval') })).toHaveLength(4)
+    })
+
+    it('re-prompts on invalid central server URL', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gw.json')
+      const { prompt, asked } = scriptedPrompt([
+        '3',
+        '', // empty rejected
+        'not a url', // unparseable rejected
+        'https://central.example.com:8788',
+        '', // default poll interval
+        '1', // capture proxy
+        '1', '', // anthropic, default listen
+        path.join(tmpDir, 'gw-sink'),
+        cfgPath, 'y', 'n',
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      expect(stderr.value()).toMatch(/url is required/)
+      expect(stderr.value()).toMatch(/url must be a valid URL/)
+      expect(asked.filter(function(q) { return q === 'Central server URL: ' })).toHaveLength(3)
+    })
+  })
+
+  describe('server-mode walkthrough', function() {
+    it('writes a valid role:server config with the operator-supplied data_dir', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'server.json')
+      const dataDir = path.join(tmpDir, 'server-data')
+      const { prompt } = scriptedPrompt([
+        '4', // server mode
+        '', // accept default control-plane listen
+        dataDir, // server data directory
+        '', // generate identity-issuer secret
+        '', // no S3 upload
+        cfgPath, // save path
+        'y', // confirm write
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.version).toBe(1)
+      expect(written.role).toBe('server')
+      expect(written.server.control_plane_listen).toBe('0.0.0.0:8788')
+      expect(written.server.data_dir).toBe(dataDir)
+      expect(written.server.sink_dir).toBe(path.join(dataDir, 'ingested'))
+      expect(written.server.identity_issuer.bootstrap_store_path).toBe(path.join(dataDir, 'bootstrap.json'))
+      expect(typeof written.server.identity_issuer.secret).toBe('string')
+      expect(written.server.identity_issuer.secret.length).toBe(64)
+      expect(written.server.identity_issuer.secret).toMatch(/^[0-9a-f]+$/)
+      const loaded = loadConfig(cfgPath)
+      expect(loaded.role).toBe('server')
+      expect(stdout.value()).toMatch(/collectivus config bootstrap-token issue/)
+      expect(stdout.value()).toMatch(/collectivus config set <gateway-id>/)
+    })
+
+    it('falls back to a generated secret when the operator-supplied value is too short', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'server.json')
+      const { prompt } = scriptedPrompt([
+        '4',
+        '127.0.0.1:9999', // explicit control-plane listen
+        '', // default data_dir
+        'too-short', // shorter than 32 chars
+        '', // no upload
+        cfgPath,
+        'y',
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      expect(stderr.value()).toMatch(/secret shorter than 32 chars/)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.server.identity_issuer.secret).not.toBe('too-short')
+      expect(written.server.identity_issuer.secret.length).toBe(64)
+    })
+
+    it('attaches an upload block when the operator opts in', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'server.json')
+      const { prompt } = scriptedPrompt([
+        '4',
+        '', // default listen
+        path.join(tmpDir, 'server-data'),
+        '', // generate secret
+        'y', // upload
+        'my-server-archive', // bucket
+        '', // default region
+        '', // default prefix
+        '', // default time
+        '', // default signals
+        '', // no custom endpoint
+        cfgPath,
+        'y',
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.upload.bucket).toBe('my-server-archive')
     })
   })
 

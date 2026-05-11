@@ -117,9 +117,230 @@ export interface UploadConfig {
   endpoint?: string
 }
 
+/**
+ * Operating mode for this collectivus instance. `standalone` (default when
+ * `role` is absent) preserves single-binary behavior. `server` and `gateway`
+ * activate the central-server / local-gateway split introduced by Epic A.
+ */
+export type CollectivusRole = 'server' | 'gateway' | 'standalone'
+
+export interface IdentityIssuerConfig {
+  /** HMAC secret used to sign control-plane JWTs. Must be ≥32 chars. */
+  secret: string
+  /** TTL applied to issued gateway JWTs. */
+  jwt_ttl_seconds?: number
+  /** TTL applied to operator-provisioned bootstrap tokens. */
+  bootstrap_ttl_seconds?: number
+  /**
+   * Filesystem path to the bootstrap-token store. Required when the server
+   * should accept `POST /v1/identity/bootstrap` — when omitted, the bootstrap
+   * endpoint returns 503 (refresh and ordinary auth still work).
+   */
+  bootstrap_store_path?: string
+}
+
+/** Standard claims this server emits and accepts on control-plane JWTs. */
+export interface JwtClaims {
+  /** Subject — the gateway identity this token represents. */
+  sub: string
+  /** Issued-at, seconds since the unix epoch. */
+  iat: number
+  /** Expiration, seconds since the unix epoch. */
+  exp: number
+}
+
+/** Result of `verifyJwt`. */
+export type JwtVerifyResult =
+  | { valid: true, claims: JwtClaims }
+  | { valid: false, error: 'malformed' | 'bad_signature' | 'expired' | 'iat_in_future' }
+
+/** A persisted bootstrap-token record. The plaintext token is never stored. */
+export interface BootstrapRecord {
+  /** sha256 hex of the plaintext bootstrap token. */
+  tokenHash: string
+  /** Gateway identity this token will mint a JWT for. */
+  gatewayId: string
+  /** Expiration, seconds since the unix epoch. */
+  expiresAt: number
+  /** Whether the token has already been redeemed. */
+  used: boolean
+}
+
+/** Result of `issueFromBootstrap`. */
+export type IssueFromBootstrapResult =
+  | { ok: true, jwt: string, expiresAt: number, gatewayId: string }
+  | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }
+
+/**
+ * Gateway-side persisted identity. Written by `IdentityClient` after a
+ * successful `bootstrap` or `refresh`, read on subsequent gateway start so
+ * the JWT survives process restarts.
+ */
+export interface PersistedIdentity {
+  /** The control-plane JWT this gateway uses for every authenticated call. */
+  jwt: string
+  /** Expiration of `jwt`, seconds since the unix epoch. */
+  expires_at: number
+  /** Gateway identity claim (`sub`) recovered from the JWT at issue time. */
+  gateway_id: string
+}
+
+export interface ServerConfig {
+  /** host:port for the control-plane HTTP listener (separate from OTLP/proxy). */
+  control_plane_listen: string
+  /** JWT issuer settings for the control-plane. */
+  identity_issuer: IdentityIssuerConfig
+  /**
+   * Filesystem root for server-side state (per-gateway config registry,
+   * future log-ingest spool, etc). Defaults to `~/.hyp/collectivus/server-data`
+   * when omitted.
+   */
+  data_dir?: string
+  /**
+   * Filesystem root where the ingest endpoint persists shipped rows. Files
+   * live at `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`. Distinct
+   * from server `data_dir` (which holds configs / bootstrap tokens). Default:
+   * `~/.hyp/collectivus/server-data/ingested`.
+   */
+  sink_dir?: string
+  /** Backpressure / disk I/O throttle settings for the ingest endpoint. */
+  ingest?: IngestThrottleConfig
+}
+
+/**
+ * Server-side ingest throttle settings. All fields are optional and fall back
+ * to defaults that match the spec in epic C.2: 50000 pending rows, 80%
+ * high-water mark, 5s `Retry-After`, no disk-rate ceiling.
+ */
+export interface IngestThrottleConfig {
+  /**
+   * Maximum rows queued for fsync before the endpoint starts emitting
+   * backpressure. A request that arrives while the queue is at or past this
+   * value is rejected with 503. Default 50000.
+   */
+  max_pending_rows?: number
+  /**
+   * Percentage of `max_pending_rows` at which the endpoint starts emitting
+   * 429 with `Retry-After`. Must be 1..100. Default 80.
+   */
+  high_water_pct?: number
+  /**
+   * Value emitted in the `Retry-After` response header when backpressure
+   * triggers. Must be a positive integer (whole seconds). Default 5.
+   */
+  retry_after_seconds?: number
+  /**
+   * Per-process disk-write ceiling, in bytes per second. Implemented as a
+   * 1-second token bucket: bursts up to `max_bytes_per_second` are allowed,
+   * sustained throughput is capped at the same value. Omit (the default) to
+   * disable disk-rate throttling entirely.
+   */
+  max_bytes_per_second?: number
+}
+
+/** A per-gateway config entry held by the server-side registry. */
+export interface ConfigRegistryEntry {
+  /** The gateway-shaped CollectivusConfig persisted for this gateway. */
+  config: CollectivusConfig
+  /** SHA-256 hex of the canonical JSON serialization of `config`. */
+  etag: string
+}
+
+/** Signal kinds accepted on `POST /v1/ingest/:signal`. */
+export type IngestSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
+
+/** Response body shape for the ingest endpoint. */
+export interface IngestResponse {
+  /** Number of rows successfully persisted. */
+  accepted: number
+  /**
+   * 1-indexed line number where parsing failed. Present only on the partial-
+   * success / malformed-batch path (HTTP 400).
+   */
+  rejected_at_line?: number
+  /** Human-readable reason for the rejection. Present only on HTTP 400. */
+  error?: string
+}
+
+/**
+ * Subset of `IdentityClient` that `ShippingSink` actually needs. Declared
+ * structurally so tests can supply a small fake without re-implementing the
+ * full identity lifecycle, mirroring the `IdentitySource` pattern used by
+ * `ConfigClient`.
+ */
+export interface ShippingSinkIdentitySource {
+  /** Resolve to the current bearer JWT, refreshing in-place if near expiry. */
+  getCurrentJwt(): Promise<string>
+  /** Force a refresh against the central server. */
+  refresh(): Promise<void>
+}
+
+/** Per-signal flush thresholds for `ShippingSink`. */
+export interface ShippingSinkBatchOptions {
+  /** Maximum rows per batch before a flush. Default 1000. */
+  maxRows?: number
+  /** Maximum bytes per batch (NDJSON, including newlines) before a flush. Default 1048576 (1 MB). */
+  maxBytes?: number
+  /** Maximum seconds the oldest row may sit in a batch before a flush. Default 5. */
+  maxSeconds?: number
+}
+
+/** Construction options for `ShippingSink`. */
+export interface ShippingSinkOptions {
+  /** Base URL of the central control-plane server (same as `central_server.url`). */
+  centralUrl: string
+  /** Identity source providing JWTs and refresh — typically the gateway's `IdentityClient`. */
+  identityClient: ShippingSinkIdentitySource
+  /**
+   * Signal label embedded in the ingest URL (`/v1/ingest/<signal>`). Default
+   * `proxy`, matching the only existing `Sink` consumer (the recorder). Future
+   * multi-signal variants will override per-instance or route per-row.
+   */
+  signal?: IngestSignal
+  /** Batching thresholds. Defaults match the bead spec (1000 / 1 MB / 5 s). */
+  batch?: ShippingSinkBatchOptions
+}
+
+export interface CentralServerIdentityConfig {
+  /** Operator-provisioned bootstrap token, exchanged on first start. */
+  bootstrap_token?: string
+  /** Filesystem path where the long-lived JWT is persisted. */
+  persisted_path?: string
+}
+
+export interface CentralServerConfig {
+  /** Base URL of the central control-plane server. */
+  url: string
+  /** Identity material used by the gateway to authenticate. */
+  identity: CentralServerIdentityConfig
+  /**
+   * Background config-pull interval in seconds. Default 30. Validator
+   * constrains to [5, 3600]: the floor is the minimum useful resolution for
+   * "hot reload" semantics; the ceiling keeps a misconfigured gateway from
+   * drifting hours behind a config change.
+   */
+  poll_interval_seconds?: number
+}
+
+/**
+ * Emitted by `ConfigClient` whenever a `GET /v1/config` returns 200 with a
+ * config that passes gateway-side validation. B.4's hot-reload code subscribes
+ * to this and diffs `newConfig` against the running config.
+ */
+export interface ConfigChangedEvent {
+  /** The newly fetched config — already validated. */
+  newConfig: CollectivusConfig
+  /** SHA-256 hex of the canonical JSON serialization of `newConfig`. */
+  etag: string
+  /** ISO-8601 timestamp of the moment the gateway accepted the config. */
+  fetchedAt: string
+}
+
 export interface CollectivusConfig {
   /** Schema version. Always 1 in this binary. */
   version: 1
+  /** Operating mode. Defaults to `standalone` when omitted. */
+  role?: CollectivusRole
   /** OTLP receiver. Omit to disable. */
   otel?: OtelConfig
   /** Proxy listener. Omit to disable. */
@@ -128,6 +349,10 @@ export interface CollectivusConfig {
   sink?: FileSinkConfig
   /** Reserved upload section. Schema-validated only; uploader wires up later. */
   upload?: UploadConfig
+  /** Server-mode (control-plane) settings. Required iff `role === 'server'`. */
+  server?: ServerConfig
+  /** Gateway-mode central-server settings. Required iff `role === 'gateway'`. */
+  central_server?: CentralServerConfig
 }
 
 // ---------- Collector / OTLP normalization ----------

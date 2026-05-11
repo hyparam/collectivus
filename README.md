@@ -113,6 +113,62 @@ and makes `sink` mandatory whenever `otel` or `proxy` is set. v0 configs
 (missing the `version` field) hard-fail with a clear error — the walkthrough
 writes v1 only.
 
+## Config vending (multi-host deployments)
+
+For fleets of gateways behind a single audit/storage backend, run one
+collectivus host as a `role: server` central control plane and point each
+gateway at it as `role: gateway`. The server vendors per-gateway configs over
+`GET /v1/config` (with `If-None-Match` / `ETag`) and accepts ingest from each
+gateway. Gateways pull their config every `central_server.poll_interval_seconds`
+(default 30, range 5–3600) and hot-reload only the listener whose section
+changed.
+
+Operator workflow on the server host:
+
+```bash
+# 1. Issue a one-shot bootstrap token for a new gateway. Hand the printed token
+#    to the gateway operator over a secure channel — it can be redeemed exactly
+#    once.
+collectivus config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
+# → bt_abc123...
+
+# 2. Register the per-gateway config the gateway will pull. Validated server-
+#    side; an invalid file is rejected before any bytes hit disk.
+collectivus config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
+
+# 3. Inspect / list / delete as needed.
+collectivus config get gw-prod-1 --server-config /etc/collectivus-server.json
+collectivus config list --server-config /etc/collectivus-server.json
+collectivus config delete gw-prod-1 --server-config /etc/collectivus-server.json
+```
+
+Gateway side, with the token pasted into `central_server.identity.bootstrap_token`:
+
+```jsonc
+// /etc/collectivus.json (gateway)
+{
+  "version": 1,
+  "role": "gateway",
+  "central_server": {
+    "url": "https://collectivus.internal:8788",
+    "identity": { "bootstrap_token": "bt_abc123..." }
+  }
+}
+```
+
+```bash
+collectivus --config /etc/collectivus.json
+# → exchanges the bootstrap token for a 30-day JWT, persists it to
+#   ~/.hyp/collectivus/identity.json, then begins polling /v1/config.
+```
+
+Once the gateway has a JWT, the bootstrap token can be removed from the config
+— refresh against the central server takes over until the JWT itself rotates.
+
+The interactive walkthrough builds either side: `npx collectivus` with no args
+offers options 4 (Gateway) and 5 (Server) alongside the standard standalone
+flow.
+
 ## S3 upload
 
 Collectivus always writes raw JSONL to your local sink directory. When the

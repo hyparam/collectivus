@@ -2,15 +2,37 @@ import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfigAsync } from './config.js'
+import { ConfigClient } from './gateway/config_client.js'
+import { applyDiff, diffConfig } from './gateway/hot_reload.js'
+import { IdentityClient } from './gateway/identity.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
+import { ControlPlane } from './server/control_plane.js'
+import { defaultSinkDir as defaultIngestSinkDir } from './server/ingest.js'
 import { FileSink } from './sinks/file.js'
 import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
 
 /**
+ * Partition layout the server-mode parquet drain walks. Matches the path
+ * the NDJSON ingest endpoint writes:
+ * `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+ *
+ * @type {ReadonlyArray<string>}
+ */
+const SERVER_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
+
+/**
  * @import { Server } from 'node:http'
- * @import { ErrorResult, ParseResult, StartedListener, ListenerFactory, CollectivusConfig } from './types.js'
+ * @import { ErrorResult, ParseResult, StartedListener, ListenerFactory, CollectivusConfig, ConfigChangedEvent } from './types.js'
+ */
+
+/**
+ * @typedef {{
+ *   initialConfig: CollectivusConfig,
+ *   configClient: ConfigClient,
+ *   factoryBuilder: (cfg: CollectivusConfig) => Map<string, ListenerFactory>,
+ * }} HotReloadWiring
  */
 
 const USAGE = `Usage:
@@ -29,7 +51,11 @@ Commands:
   collectivus detach [--client claude|codex|all]
                                                Restore Claude Code and/or Codex config
   collectivus status                           Report daemon, config, recordings, attach state
-  collectivus export --config <path|url> [...] Convert recorded JSONL to Parquet`
+  collectivus export --config <path|url> [...] Convert recorded JSONL to Parquet
+  collectivus config <set|get|list|delete|bootstrap-token> ...
+                                               Operator CLI for per-gateway configs
+
+Run \`collectivus <subcommand> --help\` for subcommand-specific options.`
 
 const DRAIN_TIMEOUT_MS = 5000
 const SELF_UPDATE_TIME_UTC = '03:00'
@@ -59,7 +85,7 @@ export function parseArgs(argv) {
 
     if (arg === '--config' || arg.startsWith('--config=')) {
       const value = arg === '--config' ? argv[++i] : arg.slice('--config='.length)
-      if (!value) return parseError('--config requires a path')
+      if (!value) return parseError('--config requires a path or URL')
       configPath = value
       continue
     }
@@ -78,7 +104,7 @@ export function parseArgs(argv) {
   }
 
   if (configPath === undefined) {
-    return parseError('--config <path> is required')
+    return parseError('--config <path|url> is required')
   }
 
   return { mode: 'config', configPath, printConfig, strict }
@@ -166,20 +192,77 @@ export async function run(argv, env, hooks = {}) {
     return 1
   }
 
-  return runLifecycle(buildConfigListeners(config, { env, stderr }), stdout, stderr, onShutdownRequested)
+  // role: gateway must hold a valid JWT before any listener binds. Acquire
+  // here (eager, before runLifecycle) so a bad bootstrap token or unreachable
+  // central server fails with a clean stderr line and exit 1, without ever
+  // opening a port. The IdentityClient is then handed to buildConfigListeners
+  // for future epics (B config vending, C log shipping) to consume.
+  /** @type {IdentityClient | undefined} */
+  let identityClient
+  /** @type {ConfigClient | undefined} */
+  let configClient
+  if (config.role === 'gateway') {
+    if (!config.central_server) {
+      stderr.write('config error: role: gateway requires a central_server block (validator should have caught this).\n')
+      return 1
+    }
+    identityClient = new IdentityClient(config.central_server)
+    try {
+      const source = await identityClient.acquire()
+      const id = identityClient.identity
+      stdout.write(`Identity ${source} for ${id ? id.gateway_id : 'gateway'}\n`)
+    } catch (err) {
+      stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 1
+    }
+    // ConfigClient runs in the background. It is a normal listener — wired
+    // into stopAll via buildConfigListeners — so a SIGTERM stops the poll
+    // timer the same way it stops the proxy. Construct here (after identity
+    // has succeeded) rather than inside the factory so it's available to
+    // any future listener that wants to subscribe to `config-changed`.
+    configClient = new ConfigClient(config.central_server, identityClient, { stderr })
+  }
+
+  const ctx = { env, stderr, identityClient, configClient }
+  /**
+   * @param {CollectivusConfig} cfg
+   * @returns {Map<string, ListenerFactory>}
+   */
+  function factoryBuilder(cfg) {
+    return buildConfigListeners(cfg, ctx)
+  }
+  /** @type {HotReloadWiring | undefined} */
+  const hotReload = configClient
+    ? { initialConfig: config, configClient, factoryBuilder }
+    : undefined
+  return runLifecycle(factoryBuilder(config), stdout, stderr, onShutdownRequested, hotReload)
 }
 
 /**
  * @param {CollectivusConfig} config
- * @param {{ env?: NodeJS.ProcessEnv, stderr: { write: (s: string) => void } }} ctx
+ * @param {{
+ *   env?: NodeJS.ProcessEnv,
+ *   stderr: { write: (s: string) => void },
+ *   identityClient?: IdentityClient,
+ *   configClient?: ConfigClient,
+ * }} ctx
  *   `env` is forwarded to the uploader so its connector reads creds from the
  *   same env we pre-flighted in `run()`. `stderr` is consumed by the
- *   self-update factory for warning output.
- * @returns {ListenerFactory[]}
+ *   self-update factory for warning output. `identityClient` is set when
+ *   `config.role === 'gateway'` and `run()` has already acquired the JWT;
+ *   future epics (B config vending, C log shipping) will read this off `ctx`
+ *   to authenticate to the central server. `configClient` is the gateway's
+ *   background config-pull loop; the gateway lifecycle subscribes to its
+ *   `config-changed` event and feeds it into `applyDiff` for hot reload.
+ * @returns {Map<string, ListenerFactory>} Section-keyed factory map.
+ *   Section names: `otel`, `proxy`, `upload`, `server`, `configPoll`,
+ *   `selfUpdate`. Insertion order is preserved by `Map`, which `runLifecycle`
+ *   relies on to start listeners in dependency order (sink-owners before
+ *   config-poll, config-poll before self-update).
  */
 function buildConfigListeners(config, ctx) {
-  /** @type {ListenerFactory[]} */
-  const factories = []
+  /** @type {Map<string, ListenerFactory>} */
+  const factories = new Map()
 
   if (config.otel) {
     if (!config.sink) {
@@ -187,7 +270,7 @@ function buildConfigListeners(config, ctx) {
     }
     const { listen } = config.otel
     const outputDir = config.sink.dir
-    factories.push(async () => {
+    factories.set('otel', async () => {
       const { host, port } = parseListen(listen)
       const collector = new Collector({ host, port, outputDir })
       await collector.start()
@@ -205,7 +288,7 @@ function buildConfigListeners(config, ctx) {
     }
     const proxyConfig = config.proxy
     const sinkDir = config.sink.dir
-    factories.push(async () => {
+    factories.set('proxy', async () => {
       const sink = new FileSink(sinkDir)
       const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
       const proxy = new Proxy(proxyConfig, { recorder })
@@ -227,18 +310,36 @@ function buildConfigListeners(config, ctx) {
   }
 
   if (config.upload) {
-    if (!config.sink) {
-      throw new Error('upload is configured but sink is missing')
-    }
     const uploadConfig = config.upload
-    const sinkDir = config.sink.dir
+    // Server mode drains the multi-tenant ingest spool (`sink_dir`)
+    // partitioned by `gateway_id`/`signal`. Standalone keeps the
+    // single-tenant `services/<service>/<signal>-<date>.jsonl` layout.
+    let outputDir
+    /** @type {ReadonlyArray<string> | undefined} */
+    let partitionDimensions
+    if (config.role === 'server') {
+      const serverConfig = config.server
+      if (!serverConfig) {
+        throw new Error('role: server requires server block (validator should have caught this)')
+      }
+      outputDir = serverConfig.sink_dir ?? defaultIngestSinkDir()
+      partitionDimensions = SERVER_PARTITION_DIMENSIONS
+    } else {
+      if (!config.sink) {
+        throw new Error('upload is configured but sink is missing')
+      }
+      outputDir = config.sink.dir
+    }
+    const resolvedOutputDir = outputDir
     // Lazy import keeps the SigV4 / parquet code off the hot path for
     // installs that don't enable upload.
-    factories.push(async () => {
+    factories.set('upload', async () => {
       const { createUploader } = await import('./upload/index.js')
       const uploader = createUploader({
-        outputDir: sinkDir,
-        options: uploadConfig,
+        outputDir: resolvedOutputDir,
+        options: partitionDimensions
+          ? { ...uploadConfig, partitionDimensions }
+          : uploadConfig,
         env: ctx.env,
       })
       await uploader.start()
@@ -251,10 +352,51 @@ function buildConfigListeners(config, ctx) {
     })
   }
 
+  // role: server brings up the control-plane HTTP listener (identity,
+  // future config-vending, future log ingest). Only `server` triggers it —
+  // `gateway` is a client of this listener and `standalone` doesn't use it.
+  // The validator guarantees `config.server` is set iff role === 'server'.
+  if (config.role === 'server') {
+    const serverConfig = config.server
+    if (!serverConfig) {
+      throw new Error('role: server requires server block (validator should have caught this)')
+    }
+    factories.set('server', async () => {
+      const controlPlane = new ControlPlane(serverConfig)
+      await controlPlane.start()
+      const effective = effectiveBinding(controlPlane.server, controlPlane.host, controlPlane.port)
+      return {
+        description: `Control-plane listener bound on ${effective}`,
+        stop: () => controlPlane.stop(),
+      }
+    })
+  }
+
+  // Background config-pull loop runs alongside the proxy/otel listeners on
+  // gateways. We register it here so its lifetime is tied to the same
+  // start/stop machinery — a SIGTERM stops the timer cleanly without leaving
+  // an orphaned setTimeout in the event loop. The hot-reload pipeline
+  // subscribes to `config-changed` events emitted by this client.
+  if (config.role === 'gateway' && ctx.configClient) {
+    const configClient = ctx.configClient
+    const url = config.central_server?.url ?? 'central server'
+    const poll = configClient.pollIntervalSeconds
+    factories.set('configPoll', async () => {
+      configClient.start()
+      return {
+        description: `Config poll loop active (${url} every ${poll}s)`,
+        stop: async () => {
+          configClient.stop()
+          await configClient.whenIdle()
+        },
+      }
+    })
+  }
+
   // Only schedule the self-update tick when we have a real listener to keep
   // alive — an empty config should still surface "no listeners configured".
-  if (factories.length > 0) {
-    factories.push(buildSelfUpdateFactory(ctx))
+  if (factories.size > 0) {
+    factories.set('selfUpdate', buildSelfUpdateFactory(ctx))
   }
 
   return factories
@@ -311,14 +453,17 @@ function buildSelfUpdateFactory(ctx) {
 }
 
 /**
- * @param {ListenerFactory[]} factories
+ * @param {Map<string, ListenerFactory>} factories
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
  * @param {(handler: (signal: string) => void) => void} onShutdownRequested
+ * @param {HotReloadWiring} [hotReload] When supplied, subscribe to
+ *   `configClient.on('config-changed')` and route each event through
+ *   `applyDiff`, mutating the running registry in place.
  * @returns {Promise<number>}
  */
-async function runLifecycle(factories, stdout, stderr, onShutdownRequested) {
-  if (factories.length === 0) {
+async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotReload) {
+  if (factories.size === 0) {
     stderr.write('error: no listeners configured\n')
     return 1
   }
@@ -332,13 +477,13 @@ async function runLifecycle(factories, stdout, stderr, onShutdownRequested) {
     })
   })
 
-  /** @type {StartedListener[]} */
-  const started = []
-  for (const factory of factories) {
+  /** @type {Map<string, StartedListener>} */
+  const started = new Map()
+  for (const [name, factory] of factories) {
     try {
       const listener = await factory()
       stdout.write(listener.description + '\n')
-      started.push(listener)
+      started.set(name, listener)
     } catch (err) {
       stderr.write(`error: failed to start listener: ${formatError(err)}\n`)
       await stopAll(started, stderr)
@@ -346,27 +491,53 @@ async function runLifecycle(factories, stdout, stderr, onShutdownRequested) {
     }
   }
 
+  // Serialize hot-reload applications onto a single chain so concurrent
+  // `'config-changed'` emits (in practice the ConfigClient ticks
+  // sequentially, but defensive serialization keeps the invariant local)
+  // can't interleave their stop/start operations and leak a listener.
+  /** @type {Promise<void>} */
+  let reloadChain = Promise.resolve()
+  if (hotReload) {
+    let currentCfg = hotReload.initialConfig
+    hotReload.configClient.on('config-changed', (/** @type {ConfigChangedEvent} */ event) => {
+      reloadChain = reloadChain.then(async () => {
+        const newCfg = event.newConfig
+        const diff = diffConfig(currentCfg, newCfg)
+        await applyDiff(diff, currentCfg, newCfg, started, hotReload.factoryBuilder, { stdout, stderr })
+        currentCfg = newCfg
+      }).catch((err) => {
+        stderr.write(`hot reload: unexpected error: ${formatError(err)}\n`)
+      })
+    })
+  }
+
   await shutdownPromise
+  // Drain any in-flight reload so its stop() lands before stopAll() races
+  // it. The chain only does start/stop work — bounded and short.
+  await reloadChain
   await stopAll(started, stderr)
   stdout.write('Shutdown complete.\n')
   return 0
 }
 
 /**
- * @param {StartedListener[]} started
+ * @param {Map<string, StartedListener>} started
  * @param {{ write: (s: string) => void }} stderr
  * @returns {Promise<void>}
  */
 async function stopAll(started, stderr) {
-  if (started.length === 0) return
+  if (started.size === 0) return
   /** @type {Promise<void>[]} */
-  const stops = started.map(async (l) => {
-    try {
-      await l.stop()
-    } catch (err) {
-      stderr.write(`warning: error stopping listener: ${formatError(err)}\n`)
-    }
-  })
+  const stops = []
+  for (const l of started.values()) {
+    stops.push((async () => {
+      try {
+        await l.stop()
+      } catch (err) {
+        stderr.write(`warning: error stopping listener: ${formatError(err)}\n`)
+      }
+    })())
+  }
   /** @type {Promise<'timeout'>} */
   const timeout = new Promise((resolve) => {
     const t = setTimeout(() => resolve('timeout'), DRAIN_TIMEOUT_MS)

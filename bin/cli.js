@@ -2,7 +2,7 @@
 
 import process from 'node:process'
 
-const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'export'])
+const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'export'])
 
 const argv = process.argv.slice(2)
 const subcommand = argv[0]
@@ -63,6 +63,10 @@ async function loadSubcommand(name) {
   case 'status': {
     const { runStatus } = await import('../src/cli/status.js')
     return runStatus
+  }
+  case 'config': {
+    const { runConfig } = await import('../src/cli/config.js')
+    return runConfig
   }
   case 'export': {
     const { runExport } = await import('../src/cli/export.js')

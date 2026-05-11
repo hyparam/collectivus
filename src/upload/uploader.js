@@ -2,22 +2,41 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { appendLedger, isCommitted, readLedger } from './ledger.js'
 import { rowsToParquet } from './parquet.js'
-import { readJsonlRows } from './reader.js'
+import { readPartitionRows, walkPartitionFiles } from './reader.js'
 
 /**
  * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
  */
 
 const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
-const FILE_PATTERN = /^(logs|traces|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/
+/**
+ * Legacy standalone filename: `<signal>-<YYYY-MM-DD>.jsonl` directly
+ * under `<outputDir>/services/<service>/`. Distinct from the generic
+ * partitioned layout (`<outputDir>/<dim1>/<dim2>/<date>.jsonl`) walked
+ * by `walkPartitionFiles`.
+ */
+const LEGACY_FILE_PATTERN = /^(logs|traces|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/
 
 const DEFAULT_MAX_ATTEMPTS = 3
 const DEFAULT_INITIAL_BACKOFF_MS = 1000
 
 /**
- * Find every (service, signal, date) JSONL file under `<outputDir>/services/`
- * that is older than `today` (UTC) and within the catch-up window. Filters
- * to the configured signal allowlist.
+ * Find every JSONL file under `outputDir` whose date is older than
+ * `today` (UTC) and within the catch-up window, filtered to the
+ * configured signal allowlist.
+ *
+ * Two layouts are supported via `options.partitionDimensions`:
+ *
+ * 1. **Legacy standalone** (default `['service', 'signal']`): walks
+ *    `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Preserved
+ *    so existing standalone installs (recorder + OTLP collector still
+ *    write this hyphenated layout) keep working unchanged.
+ * 2. **Generic N-level** (any other dimension list): walks
+ *    `<outputDir>/<dim1>/<dim2>/.../<date>.jsonl`. Each directory level
+ *    is one entry in `partitionDimensions`; the leaf filename is the
+ *    plain UTC date. The server-mode parquet drain uses
+ *    `['gateway_id', 'signal']` to match the layout written by the
+ *    NDJSON ingest endpoint (`<sink_dir>/<gateway_id>/<signal>/<date>.jsonl`).
  *
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
@@ -25,11 +44,40 @@ const DEFAULT_INITIAL_BACKOFF_MS = 1000
  * @returns {UploadJob[]}
  */
 export function discoverJobs(outputDir, today, options) {
-  const servicesDir = path.join(outputDir, 'services')
-  if (!fs.existsSync(servicesDir)) return []
-
   const allowedSignals = new Set(options.signals)
   const minDate = subtractDays(today, options.catchupDays)
+
+  /** @type {UploadJob[]} */
+  const jobs = isLegacyDimensions(options.partitionDimensions)
+    ? discoverLegacyJobs(outputDir, allowedSignals, today, minDate)
+    : discoverPartitionedJobs(outputDir, options.partitionDimensions, allowedSignals, today, minDate)
+
+  jobs.sort(jobCompare)
+  return jobs
+}
+
+/**
+ * @param {ReadonlyArray<string> | undefined} dimensions
+ * @returns {boolean}
+ */
+function isLegacyDimensions(dimensions) {
+  // `discoverJobs` is also called from tests that pass a not-yet-resolved
+  // options object, so a missing `partitionDimensions` is treated as the
+  // legacy default rather than a programming error.
+  if (!dimensions) return true
+  return dimensions.length === 2 && dimensions[0] === 'service' && dimensions[1] === 'signal'
+}
+
+/**
+ * @param {string} outputDir
+ * @param {Set<Signal>} allowedSignals
+ * @param {string} today
+ * @param {string} minDate
+ * @returns {UploadJob[]}
+ */
+function discoverLegacyJobs(outputDir, allowedSignals, today, minDate) {
+  const servicesDir = path.join(outputDir, 'services')
+  if (!fs.existsSync(servicesDir)) return []
 
   /** @type {UploadJob[]} */
   const jobs = []
@@ -42,7 +90,7 @@ export function discoverJobs(outputDir, today, options) {
       continue
     }
     for (const entry of entries) {
-      const match = FILE_PATTERN.exec(entry)
+      const match = LEGACY_FILE_PATTERN.exec(entry)
       if (!match) continue
       const signal = /** @type {Signal} */ (match[1])
       const date = match[2]
@@ -54,10 +102,40 @@ export function discoverJobs(outputDir, today, options) {
         signal,
         date,
         jsonlPath: path.join(serviceDir, entry),
+        partition: { service, signal },
       })
     }
   }
-  jobs.sort(jobCompare)
+  return jobs
+}
+
+/**
+ * @param {string} outputDir
+ * @param {ReadonlyArray<string>} dimensions
+ * @param {Set<Signal>} allowedSignals
+ * @param {string} today
+ * @param {string} minDate
+ * @returns {UploadJob[]}
+ */
+function discoverPartitionedJobs(outputDir, dimensions, allowedSignals, today, minDate) {
+  /** @type {UploadJob[]} */
+  const jobs = []
+  for (const file of walkPartitionFiles(outputDir, dimensions)) {
+    if (!allowedSignals.has(file.signal)) continue
+    if (file.date >= today) continue
+    if (file.date < minDate) continue
+    // First-dimension value is the per-job identifier kept under
+    // `service` so the ledger key, object key, and log lines built
+    // around `(service, signal, date)` remain unique per file.
+    const primary = file.partition[dimensions[0]]
+    jobs.push({
+      service: primary,
+      signal: file.signal,
+      date: file.date,
+      jsonlPath: file.filePath,
+      partition: file.partition,
+    })
+  }
   return jobs
 }
 
@@ -103,14 +181,14 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
 
   /** @type {Record<string, unknown>[]} */
   const rows = []
-  for await (const row of readJsonlRows(job.jsonlPath)) {
+  for await (const row of readPartitionRows(job.jsonlPath, job.partition)) {
     rows.push(row)
   }
   if (rows.length === 0) {
     return { uploaded: false, key, rows: 0, size: 0 }
   }
 
-  const parquet = await rowsToParquet(job.signal, rows)
+  const parquet = await rowsToParquet(job.signal, rows, options.partitionDimensions)
   await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
 
   const entry = {

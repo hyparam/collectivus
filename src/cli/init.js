@@ -1,11 +1,13 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
+import { defaultServerDataDir } from '../server/config_registry.js'
 import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
- * @import { CollectivusConfig, InitHooks, OtelConfig, ProxyConfig, UploadConfig } from '../types.js'
+ * @import { CentralServerConfig, CollectivusConfig, FileSinkConfig, InitHooks, OtelConfig, ProxyConfig, ServerConfig, UploadConfig } from '../types.js'
  */
 
 const PROVIDERS = [
@@ -40,6 +42,13 @@ const DEFAULT_REDACT = [
 const SINGLE_PROXY_LISTEN = '127.0.0.1:8787'
 const ENTERPRISE_PROXY_LISTEN = '0.0.0.0:8787'
 const ENTERPRISE_OTEL_LISTEN = '0.0.0.0:4318'
+const DEFAULT_PROXY_LISTEN = SINGLE_PROXY_LISTEN
+const DEFAULT_OTEL_LISTEN = ENTERPRISE_OTEL_LISTEN
+const DEFAULT_CONTROL_PLANE_LISTEN = '0.0.0.0:8788'
+const DEFAULT_POLL_INTERVAL_SECONDS = 30
+const POLL_INTERVAL_MIN_SECONDS = 5
+const POLL_INTERVAL_MAX_SECONDS = 3600
+const IDENTITY_SECRET_BYTES = 32
 
 const DEFAULT_UPLOAD_REGION = 'us-east-1'
 const DEFAULT_UPLOAD_PREFIX = 'collectivus'
@@ -82,13 +91,12 @@ function defaultSinkDir(homeDir) {
 }
 
 /**
- * Run the no-arg interactive walkthrough. Top-level question is single-user
- * vs. enterprise (central server). Each branch asks just the questions it
+ * Run the no-arg interactive walkthrough. The top-level question chooses
+ * between local single-user capture, shared remote-config hosting, managed
+ * gateways, and a control-plane server. Each branch asks just the questions it
  * needs, builds a v1 `CollectivusConfig`, writes it to disk, and (for proxy
  * setups on darwin/linux) chains into `runInstall` to install the daemon and
- * optionally attach Claude Code. The enterprise branch also prints the
- * `npx collectivus --config <url>` command team members run on their own
- * machines to point at the server.
+ * optionally attach Claude Code.
  *
  * If a config already exists at the default save path, summarizes it first and
  * offers the user the choice to reuse it (skipping straight to the daemon
@@ -139,20 +147,26 @@ export async function runInit(hooks = {}) {
   stdout.write('  1) Single-user (local)\n')
   stdout.write('     Run on this machine only. The proxy listens on localhost and\n')
   stdout.write('     recordings stay on disk here. Best for personal dev work.\n\n')
-  stdout.write('  2) Enterprise (central server)\n')
-  stdout.write('     Set this machine up as a central collectivus server. Team\n')
-  stdout.write('     members run a one-line install on their own machines to point\n')
-  stdout.write('     LLM traffic and OTel telemetry here for centralized recording.\n')
-  stdout.write('     We\'ll print that install command at the end of this flow.\n\n')
+  stdout.write('  2) Shared config URL / central recorder\n')
+  stdout.write('     Set this machine up to host proxy and OTel capture for a team, then\n')
+  stdout.write('     print an npx command that points clients at its remote config URL.\n\n')
+  stdout.write('  3) Gateway (managed by a control-plane server)\n')
+  stdout.write('     Records locally, pulls per-gateway config from a central server,\n')
+  stdout.write('     hot-reloads config changes, and ships ingest back to the server.\n\n')
+  stdout.write('  4) Control-plane server\n')
+  stdout.write('     Vendors per-gateway configs over /v1/config, accepts ingest from\n')
+  stdout.write('     gateways, and issues JWTs from one-shot bootstrap tokens.\n\n')
 
-  /** @type {'single' | 'enterprise'} */
+  /** @type {'single' | 'enterprise' | 'gateway' | 'server'} */
   let kind
   for (;;) {
     const raw = (await prompt('Choose [1]: ')).trim()
     const c = raw === '' ? '1' : raw
     if (c === '1') { kind = 'single'; break }
     if (c === '2') { kind = 'enterprise'; break }
-    stderr.write(`error: please choose 1 or 2 (got ${JSON.stringify(raw)})\n`)
+    if (c === '3') { kind = 'gateway'; break }
+    if (c === '4') { kind = 'server'; break }
+    stderr.write(`error: please choose 1, 2, 3, or 4 (got ${JSON.stringify(raw)})\n`)
   }
 
   if (kind === 'single') {
@@ -161,9 +175,23 @@ export async function runInit(hooks = {}) {
       defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
     })
   }
-  return runEnterpriseFlow({
-    stdout, stderr, prompt, writeFile, platform, binPath, cwd,
-    defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
+  if (kind === 'enterprise') {
+    return runEnterpriseFlow({
+      stdout, stderr, prompt, writeFile, platform, binPath, cwd,
+      defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
+    })
+  }
+  if (kind === 'gateway') {
+    return runGatewayFlow({
+      stdout, stderr, prompt, cwd,
+      defaultCfgPath, defaultSink,
+      writeFile, platform, binPath,
+      runInstall: hooks.runInstall,
+    })
+  }
+  return runServerFlow({
+    stdout, stderr, prompt, writeFile, cwd,
+    defaultCfgPath,
   })
 }
 
@@ -414,6 +442,34 @@ async function askProvider(prompt, stdout, stderr) {
       }
     }
     stderr.write(`error: invalid provider choice ${JSON.stringify(provRaw)}\n`)
+  }
+}
+
+/**
+ * Prompt for a proxy listener and upstream provider.
+ *
+ * @param {(q: string) => Promise<string>} prompt
+ * @param {{ write: (s: string) => void }} stdout
+ * @param {{ write: (s: string) => void }} stderr
+ * @returns {Promise<ProxyConfig>}
+ */
+async function askProxy(prompt, stdout, stderr) {
+  stdout.write('\nLLM proxy setup\n')
+  stdout.write('The proxy records request and response bodies while forwarding to\n')
+  stdout.write('the upstream provider you choose below.\n')
+  const upstream = await askProvider(prompt, stdout, stderr)
+  const listenAns = (await prompt(`Proxy listen address [${DEFAULT_PROXY_LISTEN}]: `)).trim()
+  const listen = listenAns === '' ? DEFAULT_PROXY_LISTEN : listenAns
+  return {
+    listen,
+    upstreams: [
+      {
+        name: upstream.name,
+        base_url: upstream.baseUrl,
+        match: { path_prefix: upstream.prefix },
+      },
+    ],
+    redact_headers: DEFAULT_REDACT,
   }
 }
 
@@ -781,4 +837,266 @@ function deriveUpstreamName(baseUrl) {
   const label = stripped.split('.')[0] ?? ''
   const slug = label.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '')
   return isValidUpstreamSlug(slug) ? slug : 'upstream'
+}
+
+/**
+ * Walkthrough sub-flow for `role: gateway` deployments. The gateway has its
+ * config vended by a central server — local prompts collect the `central_server`
+ * block and any local listeners to record. The closing summary tells the
+ * operator the explicit `collectivus config set` step they need to run on the
+ * server side before this gateway will see anything to load (without it the
+ * gateway boots, bootstraps a JWT, then hangs on 404 every poll cycle).
+ *
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   cwd: string,
+ *   defaultCfgPath: string,
+ *   defaultSink: string,
+ *   writeFile: (p: string, contents: string) => void,
+ *   platform: NodeJS.Platform,
+ *   binPath: string,
+ *   runInstall?: (args: string[]) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runGatewayFlow(args) {
+  const { stdout, stderr, prompt, cwd, defaultCfgPath, defaultSink, writeFile, platform, binPath } = args
+
+  stdout.write('\nGateway mode\n')
+  stdout.write('────────────\n')
+  stdout.write('This binary will pull its configuration from a central collectivus\n')
+  stdout.write('server and ship its recordings there as ingest.\n')
+
+  /** @type {CentralServerConfig} */
+  const centralServer = await askCentralServer(prompt, stdout, stderr)
+
+  stdout.write('\nWhat should this gateway capture locally?\n')
+  stdout.write('  1) LLM proxy only\n')
+  stdout.write('  2) OTLP receiver only\n')
+  stdout.write('  3) Both\n')
+  /** @type {string} */
+  let captureMode
+  for (;;) {
+    const raw = (await prompt('Choose [1]: ')).trim()
+    const candidate = raw === '' ? '1' : raw
+    if (candidate === '1' || candidate === '2' || candidate === '3') {
+      captureMode = candidate
+      break
+    }
+    stderr.write(`error: please choose 1, 2, or 3 (got ${JSON.stringify(raw)})\n`)
+  }
+  const wantProxy = captureMode === '1' || captureMode === '3'
+  const wantOtel = captureMode === '2' || captureMode === '3'
+
+  /** @type {CollectivusConfig} */
+  const config = { version: 1, role: 'gateway', central_server: centralServer }
+  if (wantProxy) config.proxy = await askProxy(prompt, stdout, stderr)
+  if (wantOtel) {
+    stdout.write('\nThe OTLP receiver will accept POSTs at /v1/traces, /v1/metrics,\n')
+    stdout.write('and /v1/logs. Point your OTel SDKs / collector exporters at this\n')
+    stdout.write('address.\n')
+    const ans = (await prompt(`OTLP listen address [${DEFAULT_OTEL_LISTEN}]: `)).trim()
+    /** @type {OtelConfig} */
+    const otel = { listen: ans === '' ? DEFAULT_OTEL_LISTEN : ans }
+    config.otel = otel
+  }
+
+  stdout.write('\nWhere should collectivus write recordings? Each signal lands in its\n')
+  stdout.write('own JSONL file under this directory.\n')
+  const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
+  /** @type {FileSinkConfig} */
+  const sink = { type: 'file', dir: sinkAns === '' ? defaultSink : sinkAns }
+  config.sink = sink
+
+  const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
+  if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
+
+  // Help the operator avoid the "I started it, why is nothing happening" trap.
+  stdout.write('\nNext steps:\n')
+  stdout.write(`  1. On the central server (${centralServer.url}), the operator must:\n`)
+  stdout.write('       collectivus config bootstrap-token issue <gateway-id> --server-config <server.json>\n')
+  stdout.write('       collectivus config set <gateway-id> --server-config <server.json> --file <gateway-config.json>\n')
+  stdout.write('     before this gateway will see anything to load.\n')
+  stdout.write('  2. Point this gateway at its bootstrap token by editing\n')
+  stdout.write(`     central_server.identity.bootstrap_token in ${cfgPath}\n`)
+  stdout.write('     (the token can only be redeemed once; we do not collect it during\n')
+  stdout.write('     this walkthrough so it never lands in shell history).\n')
+  stdout.write(`  3. Then run: collectivus --config ${cfgPath}\n`)
+
+  return offerDaemonInstall({
+    configPath: cfgPath, wantProxy,
+    stdout, prompt, platform, binPath,
+    runInstall: args.runInstall,
+    offerClaudeCode: true,
+  })
+}
+
+/**
+ * Walkthrough sub-flow for `role: server` deployments. The server vendors
+ * per-gateway configs and accepts ingest. Operators do not point apps at this
+ * binary directly — there is no proxy listener — so the daemon-install offer
+ * is intentionally skipped.
+ *
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   cwd: string,
+ *   defaultCfgPath: string,
+ *   writeFile: (p: string, contents: string) => void,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runServerFlow(args) {
+  const { stdout, stderr, prompt, cwd, defaultCfgPath, writeFile } = args
+
+  stdout.write('\nServer mode\n')
+  stdout.write('───────────\n')
+  stdout.write('This binary will run the central control-plane HTTP listener that\n')
+  stdout.write('vendors per-gateway configs and accepts ingest from gateways.\n')
+
+  stdout.write('\nWhere should the control plane listen? Gateways will reach this\n')
+  stdout.write('address; 0.0.0.0 listens on all interfaces.\n')
+  const listenAns = (await prompt(`Control-plane listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
+  const controlPlaneListen = listenAns === '' ? DEFAULT_CONTROL_PLANE_LISTEN : listenAns
+
+  // The data_dir prompt is the B.5 acceptance touchpoint: the registry stores
+  // per-gateway configs under <data_dir>/configs/, and the bootstrap-token
+  // store lives under it too unless overridden.
+  const defaultDataDir = defaultServerDataDir()
+  stdout.write('\nWhere should server-side state live? Per-gateway config files land\n')
+  stdout.write('under <data_dir>/configs/ and the bootstrap-token store defaults to\n')
+  stdout.write('<data_dir>/bootstrap.json.\n')
+  const dataDirAns = (await prompt(`Server data directory [${defaultDataDir}]: `)).trim()
+  const dataDir = dataDirAns === '' ? defaultDataDir : dataDirAns
+
+  // 32-byte random secret is the validator floor (IDENTITY_SECRET_MIN_LENGTH).
+  // Auto-generate by default — typing 64 hex chars at a prompt is a footgun.
+  const generatedSecret = crypto.randomBytes(IDENTITY_SECRET_BYTES).toString('hex')
+  stdout.write('\nThe server signs gateway JWTs with an HMAC secret. Pressing Enter\n')
+  stdout.write('uses a freshly generated 32-byte random hex value (recommended); paste\n')
+  stdout.write('an existing secret only if you are migrating from another host.\n')
+  const secretAns = (await prompt('Identity-issuer secret []: ')).trim()
+  /** @type {string} */
+  let secret
+  if (secretAns === '') {
+    secret = generatedSecret
+  } else if (secretAns.length < IDENTITY_SECRET_BYTES) {
+    stderr.write(`warning: secret shorter than ${IDENTITY_SECRET_BYTES} chars; using generated value instead\n`)
+    secret = generatedSecret
+  } else {
+    secret = secretAns
+  }
+
+  const bootstrapStorePath = path.join(dataDir, 'bootstrap.json')
+  const sinkDir = path.join(dataDir, 'ingested')
+
+  /** @type {ServerConfig} */
+  const serverBlock = {
+    control_plane_listen: controlPlaneListen,
+    identity_issuer: { secret, bootstrap_store_path: bootstrapStorePath },
+    data_dir: dataDir,
+    sink_dir: sinkDir,
+  }
+  /** @type {CollectivusConfig} */
+  const config = { version: 1, role: 'server', server: serverBlock }
+
+  // Optional upload — server mode drains the multi-tenant ingest spool to S3.
+  const upload = await askUpload(prompt, stdout, stderr)
+  if (upload) config.upload = upload
+
+  const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
+  if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
+
+  if (secretAns === '') {
+    stdout.write('\nGenerated identity-issuer secret was written to the config file.\n')
+    stdout.write(`Back up ${cfgPath} or copy the secret to a password manager —\n`)
+    stdout.write('rotating it forces every gateway to re-bootstrap.\n')
+  }
+
+  stdout.write('\nNext steps:\n')
+  stdout.write(`  collectivus --config ${cfgPath}    (start the server)\n\n`)
+  stdout.write('Provision a gateway:\n')
+  stdout.write(`  collectivus config bootstrap-token issue <gateway-id> --server-config ${cfgPath}\n`)
+  stdout.write('     (prints a one-shot token; hand it to the gateway operator)\n')
+  stdout.write(`  collectivus config set <gateway-id> --server-config ${cfgPath} --file <gateway-config.json>\n`)
+  stdout.write('     (registers the per-gateway config the gateway will pull)\n')
+  return 0
+}
+
+/**
+ * Prompt for the `central_server` block of a gateway config.
+ *
+ * The bootstrap token is intentionally NOT collected here — the operator
+ * issues tokens out-of-band on the server side, hands the token to the
+ * gateway via a secure channel, and the gateway operator pastes it into the
+ * saved config (or sets `central_server.identity.bootstrap_token` via env-
+ * var rendering, etc). Capturing it through readline would put the token in
+ * shell history; the closing summary surfaces this nuance.
+ *
+ * @param {(q: string) => Promise<string>} prompt
+ * @param {{ write: (s: string) => void }} stdout
+ * @param {{ write: (s: string) => void }} stderr
+ * @returns {Promise<CentralServerConfig>}
+ */
+async function askCentralServer(prompt, stdout, stderr) {
+  stdout.write('\nWhat is the central server URL? Include scheme + port (e.g.\n')
+  stdout.write('https://collectivus.internal:8788).\n')
+  /** @type {string} */
+  let url
+  for (;;) {
+    const raw = (await prompt('Central server URL: ')).trim()
+    if (raw === '') {
+      stderr.write('  url is required\n')
+      continue
+    }
+    try {
+      new URL(raw)
+      url = raw
+      break
+    } catch {
+      stderr.write('  url must be a valid URL (e.g. https://central.example.com:8788)\n')
+    }
+  }
+
+  // poll_interval_seconds is the bead's named knob. The validator floors this
+  // at 5s and ceils it at 3600s — anything smaller is a stress test, anything
+  // larger drifts hot-reload semantics. Default 30s matches the DEFAULT
+  // constant in the gateway client.
+  stdout.write('\nHow often should the gateway poll for config changes? 30s is the\n')
+  stdout.write('default; lower values speed up "hot reload" semantics; the validator\n')
+  stdout.write(`accepts ${POLL_INTERVAL_MIN_SECONDS}–${POLL_INTERVAL_MAX_SECONDS} seconds.\n`)
+  /** @type {number | undefined} */
+  let pollIntervalSeconds
+  for (;;) {
+    const raw = (await prompt(`Poll interval seconds [${DEFAULT_POLL_INTERVAL_SECONDS}]: `)).trim()
+    if (raw === '') { pollIntervalSeconds = undefined; break }
+    const n = Number.parseInt(raw, 10)
+    if (Number.isInteger(n) && String(n) === raw
+        && n >= POLL_INTERVAL_MIN_SECONDS && n <= POLL_INTERVAL_MAX_SECONDS) {
+      pollIntervalSeconds = n
+      break
+    }
+    stderr.write(`  must be an integer between ${POLL_INTERVAL_MIN_SECONDS} and ${POLL_INTERVAL_MAX_SECONDS}\n`)
+  }
+
+  /** @type {CentralServerConfig} */
+  const cs = { url, identity: {} }
+  if (pollIntervalSeconds !== undefined) cs.poll_interval_seconds = pollIntervalSeconds
+  return cs
+}
+
+/**
+ * Prompt for the save path. Returns the resolved absolute path.
+ *
+ * @param {(q: string) => Promise<string>} prompt
+ * @param {string} cwd
+ * @param {string} defaultPath
+ * @returns {Promise<string>}
+ */
+async function askSavePath(prompt, cwd, defaultPath) {
+  const ans = (await prompt(`Save config to [${defaultPath}]: `)).trim()
+  return ans === '' ? defaultPath : path.resolve(cwd, ans)
 }

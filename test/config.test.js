@@ -309,7 +309,7 @@ describe('loadConfig - upload section', () => {
     expect(loadConfig(p)).toEqual(cfg)
   })
 
-  it('does not inject defaults — print-config round-trips unchanged', () => {
+  it('does not inject defaults, so print-config round-trips unchanged', () => {
     // The validator must not mutate the parsed object; defaults are applied
     // later by createUploader. This guarantees `--print-config` shows what
     // the user wrote, not what the binary will run with.
@@ -317,8 +317,8 @@ describe('loadConfig - upload section', () => {
     const p = writeJson('upload-no-defaults.json', cfg)
     const loaded = loadConfig(p)
     expect(loaded.upload).toEqual({ bucket: 'b' })
-    expect(/** @type {any} */ (loaded.upload).prefix).toBeUndefined()
-    expect(/** @type {any} */ (loaded.upload).time).toBeUndefined()
+    expect(loaded.upload.prefix).toBeUndefined()
+    expect(loaded.upload.time).toBeUndefined()
   })
 
   it('rejects upload missing bucket', () => {
@@ -781,13 +781,13 @@ describe('loadConfigAsync', () => {
    * @returns {typeof fetch}
    */
   function stubFetch(resp) {
-    async function fetchFn() {
-      return {
+    function fetchFn() {
+      return Promise.resolve({
         ok: resp.ok,
         status: resp.status ?? (resp.ok ? 200 : 500),
         statusText: resp.statusText ?? (resp.ok ? 'OK' : 'Server Error'),
-        async text() { return resp.body ?? '' },
-      }
+        text() { return Promise.resolve(resp.body ?? '') },
+      })
     }
     return /** @type {any} */ (fetchFn)
   }
@@ -814,7 +814,7 @@ describe('loadConfigAsync', () => {
   })
 
   it('wraps fetch failures as ConfigError', async () => {
-    async function fetchFn() { throw new Error('ECONNREFUSED') }
+    function fetchFn() { return Promise.reject(new Error('ECONNREFUSED')) }
     /** @type {unknown} */
     let caught
     try {

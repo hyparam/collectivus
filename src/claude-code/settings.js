@@ -324,7 +324,7 @@ function validateVersion(version) {
  */
 function errCode(err) {
   if (!err || typeof err !== 'object' || !('code' in err)) return undefined
-  const { code } = /** @type {{ code: unknown }} */ (err)
+  const { code } = err
   return typeof code === 'string' ? code : undefined
 }
 

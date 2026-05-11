@@ -228,7 +228,7 @@ export async function run(argv, env, hooks = {}) {
   try {
     gatewayId = config.role === 'standalone' || config.role === undefined
       ? resolveStandaloneGatewayId(config.gateway_id)
-      : (identityClient?.identity?.gateway_id ?? '_unknown')
+      : identityClient?.identity?.gateway_id ?? '_unknown'
   } catch (err) {
     stderr.write(`config error: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1

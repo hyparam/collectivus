@@ -42,11 +42,11 @@ describe('fetchLatestVersion', () => {
    * @returns {typeof fetch}
    */
   function stubFetch(response) {
-    async function fakeFetch() {
-      return /** @type {Response} */ (/** @type {unknown} */ ({
+    function fakeFetch() {
+      return Promise.resolve(/** @type {Response} */ (/** @type {unknown} */ ({
         ok: response.ok,
-        async json() { return response.body },
-      }))
+        json() { return Promise.resolve(response.body) },
+      })))
     }
     return /** @type {typeof fetch} */ (/** @type {unknown} */ (fakeFetch))
   }
@@ -67,7 +67,7 @@ describe('fetchLatestVersion', () => {
   })
 
   it('returns undefined on fetch rejection (network/abort)', async () => {
-    async function failingFetch() { throw new Error('network down') }
+    function failingFetch() { return Promise.reject(new Error('network down')) }
     const fetchFn = /** @type {typeof fetch} */ (/** @type {unknown} */ (failingFetch))
     expect(await fetchLatestVersion({ fetchFn })).toBeUndefined()
   })
@@ -78,9 +78,9 @@ describe('runNpmInstall', () => {
     /** @type {string[]} */
     let receivedArgs = []
     const ok = await runNpmInstall('1.2.3', {
-      run: async (_command, args) => {
+      run: (_command, args) => {
         receivedArgs = args
-        return 0
+        return Promise.resolve(0)
       },
     })
     expect(ok).toBe(true)
@@ -88,11 +88,11 @@ describe('runNpmInstall', () => {
   })
 
   it('returns false on non-zero exit', async () => {
-    expect(await runNpmInstall('1.2.3', { run: async () => 1 })).toBe(false)
+    expect(await runNpmInstall('1.2.3', { run: () => Promise.resolve(1) })).toBe(false)
   })
 
   it('returns false when the spawn rejects', async () => {
-    expect(await runNpmInstall('1.2.3', { run: async () => { throw new Error('npm not found') } })).toBe(false)
+    expect(await runNpmInstall('1.2.3', { run: () => Promise.reject(new Error('npm not found')) })).toBe(false)
   })
 })
 
@@ -105,8 +105,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: '/Users/dev/code/collectivus/bin/cli.js',
       readVersion: () => '1.0.0',
-      fetchLatest: async () => '2.0.0',
-      install: async () => { installCalls++; return true },
+      fetchLatest: () => Promise.resolve('2.0.0'),
+      install: () => { installCalls++; return Promise.resolve(true) },
       log,
     })
     expect(result).toBeUndefined()
@@ -119,8 +119,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => '1.0.0',
-      fetchLatest: async () => undefined,
-      install: async () => { installCalls++; return true },
+      fetchLatest: () => Promise.resolve(undefined),
+      install: () => { installCalls++; return Promise.resolve(true) },
       log: memo(),
     })
     expect(result).toBeUndefined()
@@ -132,8 +132,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => '1.2.3',
-      fetchLatest: async () => '1.2.3',
-      install: async () => { installCalls++; return true },
+      fetchLatest: () => Promise.resolve('1.2.3'),
+      install: () => { installCalls++; return Promise.resolve(true) },
       log: memo(),
     })
     expect(result).toBeUndefined()
@@ -147,8 +147,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => '1.0.0',
-      fetchLatest: async () => '2.0.0',
-      install: async (v) => { installedVersions.push(v); return true },
+      fetchLatest: () => Promise.resolve('2.0.0'),
+      install: (v) => { installedVersions.push(v); return Promise.resolve(true) },
       log,
     })
     expect(result).toBe('2.0.0')
@@ -162,8 +162,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => '1.0.0',
-      fetchLatest: async () => '2.0.0',
-      install: async () => false,
+      fetchLatest: () => Promise.resolve('2.0.0'),
+      install: () => Promise.resolve(false),
       log,
     })
     expect(result).toBeUndefined()
@@ -176,8 +176,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => { throw new Error('boom') },
-      fetchLatest: async () => '2.0.0',
-      install: async () => { installCalls++; return true },
+      fetchLatest: () => Promise.resolve('2.0.0'),
+      install: () => { installCalls++; return Promise.resolve(true) },
       log,
     })
     expect(result).toBeUndefined()
@@ -188,8 +188,8 @@ describe('selfUpdate', () => {
     const result = await selfUpdate({
       binPath: installedBinPath,
       readVersion: () => '1.0.0',
-      fetchLatest: async () => { throw new Error('network exploded') },
-      install: async () => true,
+      fetchLatest: () => Promise.reject(new Error('network exploded')),
+      install: () => Promise.resolve(true),
       log: memo(),
     })
     expect(result).toBeUndefined()

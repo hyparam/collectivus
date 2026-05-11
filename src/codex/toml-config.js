@@ -302,8 +302,8 @@ function removeProviderDottedAssignments(lines) {
       continue
     }
     if (
-      (table === 'root' && TOML_COLLECTIVUS_PROVIDER_DOTTED_ASSIGNMENT_RE.test(line))
-      || (table === 'model_providers' && TOML_COLLECTIVUS_PROVIDER_CHILD_ASSIGNMENT_RE.test(line))
+      table === 'root' && TOML_COLLECTIVUS_PROVIDER_DOTTED_ASSIGNMENT_RE.test(line)
+      || table === 'model_providers' && TOML_COLLECTIVUS_PROVIDER_CHILD_ASSIGNMENT_RE.test(line)
     ) {
       removedMultilineDelimiter = openMultilineString(line)
       continue

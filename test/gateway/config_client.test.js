@@ -32,7 +32,7 @@ function centralConfig(overrides = {}) {
  * Build a fake IdentitySource that satisfies ConfigClient's contract: a
  * persisted-path field (used to derive the etag sidecar location), plus
  * `getCurrentJwt` and `refresh` methods. Tests don't need the full identity
- * lifecycle here — that's covered in test/gateway/identity.test.js.
+ * lifecycle here; that's covered in test/gateway/identity.test.js.
  *
  * @param {{
  *   jwt?: string,
@@ -56,15 +56,16 @@ function fakeIdentityClient(opts) {
     persistedPath: opts.persistedPath,
     calls,
     get jwt() { return currentJwt },
-    async getCurrentJwt() {
+    getCurrentJwt() {
       calls.getCurrentJwt++
-      if (opts.getCurrentJwtThrows) throw opts.getCurrentJwtThrows()
-      return currentJwt
+      if (opts.getCurrentJwtThrows) return Promise.reject(opts.getCurrentJwtThrows())
+      return Promise.resolve(currentJwt)
     },
-    async refresh() {
+    refresh() {
       calls.refresh++
-      if (opts.refreshThrows) throw opts.refreshThrows()
+      if (opts.refreshThrows) return Promise.reject(opts.refreshThrows())
       currentJwt = opts.refreshedJwt ?? `${currentJwt}-refreshed`
+      return Promise.resolve()
     },
   }
 }
@@ -170,7 +171,7 @@ function gatewayConfig(opts = {}) {
   }
 }
 
-describe('ConfigClient.tick — first fetch', () => {
+describe('ConfigClient.tick: first fetch', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -256,7 +257,7 @@ describe('ConfigClient.tick — first fetch', () => {
   })
 })
 
-describe('ConfigClient.tick — config change & validation', () => {
+describe('ConfigClient.tick: config change & validation', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -286,7 +287,7 @@ describe('ConfigClient.tick — config change & validation', () => {
     client.on('config-changed', (e) => { events.push(e) })
 
     await client.tick() // initial 200
-    await client.tick() // 304 — no event
+    await client.tick() // 304, no event
     await client.tick() // updated 200
 
     expect(events).toHaveLength(2)
@@ -309,15 +310,15 @@ describe('ConfigClient.tick — config change & validation', () => {
 
     expect(emitted).toBe(0)
     expect(stderr.value()).toMatch(/server returned invalid config/)
-    // The normal cadence still applies — invalid configs aren't a transport
+    // The normal cadence still applies; invalid configs aren't a transport
     // failure, so we don't escalate the backoff.
     expect(next).toBe(DEFAULT_POLL_INTERVAL_SECONDS)
-    // ETag is NOT advanced to the bad one — keep what we had (none).
+    // ETag is NOT advanced to the bad one: keep what we had (none).
     expect(client.etag).toBeUndefined()
   })
 })
 
-describe('ConfigClient.tick — auth (401)', () => {
+describe('ConfigClient.tick: auth (401)', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -390,7 +391,7 @@ describe('ConfigClient.tick — auth (401)', () => {
   })
 })
 
-describe('ConfigClient.tick — 404 not registered', () => {
+describe('ConfigClient.tick: 404 not registered', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -428,7 +429,7 @@ describe('ConfigClient.tick — 404 not registered', () => {
   })
 })
 
-describe('ConfigClient.tick — transport failures (network / 5xx)', () => {
+describe('ConfigClient.tick: transport failures (network / 5xx)', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -483,7 +484,7 @@ describe('ConfigClient.tick — transport failures (network / 5xx)', () => {
   })
 })
 
-describe('ConfigClient — start / stop / poll interval', () => {
+describe('ConfigClient: start / stop / poll interval', () => {
   /** @type {string} */
   let dir
   /** @type {string} */
@@ -577,7 +578,7 @@ describe('ConfigClient — start / stop / poll interval', () => {
     const tickPromise = client.tick()
     let idleResolved = false
     const idle = client.whenIdle().then(() => { idleResolved = true })
-    // Yield once — whenIdle must NOT resolve while the fetch hangs.
+    // Yield once: whenIdle must NOT resolve while the fetch hangs.
     await new Promise((r) => setTimeout(r, 0))
     expect(idleResolved).toBe(false)
     if (!resolveFetch) throw new Error('fetch did not register a resolver')
@@ -588,7 +589,7 @@ describe('ConfigClient — start / stop / poll interval', () => {
   })
 })
 
-describe('ConfigClient — construction', () => {
+describe('ConfigClient: construction', () => {
   it('throws when central_server.url is missing', () => {
     const identity = fakeIdentityClient({ persistedPath: '/tmp/no.json' })
     expect(() => new ConfigClient(/** @type {any} */ ({ identity: {} }), identity)).toThrow(

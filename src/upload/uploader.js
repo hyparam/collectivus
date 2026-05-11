@@ -3,7 +3,7 @@ import { rowsToParquet } from './parquet.js'
 import { readPartitionRows, walkPartitionFiles } from './reader.js'
 
 /**
- * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
+ * @import { LedgerEntry, ResolvedUploadOptions, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
  */
 
 const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
@@ -79,11 +79,12 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
   // Fallback existence check protects us if the ledger was lost.
   const head = await withRetry(() => connector.headObject(key), resolved)
   if (head !== undefined) {
+    /** @type {LedgerEntry} */
     const entry = {
       service: job.service,
       signal: job.signal,
       date: job.date,
-      status: /** @type {'committed'} */ ('committed'),
+      status: 'committed',
       key,
       size: head.size,
       rows: 0,
@@ -106,11 +107,12 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
   const parquet = await rowsToParquet(job.signal, rows, options.partitionDimensions)
   await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
 
+  /** @type {LedgerEntry} */
   const entry = {
     service: job.service,
     signal: job.signal,
     date: job.date,
-    status: /** @type {'committed'} */ ('committed'),
+    status: 'committed',
     key,
     size: parquet.byteLength,
     rows: rows.length,
@@ -175,7 +177,7 @@ async function withRetry(fn, deps) {
       lastErr = err
       if (!isTransient(err)) throw err
       if (attempt === deps.maxAttempts - 1) break
-      await deps.sleep(deps.initialBackoffMs * (4 ** attempt))
+      await deps.sleep(deps.initialBackoffMs * 4 ** attempt)
     }
   }
   // Exhausted retries on a transient connector error: tag it so the

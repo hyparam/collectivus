@@ -32,7 +32,7 @@ function memoStream() {
 /**
  * Build a stub `StartedListener` whose `stop()` flips a flag the test asserts
  * on. The hot-reload e2e cares about which sections restart, not what the
- * listeners do, so a thin counter is enough — the real otel/proxy listeners
+ * listeners do, so a thin counter is enough; the real otel/proxy listeners
  * are tested elsewhere.
  *
  * @param {string} name
@@ -43,7 +43,7 @@ function stubListener(name) {
     name,
     description: `${name} listener (stub)`,
     stops: 0,
-    async stop() { this.stops++ },
+    stop() { this.stops++; return Promise.resolve() },
   }
 }
 
@@ -66,12 +66,12 @@ function makeFactoryBuilder() {
    * @param {string} section
    */
   function seed(factories, section) {
-    factories.set(section, async () => {
+    factories.set(section, () => {
       const list = instances.get(section) ?? []
       const inst = stubListener(`${section}#${list.length + 1}`)
       list.push(inst)
       instances.set(section, list)
-      return inst
+      return Promise.resolve(inst)
     })
   }
   return {
@@ -147,7 +147,7 @@ function gatewayCfg(overrides = {}) {
     }
   }
   if (overrides.upload === undefined) {
-    // Default off — most diffs only care about otel/proxy.
+    // Default off; most diffs only care about otel/proxy.
   } else if (overrides.upload !== null) {
     cfg.upload = overrides.upload
   }
@@ -228,7 +228,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     // === 4. Pre-config tick: 404 with NOT_REGISTERED_BACKOFF backoff. ===
     const firstDelay = await configClient.tick()
     // The 404 path returns NOT_REGISTERED_BACKOFF_SECONDS (5 min); we don't
-    // assert the exact value here (covered in unit tests) — we only care that
+    // assert the exact value here (covered in unit tests); we only care that
     // no event fires and stderr surfaces the operator-friendly hint once.
     expect(firstDelay).toBeGreaterThan(0)
     expect(events).toHaveLength(0)
@@ -267,7 +267,7 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     const stdout = memoStream()
     const stderr2 = memoStream()
 
-    // Initial start (synthetic — `cli.js` does this on launch from the
+    // Initial start (synthetic; `cli.js` does this on launch from the
     // boot-time config; we simulate by feeding an "empty → cfgV1" diff).
     /** @type {CollectivusConfig} */
     const emptyCfg = { version: 1, role: 'gateway' }
@@ -284,19 +284,19 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
     expect(instances.get('otel')).toHaveLength(1)
     expect(instances.get('proxy')).toHaveLength(1)
     // Pull these from `instances` rather than `liveRegistry` so the stub-
-    // listener fields (`stops`, `name`) survive — `liveRegistry` is typed as
+    // listener fields (`stops`, `name`) survive; `liveRegistry` is typed as
     // the public `StartedListener` interface only.
     const otelInstance1 = instances.get('otel')?.[0]
     const proxyInstance1 = instances.get('proxy')?.[0]
 
-    // Fetch cfgV2 (third tick — cfgV2 is in the registry from step 7).
+    // Fetch cfgV2 (third tick: cfgV2 is in the registry from step 7).
     const thirdDelay = await configClient.tick()
     expect(thirdDelay).toBe(1)
     expect(events).toHaveLength(2)
     expect(events[1].newConfig).toEqual(cfgV2)
     expect(events[1].etag).not.toBe(setResult.etag)
 
-    // Apply the cfgV1 → cfgV2 diff — only proxy should restart.
+    // Apply the cfgV1 → cfgV2 diff: only proxy should restart.
     await applyDiff(
       diffConfig(cfgV1, cfgV2),
       cfgV1,
@@ -305,8 +305,8 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
       factoryBuilder,
       { stdout, stderr: stderr2 }
     )
-    expect(instances.get('otel')).toHaveLength(1) // unchanged — same instance
-    expect(instances.get('proxy')).toHaveLength(2) // restarted — new instance
+    expect(instances.get('otel')).toHaveLength(1) // unchanged, same instance
+    expect(instances.get('proxy')).toHaveLength(2) // restarted, new instance
     expect(liveRegistry.get('otel')).toBe(otelInstance1)
     expect(liveRegistry.get('proxy')).not.toBe(proxyInstance1)
     if (!proxyInstance1) throw new Error('proxyInstance1 missing')
@@ -323,11 +323,11 @@ describe('config vending e2e: bootstrap → vend → hot reload', () => {
 
   it('rejects an invalid config at server-write time (operator does not need to ship it to the gateway to find out)', () => {
     // The bead spec calls this out as part of B.1 acceptance, but the e2e
-    // surface lives at the operator-CLI / registry boundary — re-asserted
+    // surface lives at the operator-CLI / registry boundary, re-asserted
     // here so a regression in either layer is caught by the e2e suite, not
     // just the per-component unit tests.
     expect(() => registry.setConfig('gw-e2e', { version: 999 })).toThrow(ConfigError)
-    // Filesystem must remain empty — no half-written file from a rejected
+    // Filesystem must remain empty: no half-written file from a rejected
     // setConfig.
     expect(fs.existsSync(path.join(configsDir, 'gw-e2e.json'))).toBe(false)
   })

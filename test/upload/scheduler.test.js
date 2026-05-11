@@ -40,7 +40,7 @@ describe('createScheduler', () => {
     let ticks = 0
     const scheduler = createScheduler({
       time: '12:00',
-      tick: async () => { ticks++ },
+      tick: () => { ticks++; return Promise.resolve() },
     }, {
       now: () => now,
       setTimeoutFn: (handler, delay) => {
@@ -80,7 +80,7 @@ describe('createScheduler', () => {
     const scheduler = createScheduler({
       time: '12:00',
       skipInitialTick: true,
-      tick: async () => { ticks++ },
+      tick: () => { ticks++; return Promise.resolve() },
     }, {
       now: () => now,
       setTimeoutFn: (handler, delay) => {
@@ -107,9 +107,9 @@ describe('createScheduler', () => {
     const scheduler = createScheduler({
       time: '12:00',
       retryDelayMs: 15 * 60 * 1000,
-      tick: async () => {
+      tick: () => {
         tickCount++
-        return { retry: tickCount === 1 }
+        return Promise.resolve({ retry: tickCount === 1 })
       },
     }, {
       now: () => now,
@@ -149,9 +149,9 @@ describe('createScheduler', () => {
     const scheduler = createScheduler({
       time: '12:00',
       retryDelayMs: 15 * 60 * 1000,
-      tick: async () => {
+      tick: () => {
         tickCount++
-        throw new Error('boom')
+        return Promise.reject(new Error('boom'))
       },
     }, {
       now: () => now,

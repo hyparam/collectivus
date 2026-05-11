@@ -40,6 +40,12 @@ export interface ConfigRegistryEntry {
   etag: string
 }
 
+/** Serializable data needed by the file-backed config registry helpers. */
+export interface ConfigRegistry {
+  /** Directory containing one `<gateway_id>.json` file per gateway. */
+  configsDir: string
+}
+
 /** Signal kinds accepted on `POST /v1/ingest/:signal`. */
 export type IngestSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
 

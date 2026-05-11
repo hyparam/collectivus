@@ -118,12 +118,12 @@ writes v1 only.
 ## Config vending (multi-host deployments)
 
 For fleets of gateways behind a single audit/storage backend, run one
-collectivus host as a `role: server` central control plane and point each
-gateway at it as `role: gateway`. The server vendors per-gateway configs over
-`GET /v1/config` (with `If-None-Match` / `ETag`) and accepts ingest from each
-gateway. Gateways pull their config every `central_server.poll_interval_seconds`
-(default 30, range 5–3600) and hot-reload only the listener whose section
-changed.
+collectivus host as the central server (`role: "server"`) and point each
+managed host at it as a gateway (`role: "gateway"`). The central server vendors
+per-gateway configs over `GET /v1/config` (with `If-None-Match` / `ETag`) and
+accepts ingest from each gateway. Gateways pull their config every
+`central_server.poll_interval_seconds` (default 30, range 5–3600) and
+hot-reload only the listener whose section changed.
 
 Operator workflow on the server host:
 
@@ -143,6 +143,10 @@ ctvs config get gw-prod-1 --server-config /etc/collectivus-server.json
 ctvs config list --server-config /etc/collectivus-server.json
 ctvs config delete gw-prod-1 --server-config /etc/collectivus-server.json
 ```
+
+These commands are local operator tools for the central server host. They read
+the server config only to find the same on-disk config registry and bootstrap
+token store used by the running central server.
 
 Gateway side, with the token pasted into `central_server.identity.bootstrap_token`:
 
@@ -167,9 +171,8 @@ ctvs --config /etc/collectivus.json
 Once the gateway has a JWT, the bootstrap token can be removed from the config
 — refresh against the central server takes over until the JWT itself rotates.
 
-The interactive walkthrough builds either side: `npx collectivus` with no args
-offers options 4 (Gateway) and 5 (Server) alongside the standard standalone
-flow.
+The interactive walkthrough builds all three roles: Standalone, Gateway, and
+Central server.
 
 ## S3 upload
 
@@ -178,13 +181,13 @@ Collectivus always writes raw JSONL to your local sink directory. When the
 JSONL into Parquet partitions in S3. Object keys are Hive-partitioned:
 
 ```
-<prefix>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet
+<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet
 ```
 
 This is useful for long-term retention, columnar queries with
 Athena / DuckDB / Snowflake, and offsite backup of recordings that would
 otherwise live only on the daemon host. The local JSONL is the source of
-truth; the S3 drain is additive and idempotent (a per-(service, signal,
+truth; the S3 drain is additive and idempotent (a per-(gateway_id, signal,
 date) ledger and a HEAD check on the destination key prevent duplicate
 uploads).
 
@@ -224,17 +227,18 @@ Output layout under `sink.dir`:
 
 ```
 collectivus-data/
-├── traces/<UTC-date>.jsonl       # raw export envelope
-├── metrics/<UTC-date>.jsonl
-├── logs/<UTC-date>.jsonl
-└── services/<service.name>/
-    ├── traces-<UTC-date>.jsonl   # one row per span
-    ├── metrics-<UTC-date>.jsonl  # one row per data point
-    └── logs-<UTC-date>.jsonl     # one row per log record
+└── <gateway_id>/
+    ├── raw/
+    │   ├── traces/<UTC-date>.jsonl       # raw export envelope
+    │   ├── metrics/<UTC-date>.jsonl
+    │   └── logs/<UTC-date>.jsonl
+    ├── traces/<UTC-date>.jsonl           # one row per span
+    ├── metrics/<UTC-date>.jsonl          # one row per data point
+    └── logs/<UTC-date>.jsonl             # one row per log record
 ```
 
-Each row in `services/` is a normalized JSON object — span, data point, or
-log record — partitioned by `service.name`.
+Each normalized row includes the source `service.name`, while files are
+partitioned by `gateway_id`, signal, and date.
 
 ### Verify the OTLP receiver
 
@@ -252,7 +256,7 @@ The proxy is a transparent reverse proxy for Anthropic's Messages API. With
 through collectivus, gets forwarded to `https://api.anthropic.com`, and is
 recorded to JSONL.
 
-Two row kinds in `<sink.dir>/proxy.jsonl`:
+Two row kinds in `<sink.dir>/<gateway_id>/proxy/<UTC-date>.jsonl`:
 
 **Per stream event** (one per SSE event for streamed responses):
 

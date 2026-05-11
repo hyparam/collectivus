@@ -41,10 +41,8 @@ const DEFAULT_REDACT = [
 ]
 
 const SINGLE_PROXY_LISTEN = '127.0.0.1:8787'
-const ENTERPRISE_PROXY_LISTEN = '0.0.0.0:8787'
-const ENTERPRISE_OTEL_LISTEN = '0.0.0.0:4318'
 const DEFAULT_PROXY_LISTEN = SINGLE_PROXY_LISTEN
-const DEFAULT_OTEL_LISTEN = ENTERPRISE_OTEL_LISTEN
+const DEFAULT_OTEL_LISTEN = '0.0.0.0:4318'
 const DEFAULT_CONTROL_PLANE_LISTEN = '0.0.0.0:8788'
 const DEFAULT_POLL_INTERVAL_SECONDS = 30
 const POLL_INTERVAL_MIN_SECONDS = 5
@@ -93,11 +91,11 @@ function defaultSinkDir(homeDir) {
 
 /**
  * Run the no-arg interactive walkthrough. The top-level question chooses
- * between local single-user capture, shared remote-config hosting, managed
- * gateways, and a control-plane server. Each branch asks just the questions it
- * needs, builds a v1 `CollectivusConfig`, writes it to disk, and (for proxy
- * setups on darwin/linux) chains into `runInstall` to install the daemon and
- * optionally attach Claude Code.
+ * between standalone local capture, a managed gateway, and a central server.
+ * Each branch asks just the questions it needs, builds a v1
+ * `CollectivusConfig`, writes it to disk, and (for proxy setups on
+ * darwin/linux) chains into `runInstall` to install the daemon and optionally
+ * attach Claude Code.
  *
  * If a config already exists at the default save path, summarizes it first and
  * offers the user the choice to reuse it (skipping straight to the daemon
@@ -145,39 +143,29 @@ export async function runInit(hooks = {}) {
   }
 
   stdout.write('\nHow will you use collectivus?\n\n')
-  stdout.write('  1) Single-user (local)\n')
+  stdout.write('  1) Standalone\n')
   stdout.write('     Run on this machine only. The proxy listens on localhost and\n')
   stdout.write('     recordings stay on disk here. Best for personal dev work.\n\n')
-  stdout.write('  2) Shared config URL / central recorder\n')
-  stdout.write('     Set this machine up to host proxy and OTel capture for a team, then\n')
-  stdout.write('     print an npx command that points clients at its remote config URL.\n\n')
-  stdout.write('  3) Gateway (managed by a control-plane server)\n')
+  stdout.write('  2) Gateway\n')
   stdout.write('     Records locally, pulls per-gateway config from a central server,\n')
   stdout.write('     hot-reloads config changes, and ships ingest back to the server.\n\n')
-  stdout.write('  4) Control-plane server\n')
+  stdout.write('  3) Central server\n')
   stdout.write('     Vendors per-gateway configs over /v1/config, accepts ingest from\n')
   stdout.write('     gateways, and issues JWTs from one-shot bootstrap tokens.\n\n')
 
-  /** @type {'single' | 'enterprise' | 'gateway' | 'server'} */
+  /** @type {'single' | 'gateway' | 'server'} */
   let kind
   for (;;) {
     const raw = (await prompt('Choose [1]: ')).trim()
     const c = raw === '' ? '1' : raw
     if (c === '1') { kind = 'single'; break }
-    if (c === '2') { kind = 'enterprise'; break }
-    if (c === '3') { kind = 'gateway'; break }
-    if (c === '4') { kind = 'server'; break }
-    stderr.write(`error: please choose 1, 2, 3, or 4 (got ${JSON.stringify(raw)})\n`)
+    if (c === '2') { kind = 'gateway'; break }
+    if (c === '3') { kind = 'server'; break }
+    stderr.write(`error: please choose 1, 2, or 3 (got ${JSON.stringify(raw)})\n`)
   }
 
   if (kind === 'single') {
     return runSingleUserFlow({
-      stdout, stderr, prompt, writeFile, platform, binPath, cwd,
-      defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
-    })
-  }
-  if (kind === 'enterprise') {
-    return runEnterpriseFlow({
       stdout, stderr, prompt, writeFile, platform, binPath, cwd,
       defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
     })
@@ -197,10 +185,10 @@ export async function runInit(hooks = {}) {
 }
 
 /**
- * Minimal single-user walkthrough. Defaults the proxy to 127.0.0.1:8787
+ * Minimal standalone walkthrough. Defaults the proxy to 127.0.0.1:8787
  * forwarding to Anthropic and asks only where to keep recordings and where
  * to save the config. Users wanting a different upstream, an OTLP receiver,
- * or S3 upload edit the config (or re-run init and choose enterprise mode).
+ * or S3 upload edit the config (or re-run init and choose gateway mode).
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
@@ -219,7 +207,7 @@ export async function runInit(hooks = {}) {
 async function runSingleUserFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
-  stdout.write('\nSingle-user mode. The proxy will listen on 127.0.0.1:8787 and\n')
+  stdout.write('\nStandalone mode. The proxy will listen on 127.0.0.1:8787 and\n')
   stdout.write('forward LLM traffic to Anthropic. Edit the config later to switch\n')
   stdout.write('upstreams or add the OTLP receiver.\n\n')
 
@@ -258,102 +246,6 @@ async function runSingleUserFlow(args) {
     stdout, prompt, platform, binPath,
     runInstall: args.runInstall,
     offerClaudeCode: true,
-  })
-}
-
-/**
- * Enterprise (central server) walkthrough. Asks for the public host the
- * server will be reachable at (used to print the client install command),
- * which LLM upstream to forward to, the listen addresses for the proxy and
- * OTLP receiver, the sink directory, optional S3 upload, and the config save
- * path.
- *
- * Ends by printing an ASCII-boxed `npx collectivus --config <url>` line that
- * team members run on their own machines.
- *
- * @param {{
- *   stdout: { write: (s: string) => void },
- *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
- *   writeFile: (path: string, contents: string) => void,
- *   platform: NodeJS.Platform,
- *   binPath: string,
- *   cwd: string,
- *   defaultCfgPath: string,
- *   defaultSink: string,
- *   runInstall?: (args: string[]) => Promise<number>,
- * }} args
- * @returns {Promise<number>}
- */
-async function runEnterpriseFlow(args) {
-  const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
-
-  stdout.write('\nEnterprise mode: setting up this machine as the central server.\n')
-
-  stdout.write('\nPublic host or URL clients will reach this server at. Used to\n')
-  stdout.write('build the install command for team members. Examples:\n')
-  stdout.write('  https://collectivus.acme.internal\n')
-  stdout.write('  collectivus.acme.com:8787\n')
-  /** @type {string} */
-  let publicHost
-  for (;;) {
-    const ans = (await prompt('Public host: ')).trim()
-    if (ans !== '') { publicHost = ans; break }
-    stderr.write('error: public host is required\n')
-  }
-  const publicUrl = normalizePublicUrl(publicHost)
-
-  const upstream = await askProvider(prompt, stdout, stderr)
-
-  stdout.write('\nRun the OTLP receiver alongside the proxy? It accepts OpenTelemetry\n')
-  stdout.write('traces, metrics, and logs over OTLP/HTTP.\n')
-  const otelAns = (await prompt('Enable OTLP receiver? [Y/n]: ')).trim()
-  /** @type {OtelConfig | undefined} */
-  let otel
-  if (isYes(otelAns)) {
-    const otelListenAns = (await prompt(`OTLP listen [${ENTERPRISE_OTEL_LISTEN}]: `)).trim()
-    otel = { listen: otelListenAns === '' ? ENTERPRISE_OTEL_LISTEN : otelListenAns }
-  }
-
-  stdout.write('\nWhere should the server write recordings? Each signal lands in a\n')
-  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
-  const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
-  const sinkDir = sinkAns === '' ? defaultSink : sinkAns
-
-  const upload = await askUpload(prompt, stdout, stderr)
-
-  const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
-  const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
-
-  /** @type {CollectivusConfig} */
-  const config = {
-    version: 1,
-    proxy: {
-      listen: ENTERPRISE_PROXY_LISTEN,
-      upstreams: [
-        {
-          name: upstream.name,
-          base_url: upstream.baseUrl,
-          match: { path_prefix: upstream.prefix },
-        },
-      ],
-      redact_headers: DEFAULT_REDACT,
-    },
-    sink: { type: 'file', dir: sinkDir },
-  }
-  if (otel) config.otel = otel
-  if (upload) config.upload = upload
-
-  const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
-  if (!written) return 0
-
-  printClientInstallBox(stdout, publicUrl)
-
-  return offerDaemonInstall({
-    configPath: cfgPath, wantProxy: true,
-    stdout, prompt, platform, binPath,
-    runInstall: args.runInstall,
-    offerClaudeCode: false,
   })
 }
 
@@ -569,56 +461,6 @@ async function askUpload(prompt, stdout, stderr) {
   const upload = { bucket, region, prefix, time, signals }
   if (endpoint !== undefined) upload.endpoint = endpoint
   return upload
-}
-
-/**
- * Normalize a user-supplied public host into a fully-qualified URL with no
- * trailing slash. Bare hostnames get an `https://` scheme prepended; existing
- * schemes are preserved.
- *
- * @param {string} input
- * @returns {string}
- */
-function normalizePublicUrl(input) {
-  let url = input
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url
-  url = url.replace(/\/+$/, '')
-  return url
-}
-
-/**
- * Print the client install command in a box-drawn ASCII frame so it's hard
- * for an admin to scroll past without copying.
- *
- * @param {{ write: (s: string) => void }} stdout
- * @param {string} publicUrl
- */
-function printClientInstallBox(stdout, publicUrl) {
-  const command = `npx collectivus --config ${publicUrl}/collectivus.json`
-  const lines = [
-    'Run this on each client machine to point it at the server:',
-    '',
-    command,
-  ]
-  stdout.write('\n' + asciiBox(lines) + '\n')
-}
-
-/**
- * Wrap `lines` in a Unicode box-drawing frame. Width fits the longest line.
- *
- * @param {string[]} lines
- * @returns {string}
- */
-function asciiBox(lines) {
-  const width = lines.reduce(function(m, l) { return Math.max(m, l.length) }, 0)
-  const pad = 2
-  const inner = width + pad * 2
-  const top = '╔' + '═'.repeat(inner) + '╗'
-  const bot = '╚' + '═'.repeat(inner) + '╝'
-  const middle = lines.map(function(l) {
-    return '║' + ' '.repeat(pad) + l + ' '.repeat(width - l.length) + ' '.repeat(pad) + '║'
-  })
-  return [top, ...middle, bot].join('\n') + '\n'
 }
 
 /**
@@ -870,7 +712,7 @@ function deriveUpstreamName(baseUrl) {
 async function runGatewayFlow(args) {
   const { stdout, stderr, prompt, cwd, defaultCfgPath, defaultSink, writeFile, platform, binPath } = args
 
-  stdout.write('\nGateway mode\n')
+  stdout.write('\nGateway\n')
   stdout.write('────────────\n')
   stdout.write('This binary will pull its configuration from a central collectivus\n')
   stdout.write('server and ship its recordings there as ingest.\n')
@@ -944,7 +786,7 @@ async function runGatewayFlow(args) {
 }
 
 /**
- * Walkthrough sub-flow for `role: server` deployments. The server vendors
+ * Walkthrough sub-flow for central server (`role: server`) deployments. The server vendors
  * per-gateway configs and accepts ingest. Operators do not point apps at this
  * binary directly (there is no proxy listener), so the daemon-install offer
  * is intentionally skipped.
@@ -962,14 +804,14 @@ async function runGatewayFlow(args) {
 async function runServerFlow(args) {
   const { stdout, stderr, prompt, cwd, defaultCfgPath, writeFile } = args
 
-  stdout.write('\nServer mode\n')
-  stdout.write('───────────\n')
-  stdout.write('This binary will run the central control-plane HTTP listener that\n')
+  stdout.write('\nCentral server\n')
+  stdout.write('──────────────\n')
+  stdout.write('This binary will run the central-server HTTP listener that\n')
   stdout.write('vendors per-gateway configs and accepts ingest from gateways.\n')
 
   stdout.write('\nWhere should the control plane listen? Gateways will reach this\n')
   stdout.write('address; 0.0.0.0 listens on all interfaces.\n')
-  const listenAns = (await prompt(`Control-plane listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
+  const listenAns = (await prompt(`Central server listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
   const controlPlaneListen = listenAns === '' ? DEFAULT_CONTROL_PLANE_LISTEN : listenAns
 
   // The data_dir prompt is the B.5 acceptance touchpoint: the registry stores
@@ -1018,7 +860,7 @@ async function runServerFlow(args) {
     query: { parquet: { enabled: true } },
   }
 
-  // Optional upload. Server mode drains the multi-tenant ingest spool to S3.
+  // Optional upload. Central server mode drains the multi-tenant ingest spool to S3.
   const upload = await askUpload(prompt, stdout, stderr)
   if (upload) config.upload = upload
 

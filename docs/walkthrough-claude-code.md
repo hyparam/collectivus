@@ -11,7 +11,7 @@ The whole pipeline is local — no third-party services, no server-side keys.
 ## 1. Start collectivus with a proxy config
 
 The fastest path is the interactive walkthrough — run `collectivus` with no
-arguments and choose single-user mode at the first prompt. It writes the
+arguments and choose Standalone at the first prompt. It writes the
 config to `~/.hyp/collectivus.json` (proxy on 127.0.0.1:8787 forwarding to
 Anthropic), recordings to `~/.hyp/collectivus/`, and (if you opt in) sets
 up the LaunchAgent / systemd unit and points Claude Code at the proxy:
@@ -61,7 +61,7 @@ npx collectivus --config collectivus.json
 You should see:
 
 ```
-Proxy listener bound on 127.0.0.1:8787, recording to ./collectivus-data/proxy.jsonl
+Proxy listener bound on 127.0.0.1:8787, recording under ./collectivus-data/<gateway_id>/proxy/
 ```
 
 ## 2. Point claude-code at the proxy
@@ -83,7 +83,9 @@ upstream traffic. Collectivus is observational only.
 ## 3. Watch traffic land in JSONL
 
 ```bash
-tail -f collectivus-data/proxy.jsonl
+GATEWAY_ID=${USER}
+UTC_DATE=$(date -u +%F)
+tail -f "collectivus-data/$GATEWAY_ID/proxy/$UTC_DATE.jsonl"
 ```
 
 Two row kinds interleave:
@@ -114,7 +116,7 @@ Average request duration, by model:
 
 ```bash
 jq -r 'select(.kind=="exchange") | [(.request.body | fromjson).model, .duration_ms] | @tsv' \
-  < collectivus-data/proxy.jsonl \
+  < "collectivus-data/$GATEWAY_ID/proxy/$UTC_DATE.jsonl" \
 | awk -F'\t' '{ count[$1]++; sum[$1]+=$2 }
               END { for (m in count) printf "%s\t%d calls\tavg %dms\n", m, count[m], sum[m]/count[m] }'
 ```
@@ -123,14 +125,14 @@ All assistant text deltas from the most recent exchange:
 
 ```bash
 jq -r 'select(.kind=="stream_event" and .event=="content_block_delta") | (.data | fromjson).delta.text // empty' \
-  < collectivus-data/proxy.jsonl
+  < "collectivus-data/$GATEWAY_ID/proxy/$UTC_DATE.jsonl"
 ```
 
 Replay one exchange (events plus its terminating row):
 
 ```bash
-EXCHANGE_ID=$(jq -r 'select(.kind=="exchange") | .exchange_id' < collectivus-data/proxy.jsonl | tail -1)
-jq -c "select(.exchange_id==\"$EXCHANGE_ID\")" < collectivus-data/proxy.jsonl
+EXCHANGE_ID=$(jq -r 'select(.kind=="exchange") | .exchange_id' < "collectivus-data/$GATEWAY_ID/proxy/$UTC_DATE.jsonl" | tail -1)
+jq -c "select(.exchange_id==\"$EXCHANGE_ID\")" < "collectivus-data/$GATEWAY_ID/proxy/$UTC_DATE.jsonl"
 ```
 
 ## 5. Shut down
@@ -166,15 +168,17 @@ signals from one binary:
 }
 ```
 
-The OTLP receiver writes to `<dir>/{traces,metrics,logs}/…` exactly as before;
-the proxy writes to `<dir>/proxy.jsonl`.
+The OTLP receiver writes normalized rows to
+`<dir>/<gateway_id>/{traces,metrics,logs}/…` and raw envelopes to
+`<dir>/<gateway_id>/raw/{traces,metrics,logs}/…`; the proxy writes to
+`<dir>/<gateway_id>/proxy/<date>.jsonl`.
 
 ## Multi-host: gateway pulling its config from a central server
 
 The flow above runs collectivus standalone — a single host that owns its own
-config and recordings. For fleets, you can split it: one host runs `role:
-server` and vendors per-gateway configs over the control-plane API; each
-gateway runs `role: gateway` and pulls its config from the server.
+config and recordings. For fleets, you can split it: one host runs
+`role: "server"` and vendors per-gateway configs over the central-server API;
+each gateway runs `role: "gateway"` and pulls its config from the server.
 
 Pick this when you want centralised config management across many hosts (one
 operator updates `gw-prod-1.json` on the server; the gateway picks up the
@@ -186,13 +190,13 @@ The interactive walkthrough exposes both sides:
 
 ```bash
 npx collectivus
-# What would you like collectivus to do?
-#   ...
-#   4) Gateway (multi-host deployment)
-#   5) Server (central control plane)
+# How will you use collectivus?
+#   1) Standalone
+#   2) Gateway
+#   3) Central server
 ```
 
-Option 5 prompts for the control-plane listen address, server data directory
+Option 3 prompts for the central-server listen address, server data directory
 (default `~/.hyp/collectivus/server-data`), an HMAC secret for signing JWTs,
 and an optional S3 upload block — then prints the operator commands you need
 to run next:
@@ -202,7 +206,7 @@ collectivus config bootstrap-token issue gw-prod-1 --server-config server.json
 collectivus config set gw-prod-1 --server-config server.json --file gw-prod-1.json
 ```
 
-Option 4 prompts for the central-server URL and `poll_interval_seconds`
+Option 2 prompts for the central-server URL and `poll_interval_seconds`
 (default 30) and writes a `role: gateway` config. The bootstrap token is NOT
 collected at the prompt — pasting it into readline puts it in shell history.
 Edit `central_server.identity.bootstrap_token` in the saved config by hand
@@ -219,7 +223,7 @@ sink-directory prompt. Answer `y` and it collects bucket / region / prefix /
 time / signals (no AWS keys — those are read from the environment at daemon
 start) and writes an `upload` block into the saved config. Once configured,
 collectivus drains each previous day's JSONL into Hive-partitioned Parquet
-under `<prefix>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a
+under `<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a
 day, leaving the local JSONL untouched. See the
 [S3 upload](../README.md#s3-upload) section of the README for the full
 config schema and credential resolution rules.

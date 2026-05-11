@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { getClaims } from './auth.js'
+import { parseContentType, readTextBody, writeError, writeJson, writeRetryAfterJson } from './http.js'
+import { TokenBucket } from './rate_limit.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
@@ -242,7 +244,7 @@ export class Ingest {
       return
     }
 
-    const body = await readNdjsonBody(req, MAX_INGEST_BODY_BYTES)
+    const body = await readTextBody(req, MAX_INGEST_BODY_BYTES)
     if (body.error) {
       writeError(res, body.status, body.error)
       return
@@ -406,74 +408,6 @@ function computeBatchBytes(lines) {
 }
 
 /**
- * Token bucket used to enforce the per-process bytes-per-second ceiling. The
- * standard "capacity = 1s of headroom, refill at the same rate" shape — a
- * bursty client gets one second of slack, sustained throughput is capped.
- *
- * Tokens are refilled lazily on each `tryConsume` so we don't burn an
- * interval timer per Ingest instance.
- */
-export class TokenBucket {
-  /**
-   * @param {{ capacity: number, refillPerSecond: number, now: () => number }} opts
-   */
-  constructor(opts) {
-    /** @type {number} */
-    this.capacity = opts.capacity
-    /** @type {number} */
-    this.refillPerSecond = opts.refillPerSecond
-    /** @type {() => number} */
-    this.now = opts.now
-    /** @type {number} */
-    this.tokens = opts.capacity
-    /** @type {number} */
-    this.lastRefillMs = opts.now()
-  }
-
-  /**
-   * Add tokens accrued since the previous refill. Idempotent and cheap —
-   * safe to call before every consume / inspection.
-   *
-   * @returns {void}
-   */
-  refill() {
-    const nowMs = this.now()
-    const elapsedMs = nowMs - this.lastRefillMs
-    if (elapsedMs <= 0) return
-    const accrued = elapsedMs * this.refillPerSecond / 1000
-    this.tokens = Math.min(this.capacity, this.tokens + accrued)
-    this.lastRefillMs = nowMs
-  }
-
-  /**
-   * Attempt to debit `cost` tokens. Returns true on success and consumes the
-   * tokens; returns false (and leaves the bucket untouched) when there's not
-   * enough slack. A `cost` larger than `capacity` always fails — the bucket
-   * can never grow past its ceiling.
-   *
-   * @param {number} cost
-   * @returns {boolean}
-   */
-  tryConsume(cost) {
-    this.refill()
-    if (this.tokens < cost) return false
-    this.tokens -= cost
-    return true
-  }
-
-  /**
-   * Tokens currently available, after a fresh refill. Exposed for tests and
-   * future observability hooks.
-   *
-   * @returns {number}
-   */
-  available() {
-    this.refill()
-    return this.tokens
-  }
-}
-
-/**
  * Open the target file with `O_APPEND`, write the joined batch in a single
  * `write()`, fsync, then close. Per-batch fsync trades throughput for
  * crash-safety: rows acknowledged with 202 are durable.
@@ -496,110 +430,6 @@ async function writeOnce(dir, file, lines) {
 }
 
 /**
- * Read the full request body into a UTF-8 string up to `maxBytes`. Returns
- * a discriminated `{ value, error }` shape so callers map errors to status
- * codes without try/catch flow.
- *
- * Body-size enforcement is two-layered, mirroring the identity endpoint:
- * an explicit `Content-Length` over the limit short-circuits before reading,
- * and chunked uploads are bounded as bytes accumulate.
- *
- * @param {IncomingMessage} req
- * @param {number} maxBytes
- * @returns {Promise<{ value: string, status: 200, error?: undefined } | { value?: undefined, status: 400 | 413, error: string }>}
- */
-function readNdjsonBody(req, maxBytes) {
-  return new Promise((resolve) => {
-    const contentLength = parseContentLength(req.headers['content-length'])
-    if (contentLength !== undefined && contentLength > maxBytes) {
-      resolve({ status: 413, error: 'request body too large' })
-      return
-    }
-    /** @type {Buffer[]} */
-    const chunks = []
-    let size = 0
-    let overflowed = false
-    let resolved = false
-    /** @param {{ status: 200, value: string } | { status: 400 | 413, error: string }} v */
-    function done(v) {
-      if (resolved) return
-      resolved = true
-      resolve(v)
-    }
-    req.on('data', (chunk) => {
-      if (overflowed) return
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-      size += buf.length
-      if (size > maxBytes) {
-        overflowed = true
-        chunks.length = 0
-        return
-      }
-      chunks.push(buf)
-    })
-    req.on('end', () => {
-      if (overflowed) {
-        done({ status: 413, error: 'request body too large' })
-        return
-      }
-      const raw = Buffer.concat(chunks).toString('utf8')
-      if (raw.length === 0) {
-        done({ status: 400, error: 'empty request body' })
-        return
-      }
-      done({ status: 200, value: raw })
-    })
-    req.on('error', (err) => {
-      done({ status: 400, error: `request error: ${err.message}` })
-    })
-  })
-}
-
-/**
- * @param {string | string[] | undefined} value
- * @returns {number | undefined}
- */
-function parseContentLength(value) {
-  if (typeof value !== 'string') return undefined
-  const n = Number.parseInt(value, 10)
-  if (!Number.isFinite(n) || n < 0 || String(n) !== value.trim()) return undefined
-  return n
-}
-
-/**
- * Strip parameters and lowercase the media type from a `Content-Type`
- * header. Returns the empty string when the header is missing.
- *
- * @param {string | string[] | undefined} value
- * @returns {string}
- */
-function parseContentType(value) {
-  if (typeof value !== 'string') return ''
-  const semi = value.indexOf(';')
-  const head = semi === -1 ? value : value.slice(0, semi)
-  return head.trim().toLowerCase()
-}
-
-/**
- * @param {ServerResponse} res
- * @param {number} status
- * @param {object} body
- */
-function writeJson(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify(body))
-}
-
-/**
- * @param {ServerResponse} res
- * @param {number} status
- * @param {string} message
- */
-function writeError(res, status, message) {
-  writeJson(res, status, { error: message })
-}
-
-/**
  * Backpressure response shape: status + `Retry-After` header + a body that
  * also reports the suggested wait. Same envelope for 429 and 503 so the
  * gateway-side retry loop (epic C.4) handles them with one branch.
@@ -610,9 +440,10 @@ function writeError(res, status, message) {
  * @param {number} retryAfterSeconds
  */
 function writeBackpressure(res, status, message, retryAfterSeconds) {
-  res.writeHead(status, {
-    'content-type': 'application/json',
-    'retry-after': String(retryAfterSeconds),
-  })
-  res.end(JSON.stringify({ error: message, retry_after_seconds: retryAfterSeconds }))
+  writeRetryAfterJson(
+    res,
+    status,
+    { error: message, retry_after_seconds: retryAfterSeconds },
+    retryAfterSeconds
+  )
 }

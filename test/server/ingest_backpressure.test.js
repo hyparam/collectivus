@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ControlPlane } from '../../src/server/control_plane.js'
-import { Ingest, TokenBucket } from '../../src/server/ingest.js'
+import { Ingest } from '../../src/server/ingest.js'
 import { signJwt } from '../../src/server/identity.js'
+import { TokenBucket } from '../../src/server/rate_limit.js'
 
 /**
  * @import { ServerConfig, IngestThrottleConfig } from '../../src/types.js'

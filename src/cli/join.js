@@ -1,8 +1,14 @@
+import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
 import process from 'node:process'
 import { runWithConfig } from '../cli.js'
+import { defaultConfigPath, isNpxBinPath } from './common.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
+ * @import { DaemonInstallOptions } from '../daemon/types.d.ts'
+ * @import { InstallHooks } from './types.d.ts'
  */
 
 const USAGE = `Usage:
@@ -51,12 +57,21 @@ export function parseJoinArgs(argv) {
  *   fetchFn?: typeof fetch,
  *   onShutdownRequested?: (handler: (signal: string) => void) => void,
  *   identityPersistedPath?: string,
+ *   binPath?: string,
+ *   configPath?: string,
+ *   logDir?: string,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   writeConfig?: (configPath: string, config: CollectivusConfig) => void,
+ *   installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>,
+ *   runInstall?: (argv: string[], hooks?: InstallHooks) => Promise<number>,
  * }} [hooks]
  * @returns {Promise<number>}
  */
 export async function runJoin(argv, env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
+  const binPath = hooks.binPath ?? process.argv[1] ?? ''
   const parsed = parseJoinArgs(argv)
   if (parsed.help) {
     stdout.write(USAGE + '\n')
@@ -89,11 +104,91 @@ export async function runJoin(argv, env, hooks = {}) {
     },
   }
 
+  if (isNpxCollectivusBinPath(binPath)) {
+    return installJoinedGateway(config, resolved, {
+      stdout,
+      stderr,
+      configPath: hooks.configPath,
+      logDir: hooks.logDir,
+      installGlobal: hooks.installGlobal,
+      resolveGlobalBinPath: hooks.resolveGlobalBinPath,
+      writeConfig: hooks.writeConfig,
+      installLaunchAgent: hooks.installLaunchAgent,
+      runInstall: hooks.runInstall,
+    })
+  }
+
   return runWithConfig(config, env, {
     stdout,
     stderr,
     onShutdownRequested: hooks.onShutdownRequested,
     identityPersistedPath: hooks.identityPersistedPath,
+  })
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {{ connect_url: string, gateway_id: string, expires_at: string, display_name?: string }} resolved
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   configPath?: string,
+ *   logDir?: string,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   writeConfig?: (configPath: string, config: CollectivusConfig) => void,
+ *   installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>,
+ *   runInstall?: (argv: string[], hooks?: InstallHooks) => Promise<number>,
+ * }} opts
+ * @returns {Promise<number>}
+ */
+async function installJoinedGateway(config, resolved, opts) {
+  const configPath = opts.configPath ?? defaultConfigPath()
+  const installGlobal = opts.installGlobal ?? defaultInstallGlobalCollectivus
+  const resolveGlobalBinPath = opts.resolveGlobalBinPath ?? defaultResolveGlobalBinPath
+  const writeConfig = opts.writeConfig ?? writeConfigAtomic
+
+  const display = resolved.display_name ? ` (${resolved.display_name})` : ''
+  opts.stdout.write(`Resolved join code for ${resolved.gateway_id}${display}; Central server ${resolved.connect_url}\n`)
+  opts.stdout.write('Installing collectivus globally with npm...\n')
+
+  /** @type {boolean} */
+  let installed
+  try {
+    installed = await installGlobal()
+  } catch (err) {
+    opts.stderr.write(`error: failed to install collectivus globally: ${formatError(err)}\n`)
+    return 1
+  }
+  if (!installed) {
+    opts.stderr.write('error: npm install -g collectivus failed\n')
+    return 1
+  }
+
+  /** @type {string} */
+  let globalBinPath
+  try {
+    globalBinPath = await resolveGlobalBinPath()
+  } catch (err) {
+    opts.stderr.write(`error: failed to locate globally installed collectivus: ${formatError(err)}\n`)
+    return 1
+  }
+
+  try {
+    writeConfig(configPath, config)
+  } catch (err) {
+    opts.stderr.write(`error: failed to write gateway config: ${formatError(err)}\n`)
+    return 1
+  }
+  opts.stdout.write(`✓ Gateway config written to ${configPath}\n`)
+
+  const runInstallFn = opts.runInstall ?? (await import('./install.js')).runInstall
+  return runInstallFn(['--config', configPath, '--no'], {
+    stdout: opts.stdout,
+    stderr: opts.stderr,
+    binPath: globalBinPath,
+    ...opts.logDir !== undefined ? { logDir: opts.logDir } : {},
+    ...opts.installLaunchAgent !== undefined ? { installLaunchAgent: opts.installLaunchAgent } : {},
   })
 }
 
@@ -180,6 +275,94 @@ function isHttpUrl(value) {
 function joinUrl(base, suffix) {
   const baseWithSlash = base.endsWith('/') ? base : `${base}/`
   return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
+}
+
+/**
+ * Install the current published package into npm's global prefix.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function defaultInstallGlobalCollectivus() {
+  const exitCode = await runInherited(defaultNpmPath(), ['install', '-g', 'collectivus'])
+  return exitCode === 0
+}
+
+/**
+ * @returns {Promise<string>}
+ */
+async function defaultResolveGlobalBinPath() {
+  const result = await runCaptured(defaultNpmPath(), ['root', '-g'])
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `npm root -g exited ${result.exitCode}`)
+  }
+  const root = result.stdout.trim()
+  if (!root) throw new Error('npm root -g returned an empty path')
+  const binPath = path.join(root, 'collectivus', 'bin', 'cli.js')
+  if (!fs.existsSync(binPath)) {
+    throw new Error(`${binPath} does not exist after npm install -g collectivus`)
+  }
+  return binPath
+}
+
+/**
+ * @returns {string}
+ */
+function defaultNpmPath() {
+  const name = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  return path.join(path.dirname(process.execPath), name)
+}
+
+/**
+ * @param {string} configPath
+ * @param {CollectivusConfig} config
+ * @returns {void}
+ */
+function writeConfigAtomic(configPath, config) {
+  const dir = path.dirname(configPath)
+  fs.mkdirSync(dir, { recursive: true })
+  const tmp = path.join(dir, `.${path.basename(configPath)}.${process.pid}.${Date.now()}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', 'utf8')
+  fs.renameSync(tmp, configPath)
+}
+
+/**
+ * @param {string} binPath
+ * @returns {boolean}
+ */
+function isNpxCollectivusBinPath(binPath) {
+  if (!isNpxBinPath(binPath)) return false
+  return /[/\\]node_modules[/\\]collectivus[/\\]bin[/\\]cli\.js$/.test(binPath) ||
+    /[/\\]node_modules[/\\]\.bin[/\\](collectivus|ctvs)(\.cmd)?$/.test(binPath)
+}
+
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {Promise<number>}
+ */
+function runInherited(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'inherit' })
+    child.once('error', reject)
+    child.once('exit', (code) => resolve(code === null ? -1 : code))
+  })
+}
+
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {Promise<{ exitCode: number, stdout: string, stderr: string }>}
+ */
+function runCaptured(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8') })
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
+    child.once('error', reject)
+    child.once('exit', (code) => resolve({ exitCode: code === null ? -1 : code, stdout, stderr }))
+  })
 }
 
 /**

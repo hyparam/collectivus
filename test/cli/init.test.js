@@ -174,6 +174,7 @@ describe('runInit', function() {
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
@@ -196,6 +197,7 @@ describe('runInit', function() {
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
@@ -283,144 +285,12 @@ describe('runInit', function() {
         defaultConfigPath: absentDefaultCfg,
       })
       expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "oops"\)/)
-      expect(stderr.value()).toMatch(/please choose 1, 2, or 3 \(got "7"\)/)
+      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "oops"\)/)
+      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "7"\)/)
       expect(asked.filter(function(q) { return q === 'Choose [1]: ' })).toHaveLength(3)
       expect(fs.existsSync(cfgPath)).toBe(true)
-    })
-  })
-
-  describe('gateway-mode walkthrough', function() {
-    it('writes a valid role:gateway config with central_server + poll_interval_seconds', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'gw.json')
-      const sinkDir = path.join(tmpDir, 'gw-sink')
-      const { prompt, asked } = scriptedPrompt([
-        '2', // gateway
-        'https://central.example.com:8788', // central server URL
-        '60', // poll_interval_seconds override
-        '1', // capture mode: proxy only
-        '1', // anthropic
-        '', // default proxy listen
-        sinkDir,
-        '', // keep local query cache
-        cfgPath, // save path
-        'y', // confirm write
-        'n', // decline daemon install
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-        defaultSinkDir: sinkDir,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.version).toBe(1)
-      expect(written.role).toBe('gateway')
-      expect(written.central_server.url).toBe('https://central.example.com:8788')
-      expect(written.central_server.poll_interval_seconds).toBe(60)
-      expect(written.central_server.identity).toEqual({})
-      expect(written.proxy.listen).toBe('127.0.0.1:8787')
-      expect(written.proxy.upstreams[0].name).toBe('anthropic')
-      expect(written.sink.dir).toBe(sinkDir)
-      expect(written.query).toEqual({ parquet: { enabled: true } })
-      expect(written.otel).toBeUndefined()
-      const loaded = loadConfig(cfgPath)
-      expect(loaded.role).toBe('gateway')
-      expect(stdout.value()).toMatch(/ctvs config set <gateway-id>/)
-      expect(stdout.value()).toMatch(/before this gateway will see anything to load/)
-      expect(stdout.value()).toMatch(/bootstrap_token in/)
-      expect(asked.some(function(q) { return /bootstrap.token/i.test(q) })).toBe(false)
-    })
-
-    it('omits poll_interval_seconds when the user accepts the default', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'gw.json')
-      const { prompt } = scriptedPrompt([
-        '2', // gateway
-        'https://central.example.com:8788',
-        '', // accept default poll interval (omitted from config)
-        '2', // capture: otel only
-        '127.0.0.1:4319', // otel listen override
-        path.join(tmpDir, 'gw-sink'),
-        '',
-        cfgPath,
-        'y',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.central_server.poll_interval_seconds).toBeUndefined()
-      expect(written.proxy).toBeUndefined()
-      expect(written.otel.listen).toBe('127.0.0.1:4319')
-    })
-
-    it('re-prompts on out-of-range poll_interval_seconds', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'gw.json')
-      const { prompt, asked } = scriptedPrompt([
-        '2',
-        'https://central.example.com:8788',
-        '0', // below 5
-        '4000', // above 3600
-        'banana', // not a number
-        '15', // valid
-        '1', // capture: proxy only
-        '1', '', // anthropic, default listen
-        path.join(tmpDir, 'gw-sink'),
-        '',
-        cfgPath,
-        'y', 'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.central_server.poll_interval_seconds).toBe(15)
-      expect(stderr.value()).toMatch(/must be an integer between 5 and 3600/)
-      expect(asked.filter(function(q) { return q.startsWith('Poll interval') })).toHaveLength(4)
-    })
-
-    it('re-prompts on invalid central server URL', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'gw.json')
-      const { prompt, asked } = scriptedPrompt([
-        '2',
-        '', // empty rejected
-        'not a url', // unparseable rejected
-        'https://central.example.com:8788',
-        '', // default poll interval
-        '1', // capture proxy
-        '1', '', // anthropic, default listen
-        path.join(tmpDir, 'gw-sink'),
-        '',
-        cfgPath, 'y', 'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/url is required/)
-      expect(stderr.value()).toMatch(/url must be a valid URL/)
-      expect(asked.filter(function(q) { return q === 'Central server URL: ' })).toHaveLength(3)
+      expect(stdout.value()).toMatch(/2\) Central server/)
+      expect(stdout.value()).not.toMatch(/2\) Gateway/)
     })
   })
 
@@ -431,7 +301,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'server.json')
       const dataDir = path.join(tmpDir, 'server-data')
       const { prompt } = scriptedPrompt([
-        '3', // central server
+        '2', // central server
         '', // accept default central-server listen
         'https://collectivus.example.com:8788', // gateway-facing URL
         dataDir, // server data directory
@@ -471,7 +341,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '3',
+        '2',
         '127.0.0.1:9999', // explicit central-server listen
         '', // default gateway-facing URL derived from listen
         '', // default data_dir
@@ -499,7 +369,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '3',
+        '2',
         '', // default listen
         '', // default gateway-facing URL
         path.join(tmpDir, 'server-data'),
@@ -552,6 +422,7 @@ describe('runInit', function() {
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: cfgPath,
         readConfig() { return existing },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },

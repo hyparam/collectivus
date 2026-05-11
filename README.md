@@ -45,11 +45,11 @@ the same image with separate commands, ports, and data volumes.
 ## Quick start: record claude-code
 
 The fastest path is the interactive walkthrough. Run `ctvs` with no
-arguments and choose Standalone, Gateway, or Central server. Standalone keeps
-config and recordings on this machine; Gateway pulls config from a central
-server; Central server vendors per-gateway config and receives shipped ingest.
-The walkthrough also asks where to write recordings and whether to install as
-a daemon and attach Claude Code when the selected mode uses a local proxy:
+arguments and choose Standalone or Central server. Standalone keeps config and
+recordings on this machine; Central server vendors per-gateway config and
+receives shipped ingest.
+For Standalone, the walkthrough also asks where to write recordings and
+whether to install as a daemon and attach Claude Code:
 
 ```bash
 npx -p collectivus ctvs
@@ -260,8 +260,9 @@ Central server only through private/VPC networking or constrained egress. If a
 gateway can reach arbitrary internet destinations, a compromised rendezvous
 server could return a fake Central URL that the gateway would trust.
 
-The interactive walkthrough builds all three roles: Standalone, Gateway, and
-Central server.
+The interactive walkthrough builds Standalone and Central server configs.
+Gateway hosts use the one-line setup command printed by the Central server
+bootstrap-token issuer.
 
 ## S3 upload
 

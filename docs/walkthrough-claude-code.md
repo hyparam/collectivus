@@ -186,17 +186,16 @@ change within `poll_interval_seconds` and hot-reloads only the changed
 listener) or when you want every gateway's recordings to land in a single S3
 archive without per-host AWS credentials.
 
-The interactive walkthrough exposes both sides:
+The interactive walkthrough exposes the Central server setup:
 
 ```bash
 npx collectivus
 # How will you use collectivus?
 #   1) Standalone
-#   2) Gateway
-#   3) Central server
+#   2) Central server
 ```
 
-Option 3 prompts for the central-server listen address, the gateway-facing
+Option 2 prompts for the central-server listen address, the gateway-facing
 public URL, server data directory (default
 `~/.hyp/collectivus/server-data`), an HMAC secret for signing JWTs, and an
 optional S3 upload block — then prints the start and operator commands you
@@ -209,7 +208,7 @@ npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstra
 collectivus config set gw-prod-1 --server-config server.json --file gw-prod-1.json
 ```
 
-Option 2 still writes a gateway config by hand for advanced setups. The normal
+Advanced users can still write a `role: "gateway"` config by hand. The normal
 enterprise path is the one-line `--config-endpoint` command printed by the
 central server's token issuer.
 
@@ -255,13 +254,13 @@ section of the README for the full operator workflow and the on-disk schema.
 
 ## Archiving recordings to S3
 
-The interactive walkthrough (`npx collectivus` with no args) includes an
-optional **"Upload daily snapshots to S3 as Parquet?"** step after the
-sink-directory prompt. Answer `y` and it collects bucket / region / prefix /
-time / signals (no AWS keys — those are read from the environment at daemon
-start) and writes an `upload` block into the saved config. Once configured,
-collectivus drains each previous day's JSONL into Hive-partitioned Parquet
-under `<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a
-day, leaving the local JSONL untouched. See the
+The Central server path in the interactive walkthrough includes an optional
+**"Upload daily snapshots to S3 as Parquet?"** step. Answer `y` and it collects
+bucket / region / prefix / time / signals (no AWS keys — those are read from
+the environment at daemon start) and writes an `upload` block into the saved
+config. Once configured, collectivus drains each previous day's JSONL into
+Hive-partitioned Parquet under
+`<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a day,
+leaving the local JSONL untouched. See the
 [S3 upload](../README.md#s3-upload) section of the README for the full
 config schema and credential resolution rules.

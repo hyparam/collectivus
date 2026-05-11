@@ -218,6 +218,21 @@ If gateways need a shorter hosted-discovery command, run a rendezvous service:
 ```bash
 ctvs rendezvous --listen 0.0.0.0:8789 --data-dir ~/.hyp/collectivus/rendezvous \
   --registration-token "$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN"
+```
+
+Or run the same service from the GHCR image:
+
+```bash
+docker run --rm -p 8789:8789 \
+  -e COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN="$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN" \
+  -v collectivus-rendezvous:/data \
+  ghcr.io/hyparam/collectivus:latest \
+  rendezvous --listen 0.0.0.0:8789 --data-dir /data/rendezvous
+```
+
+Then issue a join code from the Central server host:
+
+```bash
 collectivus config bootstrap-token issue gw-prod-1 --server-config server.json \
   --rendezvous https://join.collectivus.example
 # prints:

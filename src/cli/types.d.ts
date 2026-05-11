@@ -38,7 +38,8 @@ export interface ErrorResult {
 
 export interface ConfigResult {
   mode: 'config'
-  configPath: string
+  configPath?: string
+  configEnv?: string
   printConfig: boolean
   strict: boolean
 }

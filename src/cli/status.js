@@ -73,6 +73,7 @@ export async function runStatus(argv, hooks = {}) {
   const loadConfigFn = hooks.loadConfig ?? defaultLoadConfig
   const statFile = hooks.statFile ?? defaultStatFile
   const countSinkFiles = hooks.countSinkFiles ?? defaultCountSinkFiles
+  const findLatestProxyFile = hooks.findLatestProxyFile ?? defaultFindLatestProxyFile
   const plistPath = hooks.plistPath ?? defaultPlistPath()
   const settingsPath = hooks.settingsPath ?? defaultSettingsPath()
   const logDir = hooks.logDir ?? defaultLogDir()
@@ -164,26 +165,28 @@ export async function runStatus(argv, hooks = {}) {
     const sinkDir = config.sink.dir
     stdout.write(`  Sink: ${sinkDir}\n`)
 
-    // Proxy (Claude Code / LLM exchanges) — every recorded request lands as a
-    // line in proxy.jsonl, so the size + mtime answer "did anything actually
-    // get captured, and how recently?".
-    const proxyPath = path.join(sinkDir, 'proxy.jsonl')
-    /** @type {{ size: number, mtimeMs: number } | undefined} */
-    let proxyStat
+    // Proxy (Claude Code / LLM exchanges): recorded requests land in daily
+    // JSONL files under <sink>/<gateway_id>/proxy/. We don't know the
+    // gateway_id at status time (standalone resolves it from the OS user;
+    // gateway/server take it from a JWT), so summarize whichever <id>/proxy/
+    // directories exist. The most-recently-written file's size + mtime answer
+    // "did anything actually get captured, and how recently?".
+    /** @type {{ size: number, mtimeMs: number, name: string } | undefined} */
+    let latestProxy
     try {
-      proxyStat = await statFile(proxyPath)
+      latestProxy = await findLatestProxyFile(sinkDir)
     } catch (err) {
-      stderr.write(`warning: failed to stat ${proxyPath}: ${formatError(err)}\n`)
+      stderr.write(`warning: failed to scan proxy recordings under ${sinkDir}: ${formatError(err)}\n`)
     }
-    if (!proxyStat) {
-      stdout.write('  Proxy:  no exchanges recorded yet (proxy.jsonl missing)\n')
-    } else if (proxyStat.size === 0) {
-      stdout.write('  Proxy:  proxy.jsonl is empty (no exchanges recorded yet)\n')
+    if (!latestProxy) {
+      stdout.write('  Proxy:  no exchanges recorded yet (no <id>/proxy/*.jsonl found)\n')
+    } else if (latestProxy.size === 0) {
+      stdout.write(`  Proxy:  ${latestProxy.name} is empty (no exchanges recorded yet)\n`)
     } else {
-      stdout.write(`  Proxy:  proxy.jsonl ${formatSize(proxyStat.size)}, last write ${formatTimestamp(proxyStat.mtimeMs)}\n`)
+      stdout.write(`  Proxy:  ${latestProxy.name} ${formatSize(latestProxy.size)}, last write ${formatTimestamp(latestProxy.mtimeMs)}\n`)
     }
 
-    // OTLP (services/<svc>/<signal>-<date>.jsonl) — count files under
+    // OTLP (services/<svc>/<signal>-<date>.jsonl): count files under
     // services/. Falls back to the whole sink dir if services/ is absent so
     // pre-1.x layouts still report something useful.
     const otlpDir = path.join(sinkDir, 'services')
@@ -367,6 +370,52 @@ async function defaultStatFile(p) {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
     throw err
   }
+}
+
+/**
+ * Find the newest `*.jsonl` under any `<sinkDir>/<id>/proxy/` directory and
+ * return its display name + size + mtime. Returns undefined when no proxy
+ * directories exist or none contain `.jsonl` files.
+ *
+ * @param {string} sinkDir
+ * @returns {Promise<{ size: number, mtimeMs: number, name: string } | undefined>}
+ */
+async function defaultFindLatestProxyFile(sinkDir) {
+  /** @type {import('node:fs').Dirent[]} */
+  let topEntries
+  try {
+    topEntries = await fs.readdir(sinkDir, { withFileTypes: true })
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
+    throw err
+  }
+  /** @type {{ size: number, mtimeMs: number, name: string } | undefined} */
+  let best
+  for (const top of topEntries) {
+    if (!top.isDirectory()) continue
+    const proxyDir = path.join(sinkDir, top.name, 'proxy')
+    /** @type {import('node:fs').Dirent[]} */
+    let inner
+    try {
+      inner = await fs.readdir(proxyDir, { withFileTypes: true })
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') continue
+      throw err
+    }
+    for (const entry of inner) {
+      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+      const full = path.join(proxyDir, entry.name)
+      try {
+        const s = await fs.stat(full)
+        if (best === undefined || s.mtimeMs > best.mtimeMs) {
+          best = { size: s.size, mtimeMs: s.mtimeMs, name: path.join(top.name, 'proxy', entry.name) }
+        }
+      } catch {
+        // File could disappear mid-walk; skip silently.
+      }
+    }
+  }
+  return best
 }
 
 /**

@@ -114,7 +114,7 @@ describe('parseArgs', () => {
   })
 })
 
-describe('run() — help and arg errors', () => {
+describe('run(): help and arg errors', () => {
   it('prints help and exits 0 on --help', async () => {
     const stdout = memo()
     const stderr = memo()
@@ -151,7 +151,7 @@ describe('run() — help and arg errors', () => {
   })
 })
 
-describe('run() — walkthrough dispatch', () => {
+describe('run(): walkthrough dispatch', () => {
   it('routes empty argv on a TTY into the init walkthrough', async () => {
     const stdout = memo()
     const stderr = memo()
@@ -181,7 +181,7 @@ describe('run() — walkthrough dispatch', () => {
   })
 })
 
-describe('run() — --config <path>', () => {
+describe('run(): --config <path>', () => {
   /** @type {string} */
   let tmpDir
   beforeEach(() => {
@@ -350,7 +350,7 @@ describe('run() — --config <path>', () => {
     expect(code).toBe(0)
     expect(stdout.value()).toMatch(/Received SIGTERM/)
     expect(stdout.value()).toMatch(/Shutdown complete/)
-    // 127.0.0.1:0 means kernel-assigned port — make sure we logged the host
+    // 127.0.0.1:0 means kernel-assigned port; make sure we logged the host
     expect(stdout.value()).toMatch(/127\.0\.0\.1:\d+/)
   })
 
@@ -377,7 +377,7 @@ describe('run() — --config <path>', () => {
     trigger('SIGTERM')
     expect(await result).toBe(0)
     expect(stdout.value()).toMatch(/Proxy listener bound on 127\.0\.0\.1:\d+/)
-    expect(stdout.value()).toMatch(/recording to .*proxy\.jsonl/)
+    expect(stdout.value()).toMatch(/recording to .*\/proxy\/<UTC-date>\.jsonl/)
     expect(stderr.value()).not.toMatch(/not yet implemented/)
   })
 

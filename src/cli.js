@@ -2,6 +2,7 @@ import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfigAsync } from './config.js'
+import { resolveStandaloneGatewayId } from './gateway_id.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
@@ -209,15 +210,30 @@ export async function run(argv, env, hooks = {}) {
       stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1
     }
-    // ConfigClient runs in the background. It is a normal listener — wired
-    // into stopAll via buildConfigListeners — so a SIGTERM stops the poll
+    // ConfigClient runs in the background. It is a normal listener, wired
+    // into stopAll via buildConfigListeners, so a SIGTERM stops the poll
     // timer the same way it stops the proxy. Construct here (after identity
     // has succeeded) rather than inside the factory so it's available to
     // any future listener that wants to subscribe to `config-changed`.
     configClient = new ConfigClient(config.central_server, identityClient, { stderr })
   }
 
-  const ctx = { env, stderr, identityClient, configClient }
+  // Resolve the standalone gateway_id once at boot. Gateway and server roles
+  // get their gateway_id from the JWT, so the value isn't used by their
+  // listener factories, but we still resolve a placeholder for the unused
+  // ctx field to keep the type concrete.
+  /** @type {string} */
+  let gatewayId
+  try {
+    gatewayId = config.role === 'standalone' || config.role === undefined
+      ? resolveStandaloneGatewayId(config.gateway_id)
+      : (identityClient?.identity?.gateway_id ?? '_unknown')
+  } catch (err) {
+    stderr.write(`config error: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 1
+  }
+
+  const ctx = { env, stderr, identityClient, configClient, gatewayId }
   /**
    * @param {CollectivusConfig} cfg
    * @returns {Map<string, ListenerFactory>}
@@ -239,6 +255,7 @@ export async function run(argv, env, hooks = {}) {
  *   stderr: { write: (s: string) => void },
  *   identityClient?: IdentityClient,
  *   configClient?: ConfigClient,
+ *   gatewayId: string,
  * }} ctx
  *   `env` is forwarded to the uploader so its connector reads creds from the
  *   same env we pre-flighted in `run()`. `stderr` is consumed by the
@@ -248,6 +265,9 @@ export async function run(argv, env, hooks = {}) {
  *   to authenticate to the central server. `configClient` is the gateway's
  *   background config-pull loop; the gateway lifecycle subscribes to its
  *   `config-changed` event and feeds it into `applyDiff` for hot reload.
+ *   `gatewayId` is the first-level partition for sink writes; standalone
+ *   resolves this from `config.gateway_id` or the OS username, while
+ *   gateway/server roles take it from the JWT subject.
  * @returns {Map<string, ListenerFactory>} Section-keyed factory map.
  *   Section names: `otel`, `proxy`, `upload`, `server`, `configPoll`,
  *   `selfUpdate`. Insertion order is preserved by `Map`, which `runLifecycle`
@@ -282,16 +302,17 @@ function buildConfigListeners(config, ctx) {
     }
     const proxyConfig = config.proxy
     const sinkDir = config.sink.dir
+    const { gatewayId } = ctx
     factories.set('proxy', async () => {
-      const sink = new FileSink(sinkDir)
+      const sink = new FileSink(sinkDir, gatewayId)
       const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
       const proxy = new Proxy(proxyConfig, { recorder })
       await proxy.start()
       const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
       return {
-        description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/proxy.jsonl`,
+        description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/${gatewayId}/proxy/<UTC-date>.jsonl`,
         // Stop accepting new connections, drain any in-flight exchanges (their
-        // finalization can be async — e.g. a gzip decoder still flushing the
+        // finalization can be async, e.g. a gzip decoder still flushing the
         // tail of an SSE stream), then flush+close the sink so the final
         // `exchange` row lands before exit.
         stop: async () => {
@@ -347,7 +368,7 @@ function buildConfigListeners(config, ctx) {
   }
 
   // role: server brings up the control-plane HTTP listener (identity,
-  // future config-vending, future log ingest). Only `server` triggers it —
+  // future config-vending, future log ingest). Only `server` triggers it;
   // `gateway` is a client of this listener and `standalone` doesn't use it.
   // The validator guarantees `config.server` is set iff role === 'server'.
   if (config.role === 'server') {
@@ -368,7 +389,7 @@ function buildConfigListeners(config, ctx) {
 
   // Background config-pull loop runs alongside the proxy/otel listeners on
   // gateways. We register it here so its lifetime is tied to the same
-  // start/stop machinery — a SIGTERM stops the timer cleanly without leaving
+  // start/stop machinery; a SIGTERM stops the timer cleanly without leaving
   // an orphaned setTimeout in the event loop. The hot-reload pipeline
   // subscribes to `config-changed` events emitted by this client.
   if (config.role === 'gateway' && ctx.configClient) {
@@ -388,7 +409,7 @@ function buildConfigListeners(config, ctx) {
   }
 
   // Only schedule the self-update tick when we have a real listener to keep
-  // alive — an empty config should still surface "no listeners configured".
+  // alive; an empty config should still surface "no listeners configured".
   if (factories.size > 0) {
     factories.set('selfUpdate', buildSelfUpdateFactory(ctx))
   }
@@ -405,7 +426,7 @@ function buildConfigListeners(config, ctx) {
  * respawns the process on the new code.
  *
  * Robustness: the tick swallows everything so a failure never escalates
- * into the scheduler's fast-retry path — if anything goes wrong we just
+ * into the scheduler's fast-retry path; if anything goes wrong we just
  * wait until tomorrow's tick. The factory itself also swallows startup
  * errors and returns a no-op listener so a broken self-update path can
  * never take down the OTLP collector or proxy.
@@ -507,7 +528,7 @@ async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotR
 
   await shutdownPromise
   // Drain any in-flight reload so its stop() lands before stopAll() races
-  // it. The chain only does start/stop work — bounded and short.
+  // it. The chain only does start/stop work, bounded and short.
   await reloadChain
   await stopAll(started, stderr)
   stdout.write('Shutdown complete.\n')

@@ -33,7 +33,7 @@ function makeCollectingSink() {
   }
 }
 
-describe('Recorder — non-streaming exchange', () => {
+describe('Recorder: non-streaming exchange', () => {
   it('emits a single exchange row with the full request and response body', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
@@ -113,7 +113,7 @@ describe('Recorder — non-streaming exchange', () => {
   })
 })
 
-describe('Recorder — header redaction', () => {
+describe('Recorder: header redaction', () => {
   it('redacts the default header set with REDACTED:<last4>', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
@@ -220,7 +220,7 @@ describe('Recorder — header redaction', () => {
       },
     })
     // Request and response bodies contain values that would be redacted as
-    // headers — they must pass through verbatim.
+    // headers; they must pass through verbatim.
     const sensitiveBody = '{"authorization":"Bearer aaaa1234","secret":"abc"}'
     exchange.appendRequestChunk(Buffer.from(sensitiveBody))
     exchange.setResponseStart({ status: 200, headers: {} })
@@ -251,7 +251,7 @@ describe('Recorder — header redaction', () => {
   })
 })
 
-describe('Recorder — streaming exchange', () => {
+describe('Recorder: streaming exchange', () => {
   it('emits stream_event rows in order, then a final exchange row with body omitted', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
@@ -370,7 +370,7 @@ describe('Recorder — streaming exchange', () => {
   })
 })
 
-describe('Recorder — error paths', () => {
+describe('Recorder: error paths', () => {
   it('records a client-abort error string', async () => {
     const sink = makeCollectingSink()
     const recorder = new Recorder({ sink })
@@ -419,7 +419,7 @@ describe('Recorder — error paths', () => {
   })
 })
 
-describe('Recorder — drain', () => {
+describe('Recorder: drain', () => {
   // Mirrors the production race the gzip-decoder fix exposed: the proxy's
   // upstream connection has closed and shutdown begins, but a finalization
   // path (decoder still flushing) hasn't called finish() yet. drain() must
@@ -460,7 +460,7 @@ describe('Recorder — drain', () => {
       client: { ip: '127.0.0.1', user_agent: 'test' },
       request: { method: 'POST', path: '/v1/messages', headers: {} },
     })
-    // Never call finish() — drain must time out and force-finalize so the
+    // Never call finish(); drain must time out and force-finalize so the
     // exchange row still lands.
     await recorder.drain(10)
     const exchanges = sink.rows.filter((r) => r.kind === 'exchange')
@@ -540,19 +540,33 @@ async function waitFor(predicate, timeoutMs = 2000) {
   }
 }
 
+const TEST_GATEWAY_ID = 'tester'
+
 /**
+ * Read every JSONL row written by the proxy FileSink under
+ * `<dir>/<gateway_id>/proxy/`. Concatenates files in lexicographic (date)
+ * order so multi-day fixtures still come back in submission order.
+ *
  * @param {string} dir
  * @returns {Record<string, any>[]}
  */
 function readJsonl(dir) {
-  const file = path.join(dir, 'proxy.jsonl')
-  if (!fs.existsSync(file)) return []
-  const text = fs.readFileSync(file, 'utf8')
-  if (text.length === 0) return []
-  return text.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l))
+  const proxyDir = path.join(dir, TEST_GATEWAY_ID, 'proxy')
+  if (!fs.existsSync(proxyDir)) return []
+  const files = fs.readdirSync(proxyDir).filter((n) => n.endsWith('.jsonl')).sort()
+  /** @type {Record<string, any>[]} */
+  const rows = []
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(proxyDir, name), 'utf8')
+    if (text.length === 0) continue
+    for (const line of text.split('\n')) {
+      if (line.length > 0) rows.push(JSON.parse(line))
+    }
+  }
+  return rows
 }
 
-describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => {
+describe('integration: Proxy + Recorder + FileSink (full round-trip)', () => {
   /** @type {Awaited<ReturnType<typeof createMockUpstream>>} */
   let upstream
   /** @type {Proxy} */
@@ -565,7 +579,7 @@ describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => 
   beforeEach(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-rec-'))
     upstream = await createMockUpstream()
-    sink = new FileSink(tmpDir)
+    sink = new FileSink(tmpDir, TEST_GATEWAY_ID)
     const recorder = new Recorder({ sink })
     proxy = new Proxy({
       listen: '127.0.0.1:0',
@@ -689,9 +703,14 @@ describe('integration — Proxy + Recorder + FileSink (full round-trip)', () => 
     }).then((r) => r.text())
 
     await waitFor(() => readJsonl(tmpDir).length >= 1)
-    // Re-read the raw file and confirm each line is valid JSON.
-    const raw = fs.readFileSync(path.join(tmpDir, 'proxy.jsonl'), 'utf8')
-    const lines = raw.split('\n').filter((l) => l.length > 0)
+    // Re-read the raw file(s) and confirm each line is valid JSON. The proxy
+    // sink rotates daily, so this glob covers both today's file and (in the
+    // unlikely event the test straddles UTC midnight) yesterday's.
+    const proxyDir = path.join(tmpDir, TEST_GATEWAY_ID, 'proxy')
+    const files = fs.readdirSync(proxyDir).filter((n) => n.endsWith('.jsonl')).sort()
+    const lines = files
+      .flatMap((n) => fs.readFileSync(path.join(proxyDir, n), 'utf8').split('\n'))
+      .filter((l) => l.length > 0)
     expect(lines).toHaveLength(1)
     expect(() => JSON.parse(lines[0])).not.toThrow()
   })

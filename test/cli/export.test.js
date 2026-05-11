@@ -50,14 +50,26 @@ function writeJsonl(service, signal, date, rows) {
   )
 }
 
+const PROXY_GATEWAY_ID = 'tester'
+const PROXY_DATE = '2026-05-11'
+
 /**
+ * Write rows under `<sink>/<gateway_id>/proxy/<date>.jsonl` to mimic the
+ * standalone proxy FileSink layout. The default id/date keep the legacy
+ * single-file fixtures readable while still exercising the new walker.
+ *
  * @param {object[]} rows
+ * @param {{ gatewayId?: string, date?: string }} [opts]
+ * @returns {string} Absolute path of the written JSONL file.
  */
-function writeProxyJsonl(rows) {
-  fs.writeFileSync(
-    path.join(sinkDir, 'proxy.jsonl'),
-    rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
-  )
+function writeProxyJsonl(rows, opts = {}) {
+  const id = opts.gatewayId ?? PROXY_GATEWAY_ID
+  const date = opts.date ?? PROXY_DATE
+  const dir = path.join(sinkDir, id, 'proxy')
+  fs.mkdirSync(dir, { recursive: true })
+  const file = path.join(dir, `${date}.jsonl`)
+  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
+  return file
 }
 
 /**
@@ -318,19 +330,28 @@ describe('runExport', function() {
 })
 
 describe('exportProxy', function() {
-  it('returns empty result when proxy.jsonl has no rows', async function() {
-    writeProxyJsonl([])
-    const result = await exportProxy(path.join(sinkDir, 'proxy.jsonl'), path.join(tmpDir, 'out'))
+  it('returns empty result when proxy JSONL has no rows', async function() {
+    const file = writeProxyJsonl([])
+    const result = await exportProxy([file], path.join(tmpDir, 'out'))
     expect(result.files).toEqual([])
     expect(result.skipped).toEqual(['exchange', 'stream_event'])
   })
 
   it('skips kinds that have zero rows', async function() {
-    writeProxyJsonl([exchangeRow()])
+    const file = writeProxyJsonl([exchangeRow()])
     const out = path.join(tmpDir, 'out')
-    const result = await exportProxy(path.join(sinkDir, 'proxy.jsonl'), out)
+    const result = await exportProxy([file], out)
     expect(result.files).toHaveLength(1)
     expect(result.skipped).toEqual(['stream_event'])
     expect(fs.existsSync(path.join(out, 'proxy', 'stream_events.parquet'))).toBe(false)
+  })
+
+  it('concatenates rows across multiple per-day proxy files', async function() {
+    const f1 = writeProxyJsonl([exchangeRow({ exchange_id: 'd1' })], { date: '2026-05-10' })
+    const f2 = writeProxyJsonl([exchangeRow({ exchange_id: 'd2' })], { date: '2026-05-11' })
+    const out = path.join(tmpDir, 'out')
+    const result = await exportProxy([f1, f2], out)
+    expect(result.files).toHaveLength(1)
+    expect(result.files[0].rows).toBe(2)
   })
 })

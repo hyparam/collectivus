@@ -16,10 +16,10 @@ const USAGE = `Usage:
   collectivus export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--service <name>] [--signal <s>]
 
 Convert recorded JSONL under the configured sink dir into local Parquet files.
-Runs once and exits — does not invoke the daily upload pipeline.
+Runs once and exits. Does not invoke the daily upload pipeline.
 
 Drains both:
-  - proxy.jsonl                          → <out>/proxy/exchanges.parquet
+  - <id>/proxy/<date>.jsonl              → <out>/proxy/exchanges.parquet
                                            <out>/proxy/stream_events.parquet
   - services/<svc>/<signal>-<date>.jsonl → <out>/<svc>/<signal>/date=<date>/data.parquet
 
@@ -144,10 +144,10 @@ export async function runExport(argv, hooks = {}) {
   let totalRows = 0
   let failures = 0
 
-  const proxyJsonl = path.join(sinkDir, 'proxy.jsonl')
-  if (fs.existsSync(proxyJsonl)) {
+  const proxyJsonlFiles = discoverProxyJsonlFiles(sinkDir)
+  if (proxyJsonlFiles.length > 0) {
     try {
-      const result = await exportProxy(proxyJsonl, outDir)
+      const result = await exportProxy(proxyJsonlFiles, outDir)
       for (const file of result.files) {
         written++
         totalRows += file.rows
@@ -160,7 +160,7 @@ export async function runExport(argv, hooks = {}) {
       }
     } catch (err) {
       failures++
-      stderr.write(`error: proxy.jsonl: ${formatError(err)}\n`)
+      stderr.write(`error: <id>/proxy/*.jsonl: ${formatError(err)}\n`)
     }
   }
 
@@ -196,23 +196,53 @@ export async function runExport(argv, hooks = {}) {
 }
 
 /**
- * Read proxy.jsonl, partition rows by `kind`, and write one parquet file
- * per non-empty kind. Reads the whole file into memory — proxy.jsonl is
- * append-only and typically modest; streaming directly into a writer
- * would only matter at multi-GB scale.
+ * Discover every per-day proxy JSONL file under `<sinkDir>/<id>/proxy/`.
+ * Sorted by full path so multi-id, multi-day fixtures land in stable order.
  *
- * @param {string} jsonlPath
+ * @param {string} sinkDir
+ * @returns {string[]}
+ */
+export function discoverProxyJsonlFiles(sinkDir) {
+  /** @type {string[]} */
+  const out = []
+  for (const id of safeReadDir(sinkDir)) {
+    const proxyDir = path.join(sinkDir, id, 'proxy')
+    let stat
+    try {
+      stat = fs.statSync(proxyDir)
+    } catch {
+      continue
+    }
+    if (!stat.isDirectory()) continue
+    for (const name of safeReadDir(proxyDir)) {
+      if (!name.endsWith('.jsonl')) continue
+      out.push(path.join(proxyDir, name))
+    }
+  }
+  out.sort()
+  return out
+}
+
+/**
+ * Read every per-day proxy JSONL file in `jsonlPaths`, partition rows by
+ * `kind`, and write one parquet file per non-empty kind. Reads each file
+ * fully into memory: proxy JSONL is append-only and typically modest;
+ * streaming directly into a writer would only matter at multi-GB scale.
+ *
+ * @param {string[]} jsonlPaths
  * @param {string} outDir
  * @returns {Promise<ProxyExportResult>}
  */
-export async function exportProxy(jsonlPath, outDir) {
+export async function exportProxy(jsonlPaths, outDir) {
   /** @type {Record<string, unknown>[]} */
   const exchanges = []
   /** @type {Record<string, unknown>[]} */
   const streamEvents = []
-  for await (const row of readJsonlRows(jsonlPath)) {
-    if (row.kind === 'exchange') exchanges.push(row)
-    else if (row.kind === 'stream_event') streamEvents.push(row)
+  for (const jsonlPath of jsonlPaths) {
+    for await (const row of readJsonlRows(jsonlPath)) {
+      if (row.kind === 'exchange') exchanges.push(row)
+      else if (row.kind === 'stream_event') streamEvents.push(row)
+    }
   }
 
   const proxyDir = path.join(outDir, 'proxy')

@@ -43,7 +43,7 @@ afterEach(function() {
 })
 
 /**
- * Hooks shared by the simple cases — tmpDir-scoped paths plus the no-op
+ * Hooks shared by the simple cases: tmpDir-scoped paths plus the no-op
  * config/log/sink stubs so we don't read user state from disk.
  *
  * @returns {StatusHooks}
@@ -246,9 +246,13 @@ describe('runStatus', function() {
       isAttached() { return Promise.resolve(false) },
       readInstalledPlist() { return undefined },
       loadConfig() { return cfg },
-      statFile(p) {
-        if (p.endsWith('proxy.jsonl')) return Promise.resolve({ size: 4096, mtimeMs: Date.now() - 60_000 })
-        return Promise.resolve(undefined)
+      statFile() { return Promise.resolve(undefined) },
+      findLatestProxyFile() {
+        return Promise.resolve({
+          size: 4096,
+          mtimeMs: Date.now() - 60_000,
+          name: 'tester/proxy/2026-05-11.jsonl',
+        })
       },
       countSinkFiles() { return Promise.resolve(3) },
     })
@@ -259,7 +263,7 @@ describe('runStatus', function() {
     expect(out).toMatch(/otel: {3}0\.0\.0\.0:4318/)
     expect(out).toMatch(new RegExp(`sink: {3}${sinkDir.replace(/\//g, '\\/')}`))
     expect(out).toMatch(/Recordings\n {2}Sink: /)
-    expect(out).toMatch(/Proxy: {2}proxy\.jsonl 4\.0 KB, last write \d{4}-\d{2}-\d{2}T.* \(\d+m ago\)/)
+    expect(out).toMatch(/Proxy: {2}tester\/proxy\/2026-05-11\.jsonl 4\.0 KB, last write \d{4}-\d{2}-\d{2}T.* \(\d+m ago\)/)
     expect(out).toMatch(/OTLP: {3}3 files under services\//)
   })
 
@@ -306,7 +310,7 @@ describe('runStatus', function() {
     expect(out).toMatch(/OTLP: {3}no service recordings/)
   })
 
-  it('reports proxy.jsonl as empty when it exists but is zero bytes', async function() {
+  it('reports the proxy file as empty when it exists but is zero bytes', async function() {
     const stdout = memo()
     /** @type {CollectivusConfig} */
     const cfg = {
@@ -325,14 +329,18 @@ describe('runStatus', function() {
       isAttached() { return Promise.resolve(false) },
       readInstalledPlist() { return undefined },
       loadConfig() { return cfg },
-      statFile(p) {
-        if (p.endsWith('proxy.jsonl')) return Promise.resolve({ size: 0, mtimeMs: Date.now() })
-        return Promise.resolve(undefined)
+      statFile() { return Promise.resolve(undefined) },
+      findLatestProxyFile() {
+        return Promise.resolve({
+          size: 0,
+          mtimeMs: Date.now(),
+          name: 'tester/proxy/2026-05-11.jsonl',
+        })
       },
       countSinkFiles() { return Promise.resolve(0) },
     })
     expect(code).toBe(0)
-    expect(stdout.value()).toMatch(/Proxy: {2}proxy\.jsonl is empty/)
+    expect(stdout.value()).toMatch(/Proxy: {2}tester\/proxy\/2026-05-11\.jsonl is empty/)
   })
 
   it('reports log file existence with size when daemon is installed', async function() {

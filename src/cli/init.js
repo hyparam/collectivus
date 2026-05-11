@@ -82,7 +82,7 @@ const BANNER = [
  * `~/.hyp/collectivus/` is the same tree the daemon writes logs into, so a
  * fresh install keeps everything (logs + recordings) rooted in a single
  * predictable directory. The collector creates per-signal subdirectories
- * inside it (`traces/<date>.jsonl`, `proxy.jsonl`, etc.).
+ * inside it (`traces/<date>.jsonl`, `<id>/proxy/<date>.jsonl`, etc.).
  *
  * @param {string} [homeDir]
  * @returns {string}
@@ -223,8 +223,8 @@ async function runSingleUserFlow(args) {
   stdout.write('forward LLM traffic to Anthropic. Edit the config later to switch\n')
   stdout.write('upstreams or add the OTLP receiver.\n\n')
 
-  stdout.write('Where should collectivus write recordings? Each signal lands in its\n')
-  stdout.write('own JSONL file under this directory (e.g. proxy.jsonl).\n')
+  stdout.write('Where should collectivus write recordings? Each signal lands in a\n')
+  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
   const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
   const sinkDir = sinkAns === '' ? defaultSink : sinkAns
 
@@ -287,7 +287,7 @@ async function runSingleUserFlow(args) {
 async function runEnterpriseFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
-  stdout.write('\nEnterprise mode — setting up this machine as the central server.\n')
+  stdout.write('\nEnterprise mode: setting up this machine as the central server.\n')
 
   stdout.write('\nPublic host or URL clients will reach this server at. Used to\n')
   stdout.write('build the install command for team members. Examples:\n')
@@ -314,8 +314,8 @@ async function runEnterpriseFlow(args) {
     otel = { listen: otelListenAns === '' ? ENTERPRISE_OTEL_LISTEN : otelListenAns }
   }
 
-  stdout.write('\nWhere should the server write recordings? Each signal lands in its\n')
-  stdout.write('own JSONL file under this directory (e.g. proxy.jsonl, traces/<date>.jsonl).\n')
+  stdout.write('\nWhere should the server write recordings? Each signal lands in a\n')
+  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
   const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
   const sinkDir = sinkAns === '' ? defaultSink : sinkAns
 
@@ -433,7 +433,7 @@ async function askProvider(prompt, stdout, stderr) {
       const prefAns = (await prompt('Path prefix to match [/v1]: ')).trim()
       const prefix = prefAns === '' ? '/v1' : prefAns
       const derivedName = deriveUpstreamName(baseUrl)
-      stdout.write('\nName for this upstream — appears in recorded rows and logs.\n')
+      stdout.write('\nName for this upstream. Appears in recorded rows and logs.\n')
       stdout.write('Slug: lowercase letters, digits, hyphens; must start with a letter.\n')
       for (;;) {
         const nameAns = (await prompt(`Upstream name [${derivedName}]: `)).trim()
@@ -481,7 +481,7 @@ async function askProxy(prompt, stdout, stderr) {
  * caller can omit the `upload` block entirely.
  *
  * The walkthrough deliberately does not expose `catchupDays` (defaults to
- * 30 in the uploader) — keeps the prompt count manageable. Power users
+ * 30 in the uploader). Keeps the prompt count manageable. Power users
  * edit the JSON.
  *
  * Credentials are never collected here; the daemon resolves them from
@@ -624,7 +624,7 @@ function asciiBox(lines) {
  * Prompt for daemon install + Claude Code attach when the platform supports it
  * and the config has a proxy listener. Otherwise prints next-step hints.
  *
- * Skips the daemon install offer when running via npx — daemonizing requires a
+ * Skips the daemon install offer when running via npx. Daemonizing requires a
  * persistent binary, which an npx-resolved path under `_npx/` is not.
  *
  * @param {{
@@ -720,7 +720,7 @@ function useExistingConfig(args) {
 
 /**
  * Print a short, human-readable summary of an existing config so the user can
- * decide whether to reuse it. Intentionally not the full JSON dump — that's
+ * decide whether to reuse it. Intentionally not the full JSON dump; that's
  * what `--print-config` is for.
  *
  * @param {{ write: (s: string) => void }} stdout
@@ -753,7 +753,7 @@ function printConfigSummary(stdout, config) {
 
 /**
  * Read and parse a config file. Returns undefined when the file is missing or
- * unparseable — the walkthrough treats both as "no usable existing config" and
+ * unparseable; the walkthrough treats both as "no usable existing config" and
  * falls through to the question flow.
  *
  * @param {string} p
@@ -768,7 +768,7 @@ function defaultReadConfig(p) {
   }
   try {
     return JSON.parse(raw)
-  } catch { /* ignore — fall through to undefined */ }
+  } catch { /* ignore, fall through to undefined */ }
 }
 
 /**
@@ -842,7 +842,7 @@ function deriveUpstreamName(baseUrl) {
 
 /**
  * Walkthrough sub-flow for `role: gateway` deployments. The gateway has its
- * config vended by a central server — local prompts collect the `central_server`
+ * config vended by a central server; local prompts collect the `central_server`
  * block and any local listeners to record. The closing summary tells the
  * operator the explicit `collectivus config set` step they need to run on the
  * server side before this gateway will see anything to load (without it the
@@ -937,7 +937,7 @@ async function runGatewayFlow(args) {
 /**
  * Walkthrough sub-flow for `role: server` deployments. The server vendors
  * per-gateway configs and accepts ingest. Operators do not point apps at this
- * binary directly — there is no proxy listener — so the daemon-install offer
+ * binary directly (there is no proxy listener), so the daemon-install offer
  * is intentionally skipped.
  *
  * @param {{
@@ -974,7 +974,7 @@ async function runServerFlow(args) {
   const dataDir = dataDirAns === '' ? defaultDataDir : dataDirAns
 
   // 32-byte random secret is the validator floor (IDENTITY_SECRET_MIN_LENGTH).
-  // Auto-generate by default — typing 64 hex chars at a prompt is a footgun.
+  // Auto-generate by default; typing 64 hex chars at a prompt is a footgun.
   const generatedSecret = crypto.randomBytes(IDENTITY_SECRET_BYTES).toString('hex')
   stdout.write('\nThe server signs gateway JWTs with an HMAC secret. Pressing Enter\n')
   stdout.write('uses a freshly generated 32-byte random hex value (recommended); paste\n')
@@ -1004,7 +1004,7 @@ async function runServerFlow(args) {
   /** @type {CollectivusConfig} */
   const config = { version: 1, role: 'server', server: serverBlock }
 
-  // Optional upload — server mode drains the multi-tenant ingest spool to S3.
+  // Optional upload. Server mode drains the multi-tenant ingest spool to S3.
   const upload = await askUpload(prompt, stdout, stderr)
   if (upload) config.upload = upload
 
@@ -1013,7 +1013,7 @@ async function runServerFlow(args) {
 
   if (secretAns === '') {
     stdout.write('\nGenerated identity-issuer secret was written to the config file.\n')
-    stdout.write(`Back up ${cfgPath} or copy the secret to a password manager —\n`)
+    stdout.write(`Back up ${cfgPath} or copy the secret to a password manager;\n`)
     stdout.write('rotating it forces every gateway to re-bootstrap.\n')
   }
 
@@ -1030,7 +1030,7 @@ async function runServerFlow(args) {
 /**
  * Prompt for the `central_server` block of a gateway config.
  *
- * The bootstrap token is intentionally NOT collected here — the operator
+ * The bootstrap token is intentionally NOT collected here; the operator
  * issues tokens out-of-band on the server side, hands the token to the
  * gateway via a secure channel, and the gateway operator pastes it into the
  * saved config (or sets `central_server.identity.bootstrap_token` via env-
@@ -1063,7 +1063,7 @@ async function askCentralServer(prompt, stdout, stderr) {
   }
 
   // poll_interval_seconds is the bead's named knob. The validator floors this
-  // at 5s and ceils it at 3600s — anything smaller is a stress test, anything
+  // at 5s and ceils it at 3600s; anything smaller is a stress test, anything
   // larger drifts hot-reload semantics. Default 30s matches the DEFAULT
   // constant in the gateway client.
   stdout.write('\nHow often should the gateway poll for config changes? 30s is the\n')

@@ -4,20 +4,8 @@ import path from 'node:path'
 import { ConfigError, validateCollectivusConfig } from '../config.js'
 
 /**
- * @import { CentralServerConfig, CollectivusConfig, ConfigChangedEvent } from '../types.js'
- */
-
-/**
- * Subset of `IdentityClient` that `ConfigClient` actually needs. Declared
- * structurally so tests can supply a small fake without re-implementing the
- * full identity lifecycle, and so future identity sources (e.g. an mTLS-backed
- * variant) can drop in without inheriting from a class.
- *
- * @typedef {{
- *   persistedPath: string,
- *   getCurrentJwt(): Promise<string>,
- *   refresh(): Promise<void>,
- * }} IdentitySource
+ * @import { CentralServerConfig, CollectivusConfig } from '../types.js'
+ * @import { ConfigChangedEvent, IdentitySource } from './types.d.ts'
  */
 
 /**
@@ -54,12 +42,6 @@ export const NOT_REGISTERED_BACKOFF_SECONDS = 5 * 60
  *
  * Construction is cheap and side-effect-free. Start the loop via `start()`.
  * `stop()` is idempotent and safe to call from `cli.js#stopAll`.
- *
- * @typedef {{
- *   newConfig: CollectivusConfig,
- *   etag: string,
- *   fetchedAt: string,
- * }} ConfigClientChangeListener
  */
 export class ConfigClient extends EventEmitter {
   /**

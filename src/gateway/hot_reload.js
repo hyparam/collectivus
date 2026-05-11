@@ -1,5 +1,6 @@
 /**
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from '../types.js'
+ * @import { ConfigDiff, ReloadableListener, SectionStatus } from './types.d.ts'
  */
 
 /**
@@ -13,28 +14,6 @@
  * @type {readonly ['otel', 'proxy', 'sink', 'upload']}
  */
 export const HOT_RELOAD_SECTIONS = Object.freeze(['otel', 'proxy', 'sink', 'upload'])
-
-/**
- * @typedef {'unchanged' | 'changed' | 'added' | 'removed'} SectionStatus
- */
-
-/**
- * @typedef {{
- *   otel: SectionStatus,
- *   proxy: SectionStatus,
- *   sink: SectionStatus,
- *   upload: SectionStatus,
- * }} ConfigDiff
- */
-
-/**
- * Section names whose listeners actually run in the registry. `sink` is
- * intentionally absent — there is no standalone sink listener; the sink is
- * owned by the consumers (otel collector, proxy recorder, uploader). A
- * `sink` diff entry triggers restart of those consumers.
- *
- * @typedef {'otel' | 'proxy' | 'upload'} ReloadableListener
- */
 
 /**
  * Compare the four hot-reloadable sections of two configs. Deep equality is

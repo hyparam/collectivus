@@ -82,6 +82,21 @@ export interface UploadJob {
   partition: Readonly<Record<string, string>>
 }
 
+/** A single partitioned JSONL file discovered during a directory walk. */
+export interface PartitionFile {
+  /** Absolute path to the file. */
+  filePath: string
+  /** Dimension to value for each level walked under `outputDir`. */
+  partition: Readonly<Record<string, string>>
+  /**
+   * Convenience copy of `partition.signal`. Always set because
+   * `walkPartitionFiles` requires `signal` in `partitionDimensions`.
+   */
+  signal: Signal
+  /** YYYY-MM-DD UTC parsed from the filename. */
+  date: string
+}
+
 export interface UploadResult {
   job: UploadJob
   uploaded: boolean

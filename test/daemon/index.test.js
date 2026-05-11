@@ -6,7 +6,7 @@ import process from 'node:process'
 import { DaemonError, installDaemon, uninstallDaemon } from '../../src/daemon/index.js'
 
 /**
- * @import { LaunchctlAdapter, SystemctlAdapter } from '../../src/types.js'
+ * @import { LaunchctlAdapter, SystemctlAdapter } from '../../src/daemon/types.d.ts'
  */
 
 /** @type {string} */

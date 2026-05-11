@@ -7,7 +7,8 @@ import { readJsonlRows } from '../upload/reader.js'
 import { proxyRowsToParquet } from './proxy-parquet.js'
 
 /**
- * @import { ExportParseResult, ExportHooks, CollectivusConfig } from '../types.js'
+ * @import { CollectivusConfig } from '../types.js'
+ * @import { ExportFileResult, ExportHooks, ExportJob, ExportParseResult, ProxyExportResult } from './types.d.ts'
  * @import { Signal } from '../upload/upload.d.ts'
  */
 
@@ -195,11 +196,6 @@ export async function runExport(argv, hooks = {}) {
 }
 
 /**
- * @typedef {{ rows: number, bytes: number, outPath: string }} ExportFileResult
- * @typedef {{ files: ExportFileResult[], skipped: Array<'exchange' | 'stream_event'> }} ProxyExportResult
- */
-
-/**
  * Read proxy.jsonl, partition rows by `kind`, and write one parquet file
  * per non-empty kind. Reads the whole file into memory — proxy.jsonl is
  * append-only and typically modest; streaming directly into a writer
@@ -249,10 +245,6 @@ export async function exportProxy(jsonlPath, outDir) {
 
   return { files, skipped }
 }
-
-/**
- * @typedef {{ service: string, signal: Signal, date: string, jsonlPath: string }} ExportJob
- */
 
 /**
  * @param {string} sinkDir

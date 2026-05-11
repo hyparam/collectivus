@@ -59,7 +59,7 @@ function ndjson(rows) {
  *   jwt: string,
  *   clock: ReturnType<typeof fakeClock>,
  *   baseUrl: string,
- *   ingest: import('../../src/server/ingest.js').Ingest,
+ *   ingest: Ingest,
  *   releaseAll: () => void,
  *   getDir: () => string,
  * }> }}
@@ -93,7 +93,7 @@ function makeHarness() {
    *   jwt: string,
    *   clock: ReturnType<typeof fakeClock>,
    *   baseUrl: string,
-   *   ingest: import('../../src/server/ingest.js').Ingest,
+   *   ingest: Ingest,
    *   releaseAll: () => void,
    *   getDir: () => string,
    * }>}

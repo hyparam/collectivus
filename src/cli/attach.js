@@ -6,7 +6,8 @@ import { parseListenPort, readPackageVersion } from './common.js'
 import { pathMatchesPrefix } from '../proxy.js'
 
 /**
- * @import { AttachParseResult, AttachHooks, CollectivusConfig } from '../types.js'
+ * @import { CollectivusConfig } from '../types.js'
+ * @import { AttachHooks, AttachParseResult } from './types.d.ts'
  */
 
 const USAGE = `Usage:

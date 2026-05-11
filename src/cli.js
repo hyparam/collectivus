@@ -24,15 +24,9 @@ const SERVER_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 
 /**
  * @import { Server } from 'node:http'
- * @import { ErrorResult, ParseResult, StartedListener, ListenerFactory, CollectivusConfig, ConfigChangedEvent } from './types.js'
- */
-
-/**
- * @typedef {{
- *   initialConfig: CollectivusConfig,
- *   configClient: ConfigClient,
- *   factoryBuilder: (cfg: CollectivusConfig) => Map<string, ListenerFactory>,
- * }} HotReloadWiring
+ * @import { CollectivusConfig, ListenerFactory, StartedListener } from './types.js'
+ * @import { ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
+ * @import { ConfigChangedEvent } from './gateway/types.d.ts'
  */
 
 const USAGE = `Usage:

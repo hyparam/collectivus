@@ -12,7 +12,7 @@ import process from 'node:process'
  *   LinuxInstallOptions,
  *   LinuxUninstallOptions,
  *   LinuxStatusOptions,
- * } from '../types.js'
+ * } from './types.d.ts'
  */
 
 const DEFAULT_UNIT_DIR = path.join(os.homedir(), '.config', 'systemd', 'user')

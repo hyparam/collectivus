@@ -5,7 +5,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 /**
- * @import { InstalledPlistFields } from '../types.js'
+ * @import { InstalledPlistFields } from './types.d.ts'
  */
 
 export const LAUNCH_AGENT_LABEL = 'com.hyparam.collectivus'

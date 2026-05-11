@@ -9,7 +9,8 @@ import {
 import { signJwt } from '../../src/server/identity.js'
 
 /**
- * @import { CentralServerConfig, PersistedIdentity } from '../../src/types.js'
+ * @import { CentralServerConfig } from '../../src/types.js'
+ * @import { PersistedIdentity } from '../../src/gateway/types.d.ts'
  */
 
 const SECRET = 'a'.repeat(32)

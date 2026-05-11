@@ -13,7 +13,8 @@ import {
 import { installDaemon } from '../daemon/index.js'
 
 /**
- * @import { InstallParseResult, InstallHooks, CollectivusConfig } from '../types.js'
+ * @import { CollectivusConfig } from '../types.js'
+ * @import { InstallHooks, InstallParseResult } from './types.d.ts'
  */
 
 const USAGE = `Usage:

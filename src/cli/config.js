@@ -7,28 +7,7 @@ import { defaultPrompt } from './common.js'
 
 /**
  * @import { CollectivusConfig, ServerConfig } from '../types.js'
- */
-
-/**
- * @typedef {{
- *   stdout?: { write: (s: string) => void },
- *   stderr?: { write: (s: string) => void },
- *   isTTY?: boolean,
- *   prompt?: (q: string) => Promise<string>,
- *   loadConfig?: (p: string) => CollectivusConfig,
- *   readFile?: (p: string) => string,
- *   makeRegistry?: (server: ServerConfig) => ConfigRegistry,
- *   makeBootstrapStore?: (storePath: string) => BootstrapStore,
- * }} ConfigCliHooks
- * @typedef {{ kind: 'help' }} ParsedHelp
- * @typedef {{ kind: 'error', message: string, exitCode: 2 }} ParsedError
- * @typedef {{ kind: 'set', gatewayId: string, serverConfig: string, file: string }} ParsedSet
- * @typedef {{ kind: 'get', gatewayId: string, serverConfig: string }} ParsedGet
- * @typedef {{ kind: 'list', serverConfig: string }} ParsedList
- * @typedef {{ kind: 'delete', gatewayId: string, serverConfig: string, yes: boolean }} ParsedDelete
- * @typedef {{ kind: 'token-issue', gatewayId: string, serverConfig: string, ttlSeconds?: number }} ParsedTokenIssue
- * @typedef {{ kind: 'token-revoke', gatewayId: string, serverConfig: string }} ParsedTokenRevoke
- * @typedef {ParsedHelp | ParsedError | ParsedSet | ParsedGet | ParsedList | ParsedDelete | ParsedTokenIssue | ParsedTokenRevoke} ParsedConfigArgs
+ * @import { ConfigCliHooks, ParsedConfigArgs, ParsedDelete, ParsedError, ParsedGet, ParsedHelp, ParsedList, ParsedSet, ParsedTokenIssue, ParsedTokenRevoke } from './types.d.ts'
  */
 
 const USAGE = `Usage:

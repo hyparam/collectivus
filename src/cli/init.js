@@ -7,7 +7,8 @@ import { defaultServerDataDir } from '../server/config_registry.js'
 import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
 
 /**
- * @import { CentralServerConfig, CollectivusConfig, FileSinkConfig, InitHooks, OtelConfig, ProxyConfig, ServerConfig, UploadConfig } from '../types.js'
+ * @import { CentralServerConfig, CollectivusConfig, FileSinkConfig, OtelConfig, ProxyConfig, ServerConfig, UploadConfig } from '../types.js'
+ * @import { InitHooks } from './types.d.ts'
  */
 
 const PROVIDERS = [

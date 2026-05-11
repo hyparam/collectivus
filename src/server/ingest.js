@@ -5,7 +5,7 @@ import { getClaims } from './auth.js'
 
 /**
  * @import { IncomingMessage, ServerResponse } from 'node:http'
- * @import { IngestSignal } from '../types.js'
+ * @import { IngestSignal, ThrottleEvent } from './types.d.ts'
  */
 
 /**
@@ -371,14 +371,6 @@ export class Ingest {
     }
   }
 }
-
-/**
- * @typedef {(
- *   | { kind: 'high_water', gatewayId: string, signal: string, pendingRows: number, highWaterRows: number }
- *   | { kind: 'capacity',   gatewayId: string, signal: string, pendingRows: number, maxPendingRows: number }
- *   | { kind: 'byte_rate',  gatewayId: string, signal: string, batchBytes: number, maxBytesPerSecond: number }
- * )} ThrottleEvent
- */
 
 /**
  * Default `onThrottle` hook: emit a single stderr line per rejection so ops

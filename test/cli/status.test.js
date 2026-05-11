@@ -7,6 +7,11 @@ import { SettingsError } from '../../src/claude-code/settings.js'
 import { parseStatusArgs, runStatus } from '../../src/cli/status.js'
 
 /**
+ * @import { CollectivusConfig } from '../../src/types.js'
+ * @import { StatusHooks } from '../../src/cli/types.d.ts'
+ */
+
+/**
  * @returns {{ write: (s: string) => void, value: () => string }}
  */
 function memo() {
@@ -41,7 +46,7 @@ afterEach(function() {
  * Hooks shared by the simple cases — tmpDir-scoped paths plus the no-op
  * config/log/sink stubs so we don't read user state from disk.
  *
- * @returns {import('../../src/types.js').StatusHooks}
+ * @returns {StatusHooks}
  */
 function baseHooks() {
   return {
@@ -223,7 +228,7 @@ describe('runStatus', function() {
   it('reports valid config and lists configured listeners', async function() {
     const stdout = memo()
     const sinkDir = path.join(tmpDir, 'sink')
-    /** @type {import('../../src/types.js').CollectivusConfig} */
+    /** @type {CollectivusConfig} */
     const cfg = {
       version: 1,
       otel: { listen: '0.0.0.0:4318' },
@@ -275,7 +280,7 @@ describe('runStatus', function() {
 
   it('reports proxy.jsonl missing and no OTLP recordings when sink is fresh', async function() {
     const stdout = memo()
-    /** @type {import('../../src/types.js').CollectivusConfig} */
+    /** @type {CollectivusConfig} */
     const cfg = {
       version: 1,
       proxy: {
@@ -303,7 +308,7 @@ describe('runStatus', function() {
 
   it('reports proxy.jsonl as empty when it exists but is zero bytes', async function() {
     const stdout = memo()
-    /** @type {import('../../src/types.js').CollectivusConfig} */
+    /** @type {CollectivusConfig} */
     const cfg = {
       version: 1,
       proxy: {

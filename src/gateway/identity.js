@@ -3,7 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * @import { CentralServerConfig, PersistedIdentity } from '../types.js'
+ * @import { CentralServerConfig } from '../types.js'
+ * @import { AcquireSource, PersistedIdentity } from './types.d.ts'
  */
 
 /**
@@ -26,13 +27,6 @@ export const DEFAULT_PERSISTED_PATH = path.join(os.homedir(), '.hyp', 'collectiv
  * is finally needed.
  */
 export const REFRESH_WINDOW_SECONDS = 24 * 60 * 60
-
-/**
- * Result of `IdentityClient.acquire` — captures whichever path actually ran so
- * the CLI can log a single deterministic line and tests can assert on it.
- *
- * @typedef {'bootstrapped' | 'loaded' | 'refreshed'} AcquireSource
- */
 
 /**
  * IdentityClient holds the gateway's control-plane JWT in memory and manages

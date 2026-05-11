@@ -5,7 +5,8 @@ import path from 'node:path'
 import { ConfigError, validateCollectivusConfig } from '../config.js'
 
 /**
- * @import { CollectivusConfig, ConfigRegistryEntry, ServerConfig } from '../types.js'
+ * @import { CollectivusConfig, ServerConfig } from '../types.js'
+ * @import { ConfigRegistryEntry } from './types.d.ts'
  */
 
 /**

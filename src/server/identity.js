@@ -4,12 +4,14 @@ import path from 'node:path'
 
 /**
  * @import {
- *   BootstrapRecord,
  *   IdentityIssuerConfig,
+ * } from '../types.js'
+ * @import {
+ *   BootstrapRecord,
  *   IssueFromBootstrapResult,
  *   JwtClaims,
  *   JwtVerifyResult,
- * } from '../types.js'
+ * } from './types.d.ts'
  */
 
 /**

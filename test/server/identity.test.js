@@ -12,7 +12,7 @@ import {
 } from '../../src/server/identity.js'
 
 /**
- * @import { JwtVerifyResult, IssueFromBootstrapResult } from '../../src/types.js'
+ * @import { JwtVerifyResult, IssueFromBootstrapResult } from '../../src/server/types.d.ts'
  */
 
 const SECRET = 'a'.repeat(32)

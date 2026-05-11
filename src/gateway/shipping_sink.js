@@ -1,5 +1,7 @@
 /**
- * @import { IngestSignal, ShippingSinkOptions, Sink } from '../types.js'
+ * @import { Sink } from '../types.js'
+ * @import { IngestSignal } from '../server/types.d.ts'
+ * @import { ShippingSinkOptions } from './types.d.ts'
  */
 
 /**

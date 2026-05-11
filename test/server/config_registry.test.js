@@ -12,13 +12,17 @@ import {
 } from '../../src/server/config_registry.js'
 
 /**
+ * @import { CollectivusConfig } from '../../src/types.js'
+ */
+
+/**
  * Build a minimal valid gateway config. The gateway-side validator requires
  * `version: 1`, and (for role: 'gateway') a `central_server` block with the
  * identity sub-block. Pair with a sink/otel so the test config survives any
  * subsequent role-vs-sink cross-checks the validator may grow.
  *
  * @param {{ url?: string, sinkDir?: string }} [opts]
- * @returns {import('../../src/types.js').CollectivusConfig}
+ * @returns {CollectivusConfig}
  */
 function gatewayCfg(opts = {}) {
   return {

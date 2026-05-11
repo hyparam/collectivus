@@ -250,9 +250,10 @@ npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 ```
 
 Rendezvous stores only the join-code hash and Central server connect metadata.
-The gateway resolves the join code, keeps the bootstrap config in memory, and
-then bootstraps directly against Central. V1 does not pin the Central URL, so
-use this only when gateway egress is private or constrained.
+When run through `npx`, the gateway resolves the join code, writes
+`~/.hyp/collectivus.json`, installs `collectivus` globally, and installs the
+background daemon against that config. V1 does not pin the Central URL, so use
+this only when gateway egress is private or constrained.
 
 See the [Config vending](../README.md#config-vending-multi-host-deployments)
 section of the README for the full operator workflow and the on-disk schema.

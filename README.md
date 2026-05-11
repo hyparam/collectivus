@@ -284,11 +284,13 @@ stdout for scripts. Stderr prints the gateway command:
 npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 ```
 
-`ctvs join` submits the join code in a POST body, resolves the Central server
-URL, builds the gateway bootstrap config in memory, and then bootstraps
-directly against the customer Central server. It does not write the bootstrap
-config to disk; the long-lived JWT is still persisted to
-`~/.hyp/collectivus/identity.json`.
+When invoked through `npx`, `ctvs join` submits the join code in a POST body,
+resolves the Central server URL, writes the gateway bootstrap config to
+`~/.hyp/collectivus.json`, runs `npm install -g collectivus`, and installs the
+background daemon against that config. The long-lived JWT is persisted to
+`~/.hyp/collectivus/identity.json` after the daemon bootstraps directly against
+the customer Central server. A globally installed `ctvs join` still runs the
+gateway in the foreground for debugging.
 
 Security note: in v1, rendezvous does not pin or cryptographically verify the
 Central server URL it returns. This is appropriate when gateways can reach the

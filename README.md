@@ -7,6 +7,7 @@
 [![workflow status](https://github.com/hyparam/collectivus/actions/workflows/ci.yml/badge.svg)](https://github.com/hyparam/collectivus/actions)
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
 [![dependencies](https://img.shields.io/badge/Dependencies-0-blueviolet)](https://www.npmjs.com/package/collectivus?activeTab=dependencies)
+[![container](https://img.shields.io/badge/container-ghcr.io%2Fhyparam%2Fcollectivus-blue)](https://github.com/orgs/hyparam/packages/container/package/collectivus)
 
 Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two listeners in one process record everything to local JSONL: an OpenTelemetry receiver that normalizes traces, metrics, and logs by signal and service, and a transparent reverse proxy for LLM APIs that captures every request and SSE event. Pick one or run both.
 
@@ -18,6 +19,13 @@ Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two
 
 ```bash
 npm install collectivus
+```
+
+Or run the container image published from this repo:
+
+```bash
+docker pull ghcr.io/hyparam/collectivus:latest
+docker run --rm ghcr.io/hyparam/collectivus:latest --help
 ```
 
 ## Quick start: record claude-code
@@ -135,8 +143,17 @@ npx -p collectivus ctvs --config /etc/collectivus-server.json
 # or after npm install -g collectivus:
 ctvs --config /etc/collectivus-server.json
 # or in Docker/ECS, mount the config + data_dir and pass:
-docker run -p 8788:8788 -v /host/config:/config -v /host/data:/data <image> --config /config/collectivus-server.json
+docker run --rm -p 8788:8788 \
+  -v /host/config:/config:ro \
+  -v collectivus-server-data:/data \
+  ghcr.io/hyparam/collectivus:latest \
+  --config /config/collectivus-server.json
 ```
+
+When using the container, set `server.data_dir`,
+`server.identity_issuer.bootstrap_store_path`, and any ingest `sink_dir` under
+the mounted `/data` volume, and make sure that volume is writable by UID 1000
+(`node` inside the image).
 
 Operator workflow on the server host:
 
@@ -187,6 +204,17 @@ Start rendezvous with a shared registration bearer token:
 ```bash
 ctvs rendezvous --listen 0.0.0.0:8789 --data-dir ~/.hyp/collectivus/rendezvous \
   --registration-token "$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN"
+```
+
+The same service can run directly from the GHCR image:
+
+```bash
+docker volume create collectivus-rendezvous
+docker run --rm -p 8789:8789 \
+  -e COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN="$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN" \
+  -v collectivus-rendezvous:/data \
+  ghcr.io/hyparam/collectivus:latest \
+  rendezvous --listen 0.0.0.0:8789 --data-dir /data/rendezvous
 ```
 
 Then issue a normal Central server bootstrap token and register its hash with

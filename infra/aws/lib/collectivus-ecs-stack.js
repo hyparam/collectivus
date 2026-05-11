@@ -58,8 +58,6 @@ export class CollectivusEcsStack extends cdk.Stack {
     const centralTaskRole = createTaskRole(this, 'CentralTaskRole')
     const rendezvousTaskRole = createTaskRole(this, 'RendezvousTaskRole')
     const fileSystem = new efs.FileSystem(this, 'StateFileSystem', {
-      // CDK's generated client policy becomes broad when grants are added.
-      // Keep the policy explicit and scoped to the ECS task roles below.
       allowAnonymousAccess: true,
       encrypted: true,
       lifecyclePolicy: efs.LifecyclePolicy.AFTER_30_DAYS,
@@ -68,7 +66,6 @@ export class CollectivusEcsStack extends cdk.Stack {
     })
     const centralAccessPoint = createAccessPoint(fileSystem, 'CentralAccessPoint', '/central')
     const rendezvousAccessPoint = createAccessPoint(fileSystem, 'RendezvousAccessPoint', '/rendezvous')
-    restrictEfsAccess(fileSystem, [centralTaskRole, rendezvousTaskRole])
     grantEfsAccess(fileSystem, centralTaskRole)
     grantEfsAccess(fileSystem, rendezvousTaskRole)
 
@@ -405,25 +402,7 @@ function createAccessPoint(fileSystem, id, path) {
  * @returns {void}
  */
 function grantEfsAccess(fileSystem, taskRole) {
-  fileSystem.grant(taskRole, 'elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite')
-}
-
-/**
- * @param {efs.FileSystem} fileSystem
- * @param {iam.IRole[]} taskRoles
- * @returns {void}
- */
-function restrictEfsAccess(fileSystem, taskRoles) {
-  fileSystem.addToResourcePolicy(new iam.PolicyStatement({
-    actions: ['elasticfilesystem:ClientMount', 'elasticfilesystem:ClientWrite'],
-    conditions: {
-      Bool: {
-        'elasticfilesystem:AccessedViaMountTarget': 'true',
-      },
-    },
-    principals: taskRoles.map((role) => new iam.ArnPrincipal(role.roleArn)),
-    resources: [fileSystem.fileSystemArn],
-  }))
+  fileSystem.grantReadWrite(taskRole)
 }
 
 /**

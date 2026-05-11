@@ -194,7 +194,9 @@ describe('ConfigRegistry', () => {
     fs.writeFileSync(path.join(dir, 'configs', '.hidden.json'), '{}')
     fs.writeFileSync(path.join(dir, 'configs', 'gw-x.json.tmp.123'), 'partial')
 
-    expect(registry.listGateways()).toEqual(['.hidden', 'gw-a', 'gw-b', 'gw-c'])
+    // `.hidden.json` is filtered: gateway IDs must start with an alphanumeric,
+    // so dot-prefixed filenames are not surfaced even if they parse as JSON.
+    expect(registry.listGateways()).toEqual(['gw-a', 'gw-b', 'gw-c'])
   })
 
   it('listGateways returns [] when the configsDir does not exist', () => {
@@ -216,6 +218,14 @@ describe('ConfigRegistry', () => {
     expect(() => registry.setConfig('', gatewayCfg())).toThrow(/gatewayId is required/)
     expect(() => registry.setConfig('.', gatewayCfg())).toThrow(/invalid gatewayId/)
     expect(() => registry.setConfig('..', gatewayCfg())).toThrow(/invalid gatewayId/)
+    expect(() => registry.setConfig('.hidden', gatewayCfg())).toThrow(/invalid gatewayId/)
+  })
+
+  it('accepts email-shaped gatewayIds', () => {
+    registry.setConfig('james.smith@acme.com', gatewayCfg())
+    expect(registry.getConfig('james.smith@acme.com')).toBeDefined()
+    registry.setConfig('alice+work@example.co.uk', gatewayCfg())
+    expect(registry.getConfig('alice+work@example.co.uk')).toBeDefined()
   })
 
   it('getConfig surfaces invalid JSON from disk as a thrown error', () => {

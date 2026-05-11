@@ -182,6 +182,40 @@ describe('Ingest endpoint', () => {
     expect(lines.slice(50).every((r) => r.batch !== firstBatch)).toBe(true)
   })
 
+  it('accepts email-shaped gateway_ids and writes under that literal directory name', async () => {
+    const { jwt, day } = await boot({ gatewayId: 'james.smith@acme.com' })
+    const res = await fetch(`${baseUrl}/v1/ingest/logs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/x-ndjson' },
+      body: ndjson([{ msg: 'hello' }]),
+    })
+    expect(res.status).toBe(202)
+
+    const file = path.join(dir, 'james.smith@acme.com', 'logs', `${day}.jsonl`)
+    const lines = fs.readFileSync(file, 'utf8').trimEnd().split('\n').map((l) => JSON.parse(l))
+    expect(lines).toHaveLength(1)
+    expect(lines[0]._ingest.gateway_id).toBe('james.smith@acme.com')
+  })
+
+  it('rejects gateway_ids containing path-traversal characters', async () => {
+    // Mint a JWT whose `sub` claim has a `/`. The control-plane minter would
+    // never produce this, but a leaked secret could — defense-in-depth.
+    const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
+    plane = new ControlPlane(serverConfig({ sinkDir: dir }), { now: clock.now })
+    await plane.start()
+    const addr = plane.server?.address()
+    if (!addr || typeof addr === 'string') throw new Error('no address')
+    baseUrl = `http://127.0.0.1:${addr.port}`
+    const jwt = signJwt({ gatewayId: 'gw/../escape', ttlSeconds: 3600, secret: SECRET, now: clock.now })
+
+    const res = await fetch(`${baseUrl}/v1/ingest/logs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}`, 'content-type': 'application/x-ndjson' },
+      body: ndjson([{ msg: 'hello' }]),
+    })
+    expect(res.status).toBe(500)
+  })
+
   it('returns 400 with `accepted: 49, rejected_at_line: 50` on a malformed line', async () => {
     const { jwt, day } = await boot({ gatewayId: 'gw-1' })
     // 49 valid rows, then a non-JSON line, then more valid rows we expect

@@ -237,16 +237,18 @@ function canonicalize(value) {
 
 /**
  * Gateway IDs are used both as JWT subjects and as filenames, so we constrain
- * them to a portable, non-traversal-prone alphabet. The validator is duplicated
- * here rather than imported from a shared module so the registry has no
- * runtime dependency on the identity layer.
+ * them to a portable, non-traversal-prone alphabet that also accommodates real-
+ * world email addresses (the `@` and `+` characters are common in operator-
+ * assigned IDs like `firstname.last@acme.com`). Must match the ingest-side
+ * validator in `src/server/ingest.js`; the validator is duplicated rather than
+ * imported so the registry has no runtime dependency on the identity layer.
  *
  * @param {string} value
  * @returns {boolean}
  */
 function isValidGatewayId(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 128) return false
-  return /^[a-zA-Z0-9_.-]+$/.test(value) && value !== '.' && value !== '..'
+  return /^[a-zA-Z0-9][a-zA-Z0-9._+@-]*$/.test(value)
 }
 
 /**

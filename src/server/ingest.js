@@ -31,12 +31,13 @@ const DEFAULT_RETRY_AFTER_SECONDS = 5
 
 /**
  * Defense-in-depth pattern for `gateway_id` taken from `claims.sub` before
- * it's joined into a filesystem path. Operators register gateway IDs at
- * bootstrap time, so a leading character outside `[A-Za-z0-9]` would already
- * be a misconfiguration — but path traversal is too easy to get wrong, and
- * the cost of a strict pattern is zero.
+ * it's joined into a filesystem path. The alphabet permits the punctuation
+ * found in real-world email addresses (`.`, `_`, `-`, `+`, and the at-sign)
+ * so operators can use `firstname.last(at)acme.com` shapes as a gateway_id,
+ * while still excluding `/`, `\`, shell metacharacters, and the leading-dot
+ * case that would create hidden files on the filesystem.
  */
-const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
+const GATEWAY_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._+@-]*$/
 
 /**
  * Default sink directory when `config.server.sink_dir` is absent.

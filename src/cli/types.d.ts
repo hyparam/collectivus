@@ -58,7 +58,7 @@ export interface ExportParseResult {
   configPath?: string
   outDir?: string
   date?: string
-  service?: string
+  gatewayId?: string
   signal?: UploadSignal
 }
 
@@ -80,7 +80,8 @@ export interface ProxyExportResult {
 }
 
 export interface ExportJob {
-  service: string
+  /** First-level partition value: `gateway_id` under the unified layout. */
+  gatewayId: string
   signal: UploadSignal
   date: string
   jsonlPath: string

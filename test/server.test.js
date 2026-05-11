@@ -6,6 +6,8 @@ import zlib from 'node:zlib'
 import { Collector } from '../src/index.js'
 import { bytesField, fixed64Field, lenDelim, stringField, u8 } from './helpers.js'
 
+const TEST_GATEWAY_ID = 'tester'
+
 /** @type {Collector} */
 let collector
 /** @type {string} */
@@ -15,7 +17,7 @@ let baseUrl
 
 beforeEach(async () => {
   outputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-'))
-  collector = new Collector({ port: 0, outputDir })
+  collector = new Collector({ port: 0, outputDir, gatewayId: TEST_GATEWAY_ID })
   await collector.start()
   const addr = collector.server?.address()
   if (!addr || typeof addr === 'string') throw new Error('no address')
@@ -28,11 +30,14 @@ afterEach(async () => {
 })
 
 /**
+ * Read the raw OTLP envelopes the Collector wrote under
+ * `<outputDir>/<id>/raw/<signal>/<UTC-date>.jsonl`. One envelope per line.
+ *
  * @param {string} signal
  * @returns {unknown[]}
  */
 function readLines(signal) {
-  const file = path.join(outputDir, signal, `${new Date().toISOString().slice(0, 10)}.jsonl`)
+  const file = path.join(outputDir, TEST_GATEWAY_ID, 'raw', signal, `${new Date().toISOString().slice(0, 10)}.jsonl`)
   if (!fs.existsSync(file)) return []
   const text = fs.readFileSync(file, 'utf8').trim()
   if (!text) return []
@@ -40,16 +45,23 @@ function readLines(signal) {
 }
 
 /**
+ * Read normalized per-record rows from
+ * `<outputDir>/<id>/<signal>/<UTC-date>.jsonl` and return only the rows whose
+ * `serviceName` matches. Replaces the legacy per-service file split.
+ *
  * @param {string} serviceName
  * @param {string} signal
- * @returns {unknown[]}
+ * @returns {Record<string, unknown>[]}
  */
 function readServiceLines(serviceName, signal) {
-  const file = path.join(outputDir, 'services', serviceName, `${signal}-${new Date().toISOString().slice(0, 10)}.jsonl`)
+  const file = path.join(outputDir, TEST_GATEWAY_ID, signal, `${new Date().toISOString().slice(0, 10)}.jsonl`)
   if (!fs.existsSync(file)) return []
   const text = fs.readFileSync(file, 'utf8').trim()
   if (!text) return []
-  return text.split('\n').map((line) => JSON.parse(line))
+  return text
+    .split('\n')
+    .map((line) => /** @type {Record<string, unknown>} */ (JSON.parse(line)))
+    .filter((row) => row.serviceName === serviceName)
 }
 
 /**
@@ -504,7 +516,11 @@ describe('OTLP endpoints', () => {
     ])
   })
 
-  it('neutralizes dot segments in service-based log paths', async () => {
+  it('preserves unusual service.name values in the row body without affecting the path', async () => {
+    // Under the unified <gateway_id>/<signal>/<date>.jsonl layout, the service
+    // name is just a column on the row; it never becomes a path segment, so
+    // values like ".." can't induce path traversal. The path-sanitization
+    // helper that used to map ".." to "_dotdot" is gone.
     const payload = {
       resourceLogs: [
         {
@@ -532,13 +548,12 @@ describe('OTLP endpoints', () => {
       body: JSON.stringify(payload),
     })
     expect(res.status).toBe(200)
-    expect(readServiceLines('_dotdot', 'logs')).toEqual([
+    expect(readServiceLines('..', 'logs')).toEqual([
       expect.objectContaining({
         serviceName: '..',
         body: 'dot segment service',
       }),
     ])
-    expect(fs.existsSync(path.join(outputDir, `${new Date().toISOString().slice(0, 10)}.jsonl`))).toBe(false)
   })
 
   it('returns OTLP ExportPartialSuccess responses', async () => {

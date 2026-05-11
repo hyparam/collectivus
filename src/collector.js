@@ -13,12 +13,16 @@ const MIN_DATE_MS = -8640000000000000n
 const MAX_DATE_MS = 8640000000000000n
 
 export class Collector {
-  /** @param {{ port?: number, host?: string, outputDir?: string, upload?: UploadOptions }} [options] */
-  constructor(options = {}) {
+  /** @param {{ port?: number, host?: string, outputDir?: string, gatewayId: string, upload?: UploadOptions }} options */
+  constructor(options) {
+    if (!options || typeof options.gatewayId !== 'string' || options.gatewayId.length === 0) {
+      throw new Error('Collector: gatewayId is required')
+    }
     this.port = options.port ?? 4318
     /** @type {string | undefined} */
     this.host = options.host
     this.outputDir = options.outputDir || './otel-data'
+    this.gatewayId = options.gatewayId
     this.uploadOptions = options.upload
     /** @type {Server | undefined} */
     this.server = undefined
@@ -81,8 +85,8 @@ export class Collector {
    * @param {unknown} data
    */
   handleData(signal, data) {
-    writeSignalPayload(this.outputDir, signal, data)
-    writeNormalizedServiceRows(this.outputDir, signal, data)
+    writeRawEnvelope(this.outputDir, this.gatewayId, signal, data)
+    writeNormalizedRows(this.outputDir, this.gatewayId, signal, data)
   }
 }
 
@@ -94,46 +98,45 @@ function todayUtc() {
 }
 
 /**
- * Write the raw OTLP payload for a signal.
+ * Write the raw OTLP envelope for a signal under
+ * `<outputDir>/<gatewayId>/raw/<signal>/<UTC-date>.jsonl`. Preserved alongside
+ * the normalized rows so debugging tools can still see the original
+ * resource/scope grouping that the per-record flattener discards.
  *
  * @param {string} outputDir
+ * @param {string} gatewayId
  * @param {string} signal
  * @param {unknown} data
  * @returns {void}
  */
-function writeSignalPayload(outputDir, signal, data) {
-  const signalDir = path.join(outputDir, signal)
-  ensureDir(signalDir)
-  const filePath = path.join(signalDir, `${todayUtc()}.jsonl`)
+function writeRawEnvelope(outputDir, gatewayId, signal, data) {
+  const dir = path.join(outputDir, gatewayId, 'raw', signal)
+  ensureDir(dir)
+  const filePath = path.join(dir, `${todayUtc()}.jsonl`)
   fs.appendFileSync(filePath, JSON.stringify(data) + '\n')
 }
 
 /**
- * Write normalized per-entry rows grouped by service under services/<service>/.
+ * Write normalized per-record rows under
+ * `<outputDir>/<gatewayId>/<signal>/<UTC-date>.jsonl`. This is the path the
+ * upload pipeline drains and matches the layout the server-mode ingest
+ * endpoint writes, so standalone and server installs share one shape.
  *
  * @param {string} outputDir
+ * @param {string} gatewayId
  * @param {string} signal
  * @param {unknown} data
  * @returns {void}
  */
-function writeNormalizedServiceRows(outputDir, signal, data) {
+function writeNormalizedRows(outputDir, gatewayId, signal, data) {
   const rows = flattenSignalRows(signal, data)
-  for (const row of rows) {
-    const serviceName = sanitizePathSegment(row.serviceName || '_unknown')
-    appendServiceRow(path.join(outputDir, 'services', serviceName), signal, row)
-  }
-}
-
-/**
- * @param {string} serviceDir
- * @param {string} signal
- * @param {NormalizedServiceRow} row
- * @returns {void}
- */
-function appendServiceRow(serviceDir, signal, row) {
-  ensureDir(serviceDir)
-  const filePath = path.join(serviceDir, `${signal}-${todayUtc()}.jsonl`)
-  fs.appendFileSync(filePath, JSON.stringify(row) + '\n')
+  if (rows.length === 0) return
+  const dir = path.join(outputDir, gatewayId, signal)
+  ensureDir(dir)
+  const filePath = path.join(dir, `${todayUtc()}.jsonl`)
+  let buf = ''
+  for (const row of rows) buf += JSON.stringify(row) + '\n'
+  fs.appendFileSync(filePath, buf)
 }
 
 /**
@@ -733,16 +736,3 @@ function objectRecord(value) {
   return { ...value }
 }
 
-/**
- * Map service names to safe directory names without hiding the original value.
- *
- * @param {string} value
- * @returns {string}
- */
-function sanitizePathSegment(value) {
-  const sanitized = value.replace(/[\\/]/g, '_').trim()
-  if (!sanitized) return '_unknown'
-  if (sanitized === '.') return '_dot'
-  if (sanitized === '..') return '_dotdot'
-  return sanitized
-}

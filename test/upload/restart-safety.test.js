@@ -28,17 +28,20 @@ const baseOptions = /** @type {const} */ ({
 })
 
 /**
- * @param {string} service
+ * Seed one row under the unified `<outputDir>/<gateway_id>/<signal>/<date>.jsonl`
+ * layout that both standalone and server modes drain.
+ *
+ * @param {string} gatewayId
  * @param {'logs' | 'traces' | 'metrics'} signal
  * @param {string} date
  * @returns {void}
  */
-function seed(service, signal, date) {
-  const dir = path.join(outputDir, 'services', service)
+function seed(gatewayId, signal, date) {
+  const dir = path.join(outputDir, gatewayId, signal)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
-    path.join(dir, `${signal}-${date}.jsonl`),
-    JSON.stringify({ serviceName: service, body: 'x', resource: {}, scope: { attributes: {} }, attributes: {} }) + '\n'
+    path.join(dir, `${date}.jsonl`),
+    JSON.stringify({ serviceName: gatewayId, body: 'x', resource: {}, scope: { attributes: {} }, attributes: {} }) + '\n'
   )
 }
 

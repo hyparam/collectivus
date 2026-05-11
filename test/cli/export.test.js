@@ -36,16 +36,20 @@ afterEach(function() {
 })
 
 /**
- * @param {string} service
+ * Write OTLP rows under `<sink>/<gateway_id>/<signal>/<date>.jsonl`, the
+ * unified standalone+server layout. Most fixtures continue to use the
+ * service name as the gateway_id so existing assertions stay legible.
+ *
+ * @param {string} gatewayId
  * @param {'logs' | 'traces' | 'metrics'} signal
  * @param {string} date
  * @param {object[]} rows
  */
-function writeJsonl(service, signal, date, rows) {
-  const dir = path.join(sinkDir, 'services', service)
+function writeJsonl(gatewayId, signal, date, rows) {
+  const dir = path.join(sinkDir, gatewayId, signal)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
-    path.join(dir, `${signal}-${date}.jsonl`),
+    path.join(dir, `${date}.jsonl`),
     rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
   )
 }
@@ -108,12 +112,12 @@ describe('parseExportArgs', function() {
     expect(parseExportArgs(['-h']).help).toBe(true)
   })
 
-  it('parses --config / --out / --date / --service / --signal', function() {
+  it('parses --config / --out / --date / --gateway-id / --signal', function() {
     const r = parseExportArgs([
       '--config', '/c.json',
       '--out', '/o',
       '--date', '2026-05-07',
-      '--service', 'svc-a',
+      '--gateway-id', 'svc-a',
       '--signal', 'logs',
     ])
     expect(r).toEqual({
@@ -121,7 +125,7 @@ describe('parseExportArgs', function() {
       configPath: '/c.json',
       outDir: '/o',
       date: '2026-05-07',
-      service: 'svc-a',
+      gatewayId: 'svc-a',
       signal: 'logs',
     })
   })
@@ -140,43 +144,57 @@ describe('parseExportArgs', function() {
 })
 
 describe('discoverExportJobs', function() {
-  it('returns empty when sink has no services dir', function() {
+  it('returns empty when sink has no <id> dirs', function() {
     expect(discoverExportJobs(sinkDir, {})).toEqual([])
   })
 
-  it('finds every (service, signal, date) JSONL with no filters', function() {
+  it('finds every (gateway_id, signal, date) JSONL with no filters', function() {
     writeJsonl('svc-a', 'logs', '2026-05-06', [{ serviceName: 'svc-a' }])
     writeJsonl('svc-a', 'traces', '2026-05-07', [{ serviceName: 'svc-a' }])
     writeJsonl('svc-b', 'logs', '2026-05-07', [{ serviceName: 'svc-b' }])
     const jobs = discoverExportJobs(sinkDir, {})
-    expect(jobs.map((j) => `${j.service}/${j.signal}/${j.date}`)).toEqual([
+    expect(jobs.map((j) => `${j.gatewayId}/${j.signal}/${j.date}`)).toEqual([
       'svc-a/logs/2026-05-06',
       'svc-a/traces/2026-05-07',
       'svc-b/logs/2026-05-07',
     ])
   })
 
-  it('filters by date / service / signal', function() {
+  it('filters by date / gateway-id / signal', function() {
     writeJsonl('svc-a', 'logs', '2026-05-06', [{ serviceName: 'svc-a' }])
     writeJsonl('svc-a', 'logs', '2026-05-07', [{ serviceName: 'svc-a' }])
     writeJsonl('svc-b', 'traces', '2026-05-07', [{ serviceName: 'svc-b' }])
     expect(
-      discoverExportJobs(sinkDir, { date: '2026-05-07' }).map((j) => j.service)
+      discoverExportJobs(sinkDir, { date: '2026-05-07' }).map((j) => j.gatewayId)
     ).toEqual(['svc-a', 'svc-b'])
     expect(
-      discoverExportJobs(sinkDir, { service: 'svc-a' }).map((j) => j.date)
+      discoverExportJobs(sinkDir, { gatewayId: 'svc-a' }).map((j) => j.date)
     ).toEqual(['2026-05-06', '2026-05-07'])
     expect(
-      discoverExportJobs(sinkDir, { signal: 'traces' }).map((j) => j.service)
+      discoverExportJobs(sinkDir, { signal: 'traces' }).map((j) => j.gatewayId)
     ).toEqual(['svc-b'])
   })
 
-  it('skips files that do not match the signal-date pattern', function() {
-    const dir = path.join(sinkDir, 'services', 'svc-a')
+  it('skips files that do not match the date pattern', function() {
+    const dir = path.join(sinkDir, 'svc-a', 'logs')
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'README'), 'hi')
-    fs.writeFileSync(path.join(dir, 'logs-bad.jsonl'), '')
+    fs.writeFileSync(path.join(dir, 'bad.jsonl'), '')
     expect(discoverExportJobs(sinkDir, {})).toEqual([])
+  })
+
+  it('skips the proxy/ and raw/ sibling subtrees', function() {
+    writeJsonl('svc-a', 'logs', '2026-05-07', [{ serviceName: 'svc-a' }])
+    // Sibling proxy/ and raw/ trees that should not be picked up by the
+    // OTLP discovery walk.
+    fs.mkdirSync(path.join(sinkDir, 'svc-a', 'proxy'), { recursive: true })
+    fs.writeFileSync(path.join(sinkDir, 'svc-a', 'proxy', '2026-05-07.jsonl'), '{}\n')
+    fs.mkdirSync(path.join(sinkDir, 'svc-a', 'raw', 'logs'), { recursive: true })
+    fs.writeFileSync(path.join(sinkDir, 'svc-a', 'raw', 'logs', '2026-05-07.jsonl'), '{}\n')
+    const jobs = discoverExportJobs(sinkDir, {})
+    expect(jobs.map((j) => `${j.gatewayId}/${j.signal}/${j.date}`)).toEqual([
+      'svc-a/logs/2026-05-07',
+    ])
   })
 })
 

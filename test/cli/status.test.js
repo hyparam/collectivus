@@ -264,7 +264,7 @@ describe('runStatus', function() {
     expect(out).toMatch(new RegExp(`sink: {3}${sinkDir.replace(/\//g, '\\/')}`))
     expect(out).toMatch(/Recordings\n {2}Sink: /)
     expect(out).toMatch(/Proxy: {2}tester\/proxy\/2026-05-11\.jsonl 4\.0 KB, last write \d{4}-\d{2}-\d{2}T.* \(\d+m ago\)/)
-    expect(out).toMatch(/OTLP: {3}3 files under services\//)
+    expect(out).toMatch(/OTLP: {3}3 files under <id>\/\{logs,traces,metrics\}\//)
   })
 
   it('reports invalid config and exits 1', async function() {
@@ -307,7 +307,7 @@ describe('runStatus', function() {
     expect(code).toBe(0)
     const out = stdout.value()
     expect(out).toMatch(/Proxy: {2}no exchanges recorded yet/)
-    expect(out).toMatch(/OTLP: {3}no service recordings/)
+    expect(out).toMatch(/OTLP: {3}no recordings/)
   })
 
   it('reports the proxy file as empty when it exists but is zero bytes', async function() {

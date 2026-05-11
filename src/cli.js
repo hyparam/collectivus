@@ -15,13 +15,14 @@ import { isSupervised, selfUpdate } from './update.js'
 import { createScheduler } from './upload/scheduler.js'
 
 /**
- * Partition layout the server-mode parquet drain walks. Matches the path
- * the NDJSON ingest endpoint writes:
- * `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+ * Partition layout the parquet drain walks. Standalone and server modes share
+ * the same shape now: `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+ * Standalone resolves the id from `config.gateway_id` or the OS username;
+ * server mode tags it from the authenticated JWT subject on every ingest.
  *
  * @type {ReadonlyArray<string>}
  */
-const SERVER_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
+const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 
 /**
  * @import { Server } from 'node:http'
@@ -284,13 +285,14 @@ function buildConfigListeners(config, ctx) {
     }
     const { listen } = config.otel
     const outputDir = config.sink.dir
+    const { gatewayId } = ctx
     factories.set('otel', async () => {
       const { host, port } = parseListen(listen)
-      const collector = new Collector({ host, port, outputDir })
+      const collector = new Collector({ host, port, outputDir, gatewayId })
       await collector.start()
       const effective = effectiveBinding(collector.server, host, port)
       return {
-        description: `OTLP listener bound on ${effective}, writing to ${outputDir}`,
+        description: `OTLP listener bound on ${effective}, writing to ${outputDir}/${gatewayId}/<signal>/<UTC-date>.jsonl`,
         stop: () => collector.stop(),
       }
     })
@@ -326,19 +328,18 @@ function buildConfigListeners(config, ctx) {
 
   if (config.upload) {
     const uploadConfig = config.upload
-    // Server mode drains the multi-tenant ingest spool (`sink_dir`)
-    // partitioned by `gateway_id`/`signal`. Standalone keeps the
-    // single-tenant `services/<service>/<signal>-<date>.jsonl` layout.
+    // Standalone and server share the same on-disk partition layout
+    // (`<root>/<gateway_id>/<signal>/<date>.jsonl`); only the root differs.
+    // Server points at the multi-tenant ingest spool; standalone points at
+    // the per-process sink.dir, where the standalone Collector writes its
+    // normalized rows.
     let outputDir
-    /** @type {ReadonlyArray<string> | undefined} */
-    let partitionDimensions
     if (config.role === 'server') {
       const serverConfig = config.server
       if (!serverConfig) {
         throw new Error('role: server requires server block (validator should have caught this)')
       }
       outputDir = serverConfig.sink_dir ?? defaultIngestSinkDir()
-      partitionDimensions = SERVER_PARTITION_DIMENSIONS
     } else {
       if (!config.sink) {
         throw new Error('upload is configured but sink is missing')
@@ -352,9 +353,7 @@ function buildConfigListeners(config, ctx) {
       const { createUploader } = await import('./upload/index.js')
       const uploader = createUploader({
         outputDir: resolvedOutputDir,
-        options: partitionDimensions
-          ? { ...uploadConfig, partitionDimensions }
-          : uploadConfig,
+        options: { ...uploadConfig, partitionDimensions: PARQUET_PARTITION_DIMENSIONS },
         env: ctx.env,
       })
       await uploader.start()

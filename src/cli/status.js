@@ -186,21 +186,21 @@ export async function runStatus(argv, hooks = {}) {
       stdout.write(`  Proxy:  ${latestProxy.name} ${formatSize(latestProxy.size)}, last write ${formatTimestamp(latestProxy.mtimeMs)}\n`)
     }
 
-    // OTLP (services/<svc>/<signal>-<date>.jsonl): count files under
-    // services/. Falls back to the whole sink dir if services/ is absent so
-    // pre-1.x layouts still report something useful.
-    const otlpDir = path.join(sinkDir, 'services')
+    // OTLP (<sink>/<id>/<signal>/<date>.jsonl): count files under each
+    // <id>/{logs,traces,metrics}/ across all gateway_ids. Excludes the
+    // sibling proxy/ and raw/ subtrees; the proxy section above already
+    // covers proxy/, and raw/ holds debug-only OTLP envelopes.
     /** @type {number | undefined} */
     let otlpCount
     try {
-      otlpCount = await countSinkFiles(otlpDir)
+      otlpCount = await countSinkFiles(sinkDir)
     } catch (err) {
-      stderr.write(`warning: failed to scan ${otlpDir}: ${formatError(err)}\n`)
+      stderr.write(`warning: failed to scan ${sinkDir}: ${formatError(err)}\n`)
     }
     if (otlpCount === undefined || otlpCount === 0) {
-      stdout.write('  OTLP:   no service recordings\n')
+      stdout.write('  OTLP:   no recordings\n')
     } else {
-      stdout.write(`  OTLP:   ${otlpCount} file${otlpCount === 1 ? '' : 's'} under services/\n`)
+      stdout.write(`  OTLP:   ${otlpCount} file${otlpCount === 1 ? '' : 's'} under <id>/{logs,traces,metrics}/\n`)
     }
   }
 
@@ -418,30 +418,49 @@ async function defaultFindLatestProxyFile(sinkDir) {
   return best
 }
 
+/** OTLP signal subdirectories the standalone Collector writes under each id. */
+const OTLP_SIGNAL_DIRS = new Set(['logs', 'traces', 'metrics'])
+
 /**
- * Recursively count `.jsonl` files under `dir`. Returns undefined when `dir`
- * itself is missing. Subdirectories that disappear mid-walk are skipped.
+ * Count OTLP `.jsonl` files written under `<sinkDir>/<id>/{logs,traces,metrics}/`.
+ * Skips sibling subtrees (`proxy/`, `raw/`) so the OTLP and Proxy lines stay
+ * independent. Returns undefined when `sinkDir` itself is missing; missing
+ * intermediate directories are treated as zero contribution.
  *
- * @param {string} dir
+ * @param {string} sinkDir
  * @returns {Promise<number | undefined>}
  */
-async function defaultCountSinkFiles(dir) {
+async function defaultCountSinkFiles(sinkDir) {
   /** @type {import('node:fs').Dirent[]} */
-  let entries
+  let topEntries
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true })
+    topEntries = await fs.readdir(sinkDir, { withFileTypes: true })
   } catch (err) {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
     throw err
   }
   let count = 0
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) {
-      const sub = await defaultCountSinkFiles(full)
-      if (sub !== undefined) count += sub
-    } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-      count += 1
+  for (const top of topEntries) {
+    if (!top.isDirectory()) continue
+    /** @type {import('node:fs').Dirent[]} */
+    let signalEntries
+    try {
+      signalEntries = await fs.readdir(path.join(sinkDir, top.name), { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const sig of signalEntries) {
+      if (!sig.isDirectory() || !OTLP_SIGNAL_DIRS.has(sig.name)) continue
+      /** @type {import('node:fs').Dirent[]} */
+      let dateEntries
+      try {
+        dateEntries = await fs.readdir(path.join(sinkDir, top.name, sig.name), { withFileTypes: true })
+      } catch {
+        continue
+      }
+      for (const f of dateEntries) {
+        if (f.isFile() && f.name.endsWith('.jsonl')) count += 1
+      }
     }
   }
   return count

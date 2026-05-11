@@ -58,7 +58,7 @@ export interface ExportParseResult {
   configPath?: string
   outDir?: string
   date?: string
-  service?: string
+  gatewayId?: string
   signal?: UploadSignal
 }
 
@@ -80,7 +80,8 @@ export interface ProxyExportResult {
 }
 
 export interface ExportJob {
-  service: string
+  /** First-level partition value: `gateway_id` under the unified layout. */
+  gatewayId: string
   signal: UploadSignal
   date: string
   jsonlPath: string
@@ -241,6 +242,13 @@ export interface StatusHooks {
   statFile?: (p: string) => Promise<{ size: number, mtimeMs: number } | undefined>
   /** Count `*.jsonl` files under `dir` (recursive). Undefined when dir is missing. */
   countSinkFiles?: (dir: string) => Promise<number | undefined>
+  /**
+   * Find the most-recently-written `<id>/proxy/<date>.jsonl` under `sinkDir`.
+   * Returns the human-relative `name` (e.g. `tester/proxy/2026-05-11.jsonl`)
+   * plus its size and mtime. Resolves to undefined when no proxy directories
+   * exist yet.
+   */
+  findLatestProxyFile?: (sinkDir: string) => Promise<{ size: number, mtimeMs: number, name: string } | undefined>
   /** Override for reading the collectivus version from package.json. */
   readVersion?: () => string
 }

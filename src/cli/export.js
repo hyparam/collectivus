@@ -13,25 +13,25 @@ import { proxyRowsToParquet } from './proxy-parquet.js'
  */
 
 const USAGE = `Usage:
-  collectivus export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--service <name>] [--signal <s>]
+  collectivus export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--gateway-id <id>] [--signal <s>]
 
 Convert recorded JSONL under the configured sink dir into local Parquet files.
-Runs once and exits — does not invoke the daily upload pipeline.
+Runs once and exits. Does not invoke the daily upload pipeline.
 
 Drains both:
-  - proxy.jsonl                          → <out>/proxy/exchanges.parquet
-                                           <out>/proxy/stream_events.parquet
-  - services/<svc>/<signal>-<date>.jsonl → <out>/<svc>/<signal>/date=<date>/data.parquet
+  - <id>/proxy/<date>.jsonl     → <out>/proxy/exchanges.parquet
+                                  <out>/proxy/stream_events.parquet
+  - <id>/<signal>/<date>.jsonl  → <out>/<id>/<signal>/date=<date>/data.parquet
 
 Options:
   --config <path|url> Path or http(s) URL to the collectivus JSON config (required)
   --out <dir>         Output directory (default: <sink.dir>/parquet)
   --date <date>       Only export this UTC date (YYYY-MM-DD; default: all). OTLP only.
-  --service <name>    Only export this service (default: all). OTLP only.
+  --gateway-id <id>   Only export this gateway_id (default: all). OTLP only.
   --signal <s>        Only export this signal: logs, traces, metrics (default: all). OTLP only.
   --help, -h          Show this help`
 
-const FILE_PATTERN = /^(logs|traces|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/
+const DATE_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 /** @type {ReadonlyArray<Signal>} */
 const VALID_SIGNALS = ['logs', 'traces', 'metrics']
@@ -67,10 +67,10 @@ export function parseExportArgs(argv) {
       r.date = value
       continue
     }
-    if (arg === '--service' || arg.startsWith('--service=')) {
-      const value = arg === '--service' ? argv[++i] : arg.slice('--service='.length)
-      if (!value) { r.error = '--service requires a name'; return r }
-      r.service = value
+    if (arg === '--gateway-id' || arg.startsWith('--gateway-id=')) {
+      const value = arg === '--gateway-id' ? argv[++i] : arg.slice('--gateway-id='.length)
+      if (!value) { r.error = '--gateway-id requires an id'; return r }
+      r.gatewayId = value
       continue
     }
     if (arg === '--signal' || arg.startsWith('--signal=')) {
@@ -90,12 +90,12 @@ export function parseExportArgs(argv) {
 }
 
 /**
- * Run `collectivus export`. Walks `<sink.dir>/services/<svc>/<signal>-<date>.jsonl`
- * and writes one Parquet file per (service, signal, date) into `<outDir>`.
+ * Run `collectivus export`. Walks `<sink.dir>/<id>/<signal>/<date>.jsonl`
+ * and writes one Parquet file per (gateway_id, signal, date) into `<outDir>`.
  *
  * Output layout matches the upload object key shape so the same partition
  * layout works with engines that infer partitions from path segments:
- *   `<outDir>/<service>/<signal>/date=<YYYY-MM-DD>/data.parquet`
+ *   `<outDir>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet`
  *
  * @param {string[]} argv
  * @param {ExportHooks} [hooks]
@@ -144,10 +144,10 @@ export async function runExport(argv, hooks = {}) {
   let totalRows = 0
   let failures = 0
 
-  const proxyJsonl = path.join(sinkDir, 'proxy.jsonl')
-  if (fs.existsSync(proxyJsonl)) {
+  const proxyJsonlFiles = discoverProxyJsonlFiles(sinkDir)
+  if (proxyJsonlFiles.length > 0) {
     try {
-      const result = await exportProxy(proxyJsonl, outDir)
+      const result = await exportProxy(proxyJsonlFiles, outDir)
       for (const file of result.files) {
         written++
         totalRows += file.rows
@@ -160,13 +160,13 @@ export async function runExport(argv, hooks = {}) {
       }
     } catch (err) {
       failures++
-      stderr.write(`error: proxy.jsonl: ${formatError(err)}\n`)
+      stderr.write(`error: <id>/proxy/*.jsonl: ${formatError(err)}\n`)
     }
   }
 
   const jobs = discoverExportJobs(sinkDir, {
     date: parsed.date,
-    service: parsed.service,
+    gatewayId: parsed.gatewayId,
     signal: parsed.signal,
   })
 
@@ -174,7 +174,7 @@ export async function runExport(argv, hooks = {}) {
     try {
       const result = await exportOne(job, outDir)
       if (result.rows === 0) {
-        stdout.write(`skip ${job.service}/${job.signal}/${job.date}: 0 rows\n`)
+        stdout.write(`skip ${job.gatewayId}/${job.signal}/${job.date}: 0 rows\n`)
         continue
       }
       written++
@@ -182,7 +182,7 @@ export async function runExport(argv, hooks = {}) {
       stdout.write(`wrote ${result.outPath} (${result.rows} rows, ${result.bytes} bytes)\n`)
     } catch (err) {
       failures++
-      stderr.write(`error: ${job.service}/${job.signal}/${job.date}: ${formatError(err)}\n`)
+      stderr.write(`error: ${job.gatewayId}/${job.signal}/${job.date}: ${formatError(err)}\n`)
     }
   }
 
@@ -196,23 +196,53 @@ export async function runExport(argv, hooks = {}) {
 }
 
 /**
- * Read proxy.jsonl, partition rows by `kind`, and write one parquet file
- * per non-empty kind. Reads the whole file into memory — proxy.jsonl is
- * append-only and typically modest; streaming directly into a writer
- * would only matter at multi-GB scale.
+ * Discover every per-day proxy JSONL file under `<sinkDir>/<id>/proxy/`.
+ * Sorted by full path so multi-id, multi-day fixtures land in stable order.
  *
- * @param {string} jsonlPath
+ * @param {string} sinkDir
+ * @returns {string[]}
+ */
+export function discoverProxyJsonlFiles(sinkDir) {
+  /** @type {string[]} */
+  const out = []
+  for (const id of safeReadDir(sinkDir)) {
+    const proxyDir = path.join(sinkDir, id, 'proxy')
+    let stat
+    try {
+      stat = fs.statSync(proxyDir)
+    } catch {
+      continue
+    }
+    if (!stat.isDirectory()) continue
+    for (const name of safeReadDir(proxyDir)) {
+      if (!name.endsWith('.jsonl')) continue
+      out.push(path.join(proxyDir, name))
+    }
+  }
+  out.sort()
+  return out
+}
+
+/**
+ * Read every per-day proxy JSONL file in `jsonlPaths`, partition rows by
+ * `kind`, and write one parquet file per non-empty kind. Reads each file
+ * fully into memory: proxy JSONL is append-only and typically modest;
+ * streaming directly into a writer would only matter at multi-GB scale.
+ *
+ * @param {string[]} jsonlPaths
  * @param {string} outDir
  * @returns {Promise<ProxyExportResult>}
  */
-export async function exportProxy(jsonlPath, outDir) {
+export async function exportProxy(jsonlPaths, outDir) {
   /** @type {Record<string, unknown>[]} */
   const exchanges = []
   /** @type {Record<string, unknown>[]} */
   const streamEvents = []
-  for await (const row of readJsonlRows(jsonlPath)) {
-    if (row.kind === 'exchange') exchanges.push(row)
-    else if (row.kind === 'stream_event') streamEvents.push(row)
+  for (const jsonlPath of jsonlPaths) {
+    for await (const row of readJsonlRows(jsonlPath)) {
+      if (row.kind === 'exchange') exchanges.push(row)
+      else if (row.kind === 'stream_event') streamEvents.push(row)
+    }
   }
 
   const proxyDir = path.join(outDir, 'proxy')
@@ -247,29 +277,45 @@ export async function exportProxy(jsonlPath, outDir) {
 }
 
 /**
+ * Discover OTLP export jobs by walking
+ * `<sinkDir>/<gateway_id>/<signal>/<date>.jsonl`. The proxy and `raw/`
+ * subtrees live alongside the per-signal directories under the same
+ * `<gateway_id>/` root and are skipped here. The proxy export path
+ * (`exportProxy`) handles `proxy/`, and `raw/` envelopes are kept for
+ * debugging only.
+ *
  * @param {string} sinkDir
- * @param {{ date?: string, service?: string, signal?: Signal }} filter
+ * @param {{ date?: string, gatewayId?: string, signal?: Signal }} filter
  * @returns {ExportJob[]}
  */
 export function discoverExportJobs(sinkDir, filter) {
-  const servicesDir = path.join(sinkDir, 'services')
-  if (!fs.existsSync(servicesDir)) return []
-
   /** @type {ExportJob[]} */
   const jobs = []
-  const services = filter.service ? [filter.service] : safeReadDir(servicesDir)
-  for (const service of services) {
-    const serviceDir = path.join(servicesDir, service)
-    const entries = safeReadDir(serviceDir)
-    for (const entry of entries) {
-      const match = FILE_PATTERN.exec(entry)
-      if (!match) continue
-      const signal = match[1]
+  const ids = filter.gatewayId ? [filter.gatewayId] : safeReadDir(sinkDir)
+  for (const gatewayId of ids) {
+    const idDir = path.join(sinkDir, gatewayId)
+    let stat
+    try {
+      stat = fs.statSync(idDir)
+    } catch {
+      continue
+    }
+    if (!stat.isDirectory()) continue
+    for (const signal of safeReadDir(idDir)) {
+      // Reserved sibling subtrees that aren't per-signal data:
+      //   proxy/  drained by exportProxy
+      //   raw/    debug-only OTLP envelopes
+      if (signal === 'proxy' || signal === 'raw') continue
       if (!isSignal(signal)) continue
-      const date = match[2]
       if (filter.signal && signal !== filter.signal) continue
-      if (filter.date && date !== filter.date) continue
-      jobs.push({ service, signal, date, jsonlPath: path.join(serviceDir, entry) })
+      const signalDir = path.join(idDir, signal)
+      for (const entry of safeReadDir(signalDir)) {
+        const match = DATE_FILE_PATTERN.exec(entry)
+        if (!match) continue
+        const date = match[1]
+        if (filter.date && date !== filter.date) continue
+        jobs.push({ gatewayId, signal, date, jsonlPath: path.join(signalDir, entry) })
+      }
     }
   }
   jobs.sort(compareJobs)
@@ -287,7 +333,7 @@ async function exportOne(job, outDir) {
   for await (const row of readJsonlRows(job.jsonlPath)) {
     rows.push(row)
   }
-  const partitionDir = path.join(outDir, job.service, job.signal, `date=${job.date}`)
+  const partitionDir = path.join(outDir, job.gatewayId, job.signal, `date=${job.date}`)
   const outPath = path.join(partitionDir, 'data.parquet')
   if (rows.length === 0) {
     return { rows: 0, bytes: 0, outPath }
@@ -317,7 +363,7 @@ function safeReadDir(dir) {
  */
 function compareJobs(a, b) {
   if (a.date !== b.date) return a.date < b.date ? -1 : 1
-  if (a.service !== b.service) return a.service < b.service ? -1 : 1
+  if (a.gatewayId !== b.gatewayId) return a.gatewayId < b.gatewayId ? -1 : 1
   return VALID_SIGNALS.indexOf(a.signal) - VALID_SIGNALS.indexOf(b.signal)
 }
 

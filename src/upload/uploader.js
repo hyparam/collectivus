@@ -1,5 +1,3 @@
-import fs from 'node:fs'
-import path from 'node:path'
 import { appendLedger, isCommitted, readLedger } from './ledger.js'
 import { rowsToParquet } from './parquet.js'
 import { readPartitionRows, walkPartitionFiles } from './reader.js'
@@ -9,13 +7,6 @@ import { readPartitionRows, walkPartitionFiles } from './reader.js'
  */
 
 const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
-/**
- * Legacy standalone filename: `<signal>-<YYYY-MM-DD>.jsonl` directly
- * under `<outputDir>/services/<service>/`. Distinct from the generic
- * partitioned layout (`<outputDir>/<dim1>/<dim2>/<date>.jsonl`) walked
- * by `walkPartitionFiles`.
- */
-const LEGACY_FILE_PATTERN = /^(logs|traces|metrics)-(\d{4}-\d{2}-\d{2})\.jsonl$/
 
 const DEFAULT_MAX_ATTEMPTS = 3
 const DEFAULT_INITIAL_BACKOFF_MS = 1000
@@ -25,18 +16,11 @@ const DEFAULT_INITIAL_BACKOFF_MS = 1000
  * `today` (UTC) and within the catch-up window, filtered to the
  * configured signal allowlist.
  *
- * Two layouts are supported via `options.partitionDimensions`:
- *
- * 1. **Legacy standalone** (default `['service', 'signal']`): walks
- *    `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Preserved
- *    so existing standalone installs (recorder + OTLP collector still
- *    write this hyphenated layout) keep working unchanged.
- * 2. **Generic N-level** (any other dimension list): walks
- *    `<outputDir>/<dim1>/<dim2>/.../<date>.jsonl`. Each directory level
- *    is one entry in `partitionDimensions`; the leaf filename is the
- *    plain UTC date. The server-mode parquet drain uses
- *    `['gateway_id', 'signal']` to match the layout written by the
- *    NDJSON ingest endpoint (`<sink_dir>/<gateway_id>/<signal>/<date>.jsonl`).
+ * Walks `<outputDir>/<dim1>/<dim2>/.../<date>.jsonl`, where each
+ * directory level corresponds to one entry in `options.partitionDimensions`
+ * and the leaf filename is the plain UTC date. Standalone and server modes
+ * both use `['gateway_id', 'signal']` to match the layout written by the
+ * standalone Collector and the server's NDJSON ingest endpoint.
  *
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
@@ -46,78 +30,8 @@ const DEFAULT_INITIAL_BACKOFF_MS = 1000
 export function discoverJobs(outputDir, today, options) {
   const allowedSignals = new Set(options.signals)
   const minDate = subtractDays(today, options.catchupDays)
+  const dimensions = options.partitionDimensions ?? ['gateway_id', 'signal']
 
-  /** @type {UploadJob[]} */
-  const jobs = isLegacyDimensions(options.partitionDimensions)
-    ? discoverLegacyJobs(outputDir, allowedSignals, today, minDate)
-    : discoverPartitionedJobs(outputDir, options.partitionDimensions, allowedSignals, today, minDate)
-
-  jobs.sort(jobCompare)
-  return jobs
-}
-
-/**
- * @param {ReadonlyArray<string> | undefined} dimensions
- * @returns {boolean}
- */
-function isLegacyDimensions(dimensions) {
-  // `discoverJobs` is also called from tests that pass a not-yet-resolved
-  // options object, so a missing `partitionDimensions` is treated as the
-  // legacy default rather than a programming error.
-  if (!dimensions) return true
-  return dimensions.length === 2 && dimensions[0] === 'service' && dimensions[1] === 'signal'
-}
-
-/**
- * @param {string} outputDir
- * @param {Set<Signal>} allowedSignals
- * @param {string} today
- * @param {string} minDate
- * @returns {UploadJob[]}
- */
-function discoverLegacyJobs(outputDir, allowedSignals, today, minDate) {
-  const servicesDir = path.join(outputDir, 'services')
-  if (!fs.existsSync(servicesDir)) return []
-
-  /** @type {UploadJob[]} */
-  const jobs = []
-  for (const service of fs.readdirSync(servicesDir)) {
-    const serviceDir = path.join(servicesDir, service)
-    let entries
-    try {
-      entries = fs.readdirSync(serviceDir)
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      const match = LEGACY_FILE_PATTERN.exec(entry)
-      if (!match) continue
-      const signal = /** @type {Signal} */ (match[1])
-      const date = match[2]
-      if (!allowedSignals.has(signal)) continue
-      if (date >= today) continue
-      if (date < minDate) continue
-      jobs.push({
-        service,
-        signal,
-        date,
-        jsonlPath: path.join(serviceDir, entry),
-        partition: { service, signal },
-      })
-    }
-  }
-  return jobs
-}
-
-/**
- * @param {string} outputDir
- * @param {ReadonlyArray<string>} dimensions
- * @param {Set<Signal>} allowedSignals
- * @param {string} today
- * @param {string} minDate
- * @returns {UploadJob[]}
- */
-function discoverPartitionedJobs(outputDir, dimensions, allowedSignals, today, minDate) {
   /** @type {UploadJob[]} */
   const jobs = []
   for (const file of walkPartitionFiles(outputDir, dimensions)) {
@@ -136,6 +50,7 @@ function discoverPartitionedJobs(outputDir, dimensions, allowedSignals, today, m
       partition: file.partition,
     })
   }
+  jobs.sort(jobCompare)
   return jobs
 }
 
@@ -208,7 +123,7 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
 }
 
 /**
- * Upload every eligible job — used both by the daily timer and by
+ * Upload every eligible job, used both by the daily timer and by
  * startup catch-up. Each job's connector calls are retried with
  * backoff; per-job failures (exhausted retries, permanent 4xx,
  * malformed JSONL, etc.) are logged and isolated so one bad file does
@@ -243,7 +158,7 @@ export async function uploadPending(options, connector, outputDir, today, deps =
 /**
  * Retry a connector op on transient failures with exponential backoff.
  * An error is treated as transient unless it carries a non-429 4xx
- * `statusCode` — network errors, 5xx, and 429 are retried; permanent
+ * `statusCode`. Network errors, 5xx, and 429 are retried; permanent
  * 4xx (auth, malformed request) bail immediately.
  *
  * @template T
@@ -263,7 +178,7 @@ async function withRetry(fn, deps) {
       await deps.sleep(deps.initialBackoffMs * (4 ** attempt))
     }
   }
-  // Exhausted retries on a transient connector error — tag it so the
+  // Exhausted retries on a transient connector error: tag it so the
   // outer catch in uploadPending knows the scheduler should fast-retry.
   // Errors thrown elsewhere in uploadJob (bad JSONL, encoding bugs, fs)
   // are never tagged and therefore never classified as retryable.

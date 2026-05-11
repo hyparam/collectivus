@@ -6,20 +6,41 @@ import path from 'node:path'
  */
 
 /**
- * JSONL file sink. One row per line, appended to `<dir>/proxy.jsonl`. Writes
- * are serialized so rows land in submission order even under concurrent
- * callers. The directory is created lazily on the first write so a sink can
- * be constructed eagerly without side effects.
+ * JSONL file sink for the proxy recorder. Writes rows to
+ * `<dir>/<gatewayId>/proxy/<UTC-date>.jsonl` so the standalone proxy
+ * layout matches the server-mode `proxy` ingest signal exactly:
+ * `<sink_dir>/<gateway_id>/<signal>/<YYYY-MM-DD>.jsonl`.
+ *
+ * The file rotates daily on UTC midnight: a write whose `Date.toISOString()`
+ * date prefix differs from the currently-open file's flushes the previous
+ * handle and opens a new one. Directories are created lazily on the first
+ * write so a sink can be constructed eagerly without side effects.
+ *
+ * Writes are serialized so rows land in submission order even under
+ * concurrent callers.
  */
 export class FileSink {
-  /** @param {string} dir */
-  constructor(dir) {
+  /**
+   * @param {string} dir Sink root from `config.sink.dir`.
+   * @param {string} gatewayId First-level partition; standalone uses the
+   *   resolved standalone gateway_id, gateway role uses its JWT-issued id.
+   */
+  constructor(dir, gatewayId) {
+    if (typeof gatewayId !== 'string' || gatewayId.length === 0) {
+      throw new Error('FileSink: gatewayId is required')
+    }
     /** @type {string} */
     this.dir = dir
     /** @type {string} */
-    this.filePath = path.join(dir, 'proxy.jsonl')
+    this.gatewayId = gatewayId
+    /** @type {string} */
+    this.proxyDir = path.join(dir, gatewayId, 'proxy')
+    /** @type {boolean} */
+    this.dirEnsured = false
     /** @type {FileHandle | undefined} */
     this.fh = undefined
+    /** @type {string | undefined} */
+    this.openDate = undefined
     /** @type {Promise<void>} */
     this.queue = Promise.resolve()
     /** @type {boolean} */
@@ -63,6 +84,7 @@ export class FileSink {
     if (this.fh !== undefined) {
       const { fh } = this
       this.fh = undefined
+      this.openDate = undefined
       try {
         await fh.sync()
       } finally {
@@ -73,14 +95,35 @@ export class FileSink {
 }
 
 /**
+ * @returns {string}
+ */
+function todayUtc() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+/**
  * @param {FileSink} sink
  * @param {string} line
  * @returns {Promise<void>}
  */
 async function writeLine(sink, line) {
-  if (sink.fh === undefined) {
-    await fs.mkdir(sink.dir, { recursive: true })
-    sink.fh = await fs.open(sink.filePath, 'a')
+  const date = todayUtc()
+  if (sink.fh === undefined || sink.openDate !== date) {
+    if (sink.fh !== undefined) {
+      const { fh } = sink
+      sink.fh = undefined
+      try {
+        await fh.sync()
+      } finally {
+        await fh.close()
+      }
+    }
+    if (!sink.dirEnsured) {
+      await fs.mkdir(sink.proxyDir, { recursive: true })
+      sink.dirEnsured = true
+    }
+    sink.fh = await fs.open(path.join(sink.proxyDir, `${date}.jsonl`), 'a')
+    sink.openDate = date
   }
   await sink.fh.write(line)
 }

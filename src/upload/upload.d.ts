@@ -3,7 +3,7 @@ export type Signal = 'logs' | 'traces' | 'metrics'
 export interface StorageConnector {
   /** Scheme this connector handles, e.g. "s3". */
   readonly scheme: string
-  /** PUT a single object. Idempotent — overwriting is fine. */
+  /** PUT a single object. Idempotent: overwriting is fine. */
   putObject(key: string, body: Uint8Array, contentType?: string): Promise<void>
   /** HEAD an object to check existence. Returns undefined if absent. */
   headObject(key: string): Promise<{ size: number } | undefined>
@@ -19,11 +19,9 @@ export interface UploadOptions {
   region?: string
   endpoint?: string
   /**
-   * Directory partition levels under `outputDir`, in order. Default
-   * `['service', 'signal']` walks the legacy standalone layout
-   * `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Server mode
-   * (parquet drain over the multi-tenant ingest spool) passes
-   * `['gateway_id', 'signal']` to walk
+   * Directory partition levels under `outputDir`, in order. Defaults to
+   * `['gateway_id', 'signal']`, which walks the unified layout that
+   * standalone and server modes share:
    * `<outputDir>/<gateway_id>/<signal>/<date>.jsonl`. Each row read from
    * a partitioned file gains a `_partition` field whose keys mirror the
    * configured dimensions.
@@ -42,9 +40,9 @@ export interface ResolvedUploadOptions {
   /**
    * Optional on the resolved type so existing tests that build options
    * inline (skipping `createUploader.resolve()`) keep typechecking.
-   * `discoverJobs` treats an absent value as the legacy two-level
-   * `['service', 'signal']` standalone layout — the same default
-   * `resolve()` applies for the public surface.
+   * `discoverJobs` treats an absent value as the unified default
+   * `['gateway_id', 'signal']` layout, the same default `resolve()`
+   * applies for the public surface.
    */
   partitionDimensions?: ReadonlyArray<string>
 }
@@ -62,11 +60,11 @@ export interface LedgerEntry {
 
 export interface UploadJob {
   /**
-   * First partition value for this job. For the legacy standalone layout
-   * this is the service name; for server mode it is the gateway_id. The
-   * field is kept under the `service` name so the ledger key, object
-   * key, and log lines built from `(service, signal, date)` triples
-   * continue to identify a job uniquely without a structural change.
+   * First partition value for this job: the `gateway_id` under the
+   * unified standalone+server layout. Kept under the `service` field
+   * name so the ledger key, object key, and log lines built from
+   * `(service, signal, date)` triples continue to identify a job
+   * uniquely without a structural change.
    */
   service: string
   signal: Signal
@@ -112,7 +110,7 @@ export interface UploadDeps {
   maxAttempts?: number
   /** Backoff before the second attempt; later attempts back off 4x. Default 1000ms. */
   initialBackoffMs?: number
-  /** Sleep override — tests pass `() => Promise.resolve()` to skip the wait. */
+  /** Sleep override. Tests pass `() => Promise.resolve()` to skip the wait. */
   sleep?: (ms: number) => Promise<void>
 }
 

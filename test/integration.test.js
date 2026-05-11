@@ -1,11 +1,11 @@
 /**
  * End-to-end integration test for the proxy walkthrough documented in
  * docs/walkthrough-claude-code.md and the README. This test does not import
- * the collectivus internals — it spawns the CLI as a real subprocess so the
+ * the collectivus internals; it spawns the CLI as a real subprocess so the
  * exact path a `claude-code` user takes is exercised: parse config → bind
  * proxy → record SSE stream → flush JSONL on shutdown.
  *
- * The companion docs are kept in sync with this test by design — if the
+ * The companion docs are kept in sync with this test by design; if the
  * walkthrough drifts, this test breaks.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -24,7 +24,7 @@ import zlib from 'node:zlib'
 
 const cliPath = fileURLToPath(new URL('../bin/cli.js', import.meta.url))
 
-describe('proxy walkthrough — end-to-end via CLI', () => {
+describe('proxy walkthrough: end-to-end via CLI', () => {
   /** @type {string} */
   let tmpDir
   /** @type {Server} */
@@ -75,7 +75,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
   it('records a streaming Messages exchange end-to-end with redaction', async () => {
     // Mock the Anthropic SSE response shape claude-code receives. We don't
-    // need the full message_start/content_block_delta protocol — just enough
+    // need the full message_start/content_block_delta protocol; just enough
     // to prove the proxy tees real streamed bytes to the recorder.
     const sseEvents = [
       'event: message_start\ndata: {"type":"message_start","msg":"a"}\n\n',
@@ -108,7 +108,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     const proxyPort = await launchAndWaitForProxy(cfgPath)
 
-    // 1. Client streams the request — same shape claude-code sends with
+    // 1. Client streams the request, same shape claude-code sends with
     //    ANTHROPIC_BASE_URL pointed at the proxy.
     const requestBody = JSON.stringify({
       model: 'claude-opus-4-7',
@@ -143,7 +143,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     await shutdown()
 
     // 5. proxy.jsonl: stream_event rows in order + one final exchange row.
-    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const rows = readJsonl(sinkDir)
     const events = rows.filter((row) => row.kind === 'stream_event')
     const exchanges = rows.filter((row) => row.kind === 'exchange')
 
@@ -160,7 +160,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(events.every((row) => row.exchange_id === exchangeId)).toBe(true)
 
     // 6. Final exchange row carries the request the client sent and the
-    //    upstream it was routed to. Body is omitted for SSE (per design — the
+    //    upstream it was routed to. Body is omitted for SSE (per design; the
     //    per-event rows carry the data instead).
     const exchange = exchanges[0]
     expect(exchange.upstream).toBe('anthropic')
@@ -180,7 +180,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(redactedValue(requestHeaders, 'content-type')).toBe('application/json')
   }, 15000)
 
-  it('records a gzipped streaming exchange — Anthropic compresses SSE when the client negotiates gzip', async () => {
+  it('records a gzipped streaming exchange: Anthropic compresses SSE when the client negotiates gzip', async () => {
     // Real Anthropic responses we recorded: text/event-stream + content-encoding: gzip.
     // Without decompression the recorder feeds gzip bytes to the SSE parser,
     // which never finds an event terminator and silently drops every event.
@@ -229,13 +229,13 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
     expect(r.status).toBe(200)
     expect(r.headers.get('content-type')).toBe('text/event-stream')
     // fetch transparently gunzips, so the client text is the original SSE.
-    // The wire still carried gzip — the proxy must not have stripped it.
+    // The wire still carried gzip; the proxy must not have stripped it.
     expect(r.headers.get('content-encoding')).toBe('gzip')
     expect(await r.text()).toBe(sseEvents.join(''))
 
     await shutdown()
 
-    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const rows = readJsonl(sinkDir)
     const events = rows.filter((row) => row.kind === 'stream_event')
     const exchanges = rows.filter((row) => row.kind === 'exchange')
 
@@ -247,7 +247,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
       'content_block_delta',
       'message_stop',
     ])
-    // The README documents this exact extractor — make sure it works.
+    // The README documents this exact extractor; make sure it works.
     const deltas = events
       .filter((row) => row.event === 'content_block_delta')
       .map((row) => JSON.parse(row.data).delta.text)
@@ -292,7 +292,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     await shutdown()
 
-    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const rows = readJsonl(sinkDir)
     const exchanges = rows.filter((row) => row.kind === 'exchange')
     expect(exchanges).toHaveLength(1)
     expect(exchanges[0].response.body).toBe(responseBody)
@@ -329,7 +329,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
     await shutdown()
 
-    const rows = readJsonl(path.join(sinkDir, 'proxy.jsonl'))
+    const rows = readJsonl(sinkDir)
     expect(rows.filter((row) => row.kind === 'stream_event')).toHaveLength(0)
     const exchanges = rows.filter((row) => row.kind === 'exchange')
     expect(exchanges).toHaveLength(1)
@@ -339,7 +339,7 @@ describe('proxy walkthrough — end-to-end via CLI', () => {
 
   /**
    * Launch the CLI and resolve with the proxy's effective port (parsed from
-   * its startup banner — `Proxy listener bound on 127.0.0.1:<port>, ...`).
+   * its startup banner: `Proxy listener bound on 127.0.0.1:<port>, ...`).
    * The OS-assigned port is the only way the test can reach a `listen: 0`
    * proxy without races.
    *
@@ -405,14 +405,33 @@ function writeConfig(dir, cfg) {
 }
 
 /**
- * @param {string} filePath
+ * Read every proxy JSONL row written under `<sinkDir>/<id>/proxy/`. The CLI
+ * runs out-of-process and resolves `gateway_id` from the OS username, so we
+ * don't hardcode a value; we just walk whatever subdirectory was created.
+ *
+ * @param {string} sinkDir
  * @returns {any[]}
  */
-function readJsonl(filePath) {
-  return fs.readFileSync(filePath, 'utf8')
-    .split('\n')
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line))
+function readJsonl(sinkDir) {
+  /** @type {any[]} */
+  const rows = []
+  for (const id of fs.readdirSync(sinkDir)) {
+    const proxyDir = path.join(sinkDir, id, 'proxy')
+    let names
+    try {
+      names = fs.readdirSync(proxyDir)
+    } catch {
+      continue
+    }
+    for (const name of names.sort()) {
+      if (!name.endsWith('.jsonl')) continue
+      const text = fs.readFileSync(path.join(proxyDir, name), 'utf8')
+      for (const line of text.split('\n')) {
+        if (line.length > 0) rows.push(JSON.parse(line))
+      }
+    }
+  }
+  return rows
 }
 
 /**

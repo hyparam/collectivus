@@ -22,16 +22,21 @@ afterEach(() => {
 })
 
 /**
- * @param {string} service
+ * Write rows under the unified `<outputDir>/<gateway_id>/<signal>/<date>.jsonl`
+ * layout that both standalone and server modes drain. The gateway_id arg is
+ * called `gatewayId` here but most fixtures pass the legacy service name so
+ * existing assertions stay legible without renames.
+ *
+ * @param {string} gatewayId
  * @param {'logs' | 'traces' | 'metrics'} signal
  * @param {string} date
  * @param {object[]} rows
  * @returns {void}
  */
-function writeJsonl(service, signal, date, rows) {
-  const dir = path.join(outputDir, 'services', service)
+function writeJsonl(gatewayId, signal, date, rows) {
+  const dir = path.join(outputDir, gatewayId, signal)
   fs.mkdirSync(dir, { recursive: true })
-  const filePath = path.join(dir, `${signal}-${date}.jsonl`)
+  const filePath = path.join(dir, `${date}.jsonl`)
   fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
 }
 
@@ -262,13 +267,15 @@ describe('uploadPending', () => {
   })
 
   it('does not flag non-connector errors as retryable', async () => {
-    // Make the "JSONL file" actually be a directory so readJsonlRows hits
-    // EISDIR — a non-connector error with no statusCode. Pre-fix, the
-    // outer catch ran isTransient on it and incorrectly flagged it
-    // retryable, putting the scheduler into a fast-retry loop.
-    const dir = path.join(outputDir, 'services', 'svc-bad')
-    fs.mkdirSync(dir, { recursive: true })
-    fs.mkdirSync(path.join(dir, `logs-${yesterday}.jsonl`))
+    // Stage a real JSONL file and then strip its read permission so
+    // readJsonlRows hits EACCES, a non-connector error with no statusCode.
+    // Pre-fix, the outer catch ran isTransient on it and incorrectly flagged
+    // it retryable, putting the scheduler into a fast-retry loop.
+    writeJsonl('svc-bad', 'logs', yesterday, [
+      { serviceName: 'svc-bad', body: 'x', resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+    const filePath = path.join(outputDir, 'svc-bad', 'logs', `${yesterday}.jsonl`)
+    fs.chmodSync(filePath, 0o000)
 
     const connector = memoryConnector()
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -285,6 +292,8 @@ describe('uploadPending', () => {
     expect(results[0].uploaded).toBe(false)
     expect(results[0].error).toBeDefined()
     expect(results[0].retryable).toBe(false)
+    // Restore perms so afterEach's rmSync can clean up the tmpDir.
+    fs.chmodSync(filePath, 0o600)
   })
 
   it('writes a ledger entry per uploaded file', async () => {

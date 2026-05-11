@@ -12,21 +12,21 @@ const DEFAULT_CATCHUP_DAYS = 30
 /** @type {ReadonlyArray<Signal>} */
 const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
 /**
- * Standalone (recorder + OTLP collector) writes
- * `<outputDir>/services/<service>/<signal>-<date>.jsonl`. Server mode
- * (parquet drain over the multi-tenant ingest spool) overrides this
- * with `['gateway_id', 'signal']` — see `cli.js`.
+ * Standalone and server-mode parquet drains share the same partition
+ * layout: `<outputDir>/<gateway_id>/<signal>/<UTC-date>.jsonl`. Standalone
+ * resolves `gateway_id` from `config.gateway_id` or the OS username; server
+ * mode tags it from the authenticated JWT subject on every ingest.
  *
  * @type {ReadonlyArray<string>}
  */
-const DEFAULT_PARTITION_DIMENSIONS = ['service', 'signal']
+const DEFAULT_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 
 /**
  * Wire together a connector, an uploader, and a scheduler. Returns
  * { start, stop }; both are idempotent and safe to await.
  *
  * Throws synchronously when the default S3 connector is selected and AWS
- * credentials are missing from the env — callers (cli.js boot path, tests)
+ * credentials are missing from the env, so callers (cli.js boot path, tests)
  * see the failure at construction time, not after the first daily tick.
  *
  * @param {object} args

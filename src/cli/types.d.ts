@@ -145,6 +145,11 @@ export interface ConfigCliHooks {
   makeBootstrapStore?: (storePath: string) => BootstrapStore
 }
 
+export interface ParsedServerConfigSource {
+  serverConfig?: string
+  serverConfigEnv?: string
+}
+
 export interface ParsedHelp {
   kind: 'help'
 }
@@ -155,44 +160,38 @@ export interface ParsedError {
   exitCode: 2
 }
 
-export interface ParsedSet {
+export interface ParsedSet extends ParsedServerConfigSource {
   kind: 'set'
   gatewayId: string
-  serverConfig: string
   file: string
 }
 
-export interface ParsedGet {
+export interface ParsedGet extends ParsedServerConfigSource {
   kind: 'get'
   gatewayId: string
-  serverConfig: string
 }
 
-export interface ParsedList {
+export interface ParsedList extends ParsedServerConfigSource {
   kind: 'list'
-  serverConfig: string
 }
 
-export interface ParsedDelete {
+export interface ParsedDelete extends ParsedServerConfigSource {
   kind: 'delete'
   gatewayId: string
-  serverConfig: string
   yes: boolean
 }
 
-export interface ParsedTokenIssue {
+export interface ParsedTokenIssue extends ParsedServerConfigSource {
   kind: 'token-issue'
   gatewayId: string
-  serverConfig: string
   ttlSeconds?: number
   rendezvous?: string
   rendezvousToken?: string
 }
 
-export interface ParsedTokenRevoke {
+export interface ParsedTokenRevoke extends ParsedServerConfigSource {
   kind: 'token-revoke'
   gatewayId: string
-  serverConfig: string
 }
 
 export type ParsedConfigArgs =

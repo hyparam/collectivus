@@ -108,7 +108,7 @@ describe('parseConfigArgs', () => {
     it('errors when --server-config is missing', () => {
       const r = parseConfigArgs(['set', 'gw-1', '--file', '/tmp/g.json'])
       expect(r.kind).toBe('error')
-      if (r.kind === 'error') expect(r.message).toMatch(/--server-config is required/)
+      if (r.kind === 'error') expect(r.message).toMatch(/--server-config or --server-config-env is required/)
     })
 
     it('errors when --file is missing', () => {
@@ -164,6 +164,21 @@ describe('parseConfigArgs', () => {
     it('parses --server-config', () => {
       expect(parseConfigArgs(['list', '--server-config', '/etc/c.json']))
         .toEqual({ kind: 'list', serverConfig: '/etc/c.json' })
+    })
+
+    it('parses --server-config-env', () => {
+      expect(parseConfigArgs(['list', '--server-config-env', 'COLLECTIVUS_SERVER_CONFIG']))
+        .toEqual({ kind: 'list', serverConfigEnv: 'COLLECTIVUS_SERVER_CONFIG' })
+    })
+
+    it('rejects both server config source flags', () => {
+      const r = parseConfigArgs([
+        'list',
+        '--server-config', '/etc/c.json',
+        '--server-config-env', 'COLLECTIVUS_SERVER_CONFIG',
+      ])
+      expect(r.kind).toBe('error')
+      if (r.kind === 'error') expect(r.message).toMatch(/mutually exclusive/)
     })
 
     it('errors on extra positional', () => {
@@ -325,7 +340,7 @@ describe('runConfig', () => {
     const stderr = memo()
     const code = await runConfig(['set', 'gw-1'], { stdout, stderr })
     expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--server-config is required/)
+    expect(stderr.value()).toMatch(/--server-config or --server-config-env is required/)
     expect(stderr.value()).toMatch(/Usage:/)
   })
 
@@ -349,6 +364,21 @@ describe('runConfig', () => {
     })
     expect(code).toBe(1)
     expect(stderr.value()).toMatch(/role: "server"/)
+  })
+
+  it('loads server config JSON from --server-config-env', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    const cfg = buildServerConfig({ dataDir, bootstrapStorePath })
+    const registry = createConfigRegistry({ configsDir: resolveConfigsDir(/** @type {ServerConfig} */ ({ data_dir: dataDir })) })
+    setConfig(registry, 'gw-env', gatewayConfig())
+    const code = await runConfig(['list', '--server-config-env', 'COLLECTIVUS_SERVER_CONFIG'], {
+      stdout,
+      stderr,
+      env: { COLLECTIVUS_SERVER_CONFIG: JSON.stringify(cfg) },
+    })
+    expect(code).toBe(0)
+    expect(stdout.value()).toBe('gw-env\n')
   })
 
   describe('set + get round-trip (acceptance #1)', () => {

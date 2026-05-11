@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { readPackageVersion } from './cli/common.js'
 import { Collector } from './collector.js'
-import { ConfigError, loadConfigAsync, parseConfig } from './config.js'
+import { ConfigError, loadConfigAsync, parseConfig, resolveRuntimeSecrets } from './config.js'
 import { resolveStandaloneGatewayId } from './gateway_id.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
@@ -273,6 +273,15 @@ export async function runWithConfig(config, env, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
   const onShutdownRequested = hooks.onShutdownRequested ?? defaultSignalWiring
+  try {
+    config = resolveRuntimeSecrets(config, env ?? {})
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      stderr.write(`config error: ${err.message}\n`)
+      return 1
+    }
+    throw err
+  }
 
   // Fail at boot rather than at the first daily uploader tick when the upload
   // section is configured but no supported AWS credential source is available.

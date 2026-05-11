@@ -702,6 +702,29 @@ describe('CLI lifecycle wiring', () => {
     expect(stdout.value()).toMatch(/Shutdown complete/)
   })
 
+  it('role: server resolves identity_issuer.secret_env before binding', async () => {
+    const cfgPath = writeConfig({
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '127.0.0.1:0',
+        identity_issuer: { secret_env: 'COLLECTIVUS_IDENTITY_ISSUER_SECRET' },
+      },
+    })
+    const stdout = memo()
+    const stderr = memo()
+    /** @type {(signal: string) => void} */
+    let trigger = noop
+    const result = run(['--config', cfgPath], { COLLECTIVUS_IDENTITY_ISSUER_SECRET: PLACEHOLDER_SECRET }, {
+      stdout, stderr,
+      onShutdownRequested: (handler) => { trigger = handler },
+    })
+    await waitFor(() => stdout.value().includes('Control-plane listener bound'))
+    trigger('SIGTERM')
+    expect(await result).toBe(0)
+    expect(stderr.value()).not.toMatch(/secret_env/)
+  })
+
   it('role: server starts the parquet drain over the ingest sink_dir when upload is configured', async () => {
     // Server-mode upload drains the multi-tenant ingest spool — sink_dir is
     // independent of `config.sink` (which standalone uses). The catch-up tick

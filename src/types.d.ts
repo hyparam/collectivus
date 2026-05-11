@@ -154,6 +154,12 @@ export interface IdentityIssuerConfig {
 export interface ServerConfig {
   /** host:port for the control-plane HTTP listener (separate from OTLP/proxy). */
   control_plane_listen: string
+  /**
+   * Gateway-facing base URL for this control plane. Used to build one-line
+   * enrollment commands and bootstrap configs. When omitted, the server
+   * derives a best-effort URL from the incoming request host.
+   */
+  public_url?: string
   /** JWT issuer settings for the control-plane. */
   identity_issuer: IdentityIssuerConfig
   /**

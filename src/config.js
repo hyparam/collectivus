@@ -32,7 +32,7 @@ const ALLOWED_UPLOAD_KEYS = new Set([
 const ALLOWED_QUERY_KEYS = new Set(['parquet'])
 const ALLOWED_QUERY_PARQUET_KEYS = new Set(['enabled', 'dir'])
 const ALLOWED_SERVER_KEYS = new Set([
-  'control_plane_listen', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
+  'control_plane_listen', 'public_url', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
 ])
 const ALLOWED_INGEST_KEYS = new Set([
   'max_pending_rows', 'high_water_pct', 'retry_after_seconds', 'max_bytes_per_second',
@@ -318,6 +318,9 @@ function validateServer(server) {
     )
   }
   assertHostPort(server.control_plane_listen, '/server/control_plane_listen')
+  if (server.public_url !== undefined) {
+    assertHttpUrl(server.public_url, '/server/public_url')
+  }
   if (server.identity_issuer === undefined) {
     throw new ConfigError(
       'identity_issuer is required',
@@ -685,6 +688,22 @@ function assertParseableUrl(value, pointer) {
     new URL(value)
   } catch {
     throw new ConfigError('must be a parseable URL', { pointer })
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} pointer
+ */
+function assertHttpUrl(value, pointer) {
+  assertNonEmptyString(value, pointer)
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error('bad protocol')
+    }
+  } catch {
+    throw new ConfigError('must be an http(s) URL', { pointer })
   }
 }
 

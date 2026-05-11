@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { ConfigError } from '../../src/config.js'
 import { parseConfigArgs, runConfig } from '../../src/cli/config.js'
+import { sha256Hex } from '../../src/rendezvous/store.js'
 import { createConfigRegistry, getConfig, resolveConfigsDir, setConfig } from '../../src/server/config_registry.js'
 import { BootstrapStore, issueFromBootstrap } from '../../src/server/identity.js'
 
@@ -32,21 +33,24 @@ function memo() {
  * tests; here we return the object directly via the loadConfig hook so unit
  * tests don't have to round-trip through disk for the server config.
  *
- * @param {{ dataDir: string, bootstrapStorePath?: string }} opts
+ * @param {{ dataDir: string, bootstrapStorePath?: string, publicUrl?: string }} opts
  * @returns {CollectivusConfig}
  */
 function buildServerConfig(opts) {
   /** @type {ServerConfig['identity_issuer']} */
   const issuer = { secret: SECRET }
   if (opts.bootstrapStorePath) issuer.bootstrap_store_path = opts.bootstrapStorePath
+  /** @type {ServerConfig} */
+  const server = {
+    control_plane_listen: '127.0.0.1:8788',
+    identity_issuer: issuer,
+    data_dir: opts.dataDir,
+  }
+  if (opts.publicUrl) server.public_url = opts.publicUrl
   return {
     version: 1,
     role: 'server',
-    server: {
-      control_plane_listen: '127.0.0.1:8788',
-      identity_issuer: issuer,
-      data_dir: opts.dataDir,
-    },
+    server,
   }
 }
 
@@ -208,6 +212,35 @@ describe('parseConfigArgs', () => {
       expect(r).toEqual({ kind: 'token-issue', gatewayId: 'gw-1', serverConfig: '/etc/c.json', ttlSeconds: 300 })
     })
 
+    it('parses issue with rendezvous registration options', () => {
+      const r = parseConfigArgs([
+        'bootstrap-token', 'issue', 'gw-1',
+        '--server-config', '/etc/c.json',
+        '--rendezvous', 'https://join.example',
+        '--rendezvous-token', 'admin-token',
+      ])
+      expect(r).toEqual({
+        kind: 'token-issue',
+        gatewayId: 'gw-1',
+        serverConfig: '/etc/c.json',
+        rendezvous: 'https://join.example',
+        rendezvousToken: 'admin-token',
+      })
+    })
+
+    it('rejects invalid rendezvous options', () => {
+      expect(parseConfigArgs([
+        'bootstrap-token', 'issue', 'gw-1',
+        '--server-config', 'x',
+        '--rendezvous', 'file:///tmp/nope',
+      ]).kind).toBe('error')
+      expect(parseConfigArgs([
+        'bootstrap-token', 'issue', 'gw-1',
+        '--server-config', 'x',
+        '--rendezvous-token', 'admin-token',
+      ]).kind).toBe('error')
+    })
+
     it('rejects non-positive --ttl-seconds', () => {
       expect(parseConfigArgs(['bootstrap-token', 'issue', 'gw-1', '--server-config', 'x', '--ttl-seconds', '0']).kind).toBe('error')
       expect(parseConfigArgs(['bootstrap-token', 'issue', 'gw-1', '--server-config', 'x', '--ttl-seconds', 'abc']).kind).toBe('error')
@@ -246,7 +279,7 @@ describe('runConfig', () => {
    * Build the hook bundle that wires real registry/store implementations to
    * the temporary directories so each test runs against actual files on disk.
    *
-   * @param {{ withBootstrapStore?: boolean }} [opts]
+   * @param {{ withBootstrapStore?: boolean, publicUrl?: string }} [opts]
    * @returns {{ stdout: ReturnType<typeof memo>, stderr: ReturnType<typeof memo>, hooks: Parameters<typeof runConfig>[1], serverConfigPath: string }}
    */
   function makeHooks(opts = {}) {
@@ -254,6 +287,7 @@ describe('runConfig', () => {
     const stderr = memo()
     const cfg = buildServerConfig({
       dataDir,
+      publicUrl: opts.publicUrl,
       ...opts.withBootstrapStore !== false ? { bootstrapStorePath } : {},
     })
     const serverConfigPath = path.join(tmpDir, 'server.json')
@@ -540,6 +574,77 @@ describe('runConfig', () => {
       expect(record.expiresAt).toBeLessThanOrEqual(expectedExpiry + 5)
       void token
       void store
+    })
+
+    it('prints a one-line npx setup command when server.public_url is configured', async () => {
+      const m = makeHooks({ publicUrl: 'https://collectivus.example.com' })
+      const code = await runConfig(
+        ['bootstrap-token', 'issue', 'gw-setup', '--server-config', m.serverConfigPath],
+        m.hooks
+      )
+      expect(code).toBe(0)
+      const token = m.stdout.value().trim()
+      expect(m.stderr.value()).toContain(
+        `npx collectivus --config-endpoint='https://collectivus.example.com/v1/bootstrap-config?token=${token}'`
+      )
+    })
+
+    it('registers rendezvous invites with a token hash and env auth fallback', async () => {
+      const m = makeHooks({ publicUrl: 'https://collectivus.internal:8788' })
+      /** @type {Array<{ url: string, init: RequestInit | undefined }>} */
+      const calls = []
+      const code = await runConfig(
+        [
+          'bootstrap-token', 'issue', 'gw-rv',
+          '--server-config', m.serverConfigPath,
+          '--rendezvous', 'https://join.example',
+        ],
+        {
+          ...m.hooks,
+          env: { COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN: 'admin-token' },
+          fetch: /** @type {typeof fetch} */ (async (url, init) => {
+            calls.push({ url: String(url), init })
+            return new Response(JSON.stringify({ ok: true, expires_at: '2999-01-01T00:00:00.000Z' }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            })
+          }),
+        }
+      )
+      expect(code).toBe(0)
+      const token = m.stdout.value().trim()
+      expect(calls).toHaveLength(1)
+      expect(calls[0].url).toBe('https://join.example/v1/rendezvous/invites')
+      expect(calls[0].init?.method).toBe('POST')
+      expect(calls[0].init?.headers).toMatchObject({
+        authorization: 'Bearer admin-token',
+        'content-type': 'application/json',
+      })
+      const body = JSON.parse(String(calls[0].init?.body))
+      expect(body).toEqual({
+        join_code_hash: sha256Hex(token),
+        connect_url: 'https://collectivus.internal:8788',
+        gateway_id: 'gw-rv',
+        expires_at: expect.any(String),
+      })
+      expect(JSON.stringify(body)).not.toContain(token)
+      expect(m.stderr.value()).toContain(`npx collectivus join '${token}' --rendezvous 'https://join.example'`)
+    })
+
+    it('requires server.public_url when issuing with rendezvous', async () => {
+      const m = makeHooks()
+      const code = await runConfig(
+        [
+          'bootstrap-token', 'issue', 'gw-rv',
+          '--server-config', m.serverConfigPath,
+          '--rendezvous', 'https://join.example',
+          '--rendezvous-token', 'admin-token',
+        ],
+        m.hooks
+      )
+      expect(code).toBe(1)
+      expect(m.stdout.value()).toBe('')
+      expect(m.stderr.value()).toMatch(/server\.public_url is required/)
     })
 
     it('errors when bootstrap_store_path is not configured', async () => {

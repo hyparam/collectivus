@@ -32,6 +32,11 @@ export type IssueFromBootstrapResult =
   | { ok: true, jwt: string, expiresAt: number, gatewayId: string }
   | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }
 
+/** Result of looking up a bootstrap token without consuming it. */
+export type BootstrapTokenInspection =
+  | { ok: true, gatewayId: string, expiresAt: number }
+  | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }
+
 /** A per-gateway config entry held by the server-side registry. */
 export interface ConfigRegistryEntry {
   /** The gateway-shaped CollectivusConfig persisted for this gateway. */

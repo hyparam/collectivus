@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import process from 'node:process'
 import { ConfigError, loadConfig as defaultLoadConfig, validateCollectivusConfig } from '../config.js'
 import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from '../gateway_id.js'
+import { sha256Hex } from '../rendezvous/store.js'
 import { createConfigRegistry, deleteConfig, getConfig, listGateways, resolveConfigsDir, setConfig } from '../server/config_registry.js'
 import { BootstrapStore } from '../server/identity.js'
 import { defaultPrompt } from './common.js'
@@ -18,6 +19,7 @@ const USAGE = `Usage:
   ctvs config list --server-config <path>
   ctvs config delete <gateway-id> --server-config <path> [--yes]
   ctvs config bootstrap-token issue <gateway-id> --server-config <path> [--ttl-seconds <n>]
+                                               [--rendezvous <url>] [--rendezvous-token <token>]
   ctvs config bootstrap-token revoke <gateway-id> --server-config <path>
 
 Options:
@@ -25,7 +27,12 @@ Options:
   --file <path>            For \`set\`: path to the JSON config to register
   --yes, -y                For \`delete\`: skip the interactive confirmation
   --ttl-seconds <n>        For \`bootstrap-token issue\`: TTL override in seconds
+  --rendezvous <url>       For \`bootstrap-token issue\`: register the issued token with rendezvous
+  --rendezvous-token <t>   For \`bootstrap-token issue\`: rendezvous registration bearer token
+                           (or COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN)
   --help, -h               Show this help`
+
+const RENDEZVOUS_TOKEN_ENV = 'COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN'
 
 /**
  * Parse the argument list of `collectivus config <subcommand>`.
@@ -183,6 +190,8 @@ function parseTokenIssue(argv) {
   /** @type {string | undefined} */ let gatewayId
   /** @type {string | undefined} */ let serverConfig
   /** @type {number | undefined} */ let ttlSeconds
+  /** @type {string | undefined} */ let rendezvous
+  /** @type {string | undefined} */ let rendezvousToken
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') return { kind: 'help' }
@@ -202,6 +211,19 @@ function parseTokenIssue(argv) {
       ttlSeconds = n
       continue
     }
+    if (arg === '--rendezvous' || arg.startsWith('--rendezvous=')) {
+      const value = arg === '--rendezvous' ? argv[++i] : arg.slice('--rendezvous='.length)
+      if (!value) return parseError('--rendezvous requires a URL')
+      if (!isHttpUrl(value)) return parseError('--rendezvous requires an http(s) URL')
+      rendezvous = value
+      continue
+    }
+    if (arg === '--rendezvous-token' || arg.startsWith('--rendezvous-token=')) {
+      const value = arg === '--rendezvous-token' ? argv[++i] : arg.slice('--rendezvous-token='.length)
+      if (!value) return parseError('--rendezvous-token requires a token')
+      rendezvousToken = value
+      continue
+    }
     if (arg.startsWith('-')) return parseError(`unknown argument: ${arg}`)
     if (gatewayId !== undefined) return parseError(`unexpected positional argument: ${arg}`)
     gatewayId = arg
@@ -210,9 +232,12 @@ function parseTokenIssue(argv) {
   const validId = validateGatewayId(gatewayId)
   if (validId) return validId
   if (!serverConfig) return parseError('--server-config is required')
+  if (rendezvousToken && !rendezvous) return parseError('--rendezvous-token requires --rendezvous')
   /** @type {ParsedTokenIssue} */
   const result = { kind: 'token-issue', gatewayId, serverConfig }
   if (ttlSeconds !== undefined) result.ttlSeconds = ttlSeconds
+  if (rendezvous !== undefined) result.rendezvous = rendezvous
+  if (rendezvousToken !== undefined) result.rendezvousToken = rendezvousToken
   return result
 }
 
@@ -287,6 +312,8 @@ export async function runConfig(argv, hooks = {}) {
   const promptFn = hooks.prompt ?? defaultPrompt
   const loadConfigFn = hooks.loadConfig ?? defaultLoadConfig
   const readFileFn = hooks.readFile ?? ((/** @type {string} */ p) => fs.readFileSync(p, 'utf8'))
+  const env = hooks.env ?? process.env
+  const fetchFn = hooks.fetch ?? fetch
   const makeRegistry = hooks.makeRegistry ?? ((/** @type {ServerConfig} */ s) => createConfigRegistry({ configsDir: resolveConfigsDir(s) }))
   const makeBootstrapStore = hooks.makeBootstrapStore ?? ((/** @type {string} */ p) => new BootstrapStore({ path: p }))
 
@@ -323,7 +350,7 @@ export async function runConfig(argv, hooks = {}) {
   case 'get': return runGet(parsed, server, { stdout, stderr, makeRegistry })
   case 'list': return runList(parsed, server, { stdout, makeRegistry })
   case 'delete': return runDelete(parsed, server, { stdout, stderr, isTTY, prompt: promptFn, makeRegistry })
-  case 'token-issue': return runTokenIssue(parsed, server, { stdout, stderr, makeBootstrapStore })
+  case 'token-issue': return runTokenIssue(parsed, server, { stdout, stderr, env, fetchFn, makeBootstrapStore })
   case 'token-revoke': return runTokenRevoke(parsed, server, { stdout, makeBootstrapStore })
   default: {
     /** @type {never} */ const exhaustive = parsed
@@ -486,16 +513,32 @@ async function runDelete(parsed, server, ctx) {
  * @param {{
  *   stdout: { write: (s: string) => void },
  *   stderr: { write: (s: string) => void },
+ *   env: NodeJS.ProcessEnv,
+ *   fetchFn: typeof fetch,
  *   makeBootstrapStore: (p: string) => BootstrapStore,
  * }} ctx
- * @returns {number}
+ * @returns {Promise<number>}
  */
-function runTokenIssue(parsed, server, ctx) {
+async function runTokenIssue(parsed, server, ctx) {
   const storePath = server.identity_issuer.bootstrap_store_path
   if (!storePath) {
     ctx.stderr.write(
       'error: server.identity_issuer.bootstrap_store_path is not set; ' +
       'add it to the server config so bootstrap tokens can be issued\n'
+    )
+    return 1
+  }
+  const rendezvousToken = parsed.rendezvous
+    ? parsed.rendezvousToken ?? ctx.env[RENDEZVOUS_TOKEN_ENV]
+    : undefined
+  if (parsed.rendezvous && !rendezvousToken) {
+    ctx.stderr.write(`error: --rendezvous-token or ${RENDEZVOUS_TOKEN_ENV} is required when --rendezvous is set\n`)
+    return 1
+  }
+  if (parsed.rendezvous && !server.public_url) {
+    ctx.stderr.write(
+      'error: server.public_url is required when --rendezvous is set; ' +
+      'set it to the Central server URL gateways can reach\n'
     )
     return 1
   }
@@ -519,6 +562,31 @@ function runTokenIssue(parsed, server, ctx) {
     `Token issued for ${parsed.gatewayId}; expires at ${formatExpiry(result.expiresAt)}.\n` +
     'Hand this token to the gateway in central_server.identity.bootstrap_token. It can be redeemed exactly once.\n'
   )
+  if (parsed.rendezvous && rendezvousToken && server.public_url) {
+    try {
+      await registerRendezvousInvite({
+        rendezvousUrl: parsed.rendezvous,
+        registrationToken: rendezvousToken,
+        joinCodeHash: sha256Hex(result.token),
+        connectUrl: server.public_url,
+        gatewayId: parsed.gatewayId,
+        expiresAt: result.expiresAt,
+        fetchFn: ctx.fetchFn,
+      })
+    } catch (err) {
+      ctx.stderr.write(`error: failed to register rendezvous invite: ${formatError(err)}\n`)
+      return 1
+    }
+    ctx.stderr.write(
+      'One-line gateway setup via rendezvous:\n' +
+      `  npx collectivus join ${shellSingleQuote(result.token)} --rendezvous ${shellSingleQuote(parsed.rendezvous)}\n`
+    )
+  } else if (server.public_url) {
+    ctx.stderr.write(
+      'One-line gateway setup:\n' +
+      `  npx collectivus --config-endpoint='${bootstrapConfigUrl(server.public_url, result.token)}'\n`
+    )
+  }
   return 0
 }
 
@@ -559,4 +627,97 @@ function formatExpiry(epochSeconds) {
  */
 function formatError(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * @param {string} publicUrl
+ * @param {string} token
+ * @returns {string}
+ */
+function bootstrapConfigUrl(publicUrl, token) {
+  const base = publicUrl.endsWith('/') ? publicUrl : `${publicUrl}/`
+  const url = new URL('/v1/bootstrap-config', base)
+  url.searchParams.set('token', token)
+  return url.toString()
+}
+
+/**
+ * @param {string} value
+ * @returns {boolean}
+ */
+function isHttpUrl(value) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {{
+ *   rendezvousUrl: string,
+ *   registrationToken: string,
+ *   joinCodeHash: string,
+ *   connectUrl: string,
+ *   gatewayId: string,
+ *   expiresAt: number,
+ *   fetchFn: typeof fetch,
+ * }} args
+ * @returns {Promise<void>}
+ */
+async function registerRendezvousInvite(args) {
+  const response = await args.fetchFn(joinUrl(args.rendezvousUrl, '/v1/rendezvous/invites'), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${args.registrationToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      join_code_hash: args.joinCodeHash,
+      connect_url: args.connectUrl,
+      gateway_id: args.gatewayId,
+      expires_at: formatExpiry(args.expiresAt),
+    }),
+  })
+  if (!response.ok) {
+    throw new Error(await readErrorDetail(response))
+  }
+}
+
+/**
+ * @param {string} base
+ * @param {string} suffix
+ * @returns {string}
+ */
+function joinUrl(base, suffix) {
+  const baseWithSlash = base.endsWith('/') ? base : `${base}/`
+  return new URL(suffix.replace(/^\//, ''), baseWithSlash).toString()
+}
+
+/**
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+async function readErrorDetail(response) {
+  /** @type {unknown} */
+  let body
+  try {
+    body = await response.json()
+  } catch {
+    return `HTTP ${response.status} ${response.statusText}`
+  }
+  if (body && typeof body === 'object' && !Array.isArray(body) && 'error' in body && typeof body.error === 'string') {
+    return `${body.error} (HTTP ${response.status})`
+  }
+  return `HTTP ${response.status} ${response.statusText}`
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function shellSingleQuote(value) {
+  const quote = '\''
+  return quote + value.replace(/'/g, quote + '\\' + quote + quote) + quote
 }

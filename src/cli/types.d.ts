@@ -124,6 +124,8 @@ export interface UninstallParseResult {
 export interface ConfigCliHooks {
   stdout?: WriteStream
   stderr?: WriteStream
+  env?: NodeJS.ProcessEnv
+  fetch?: typeof fetch
   isTTY?: boolean
   prompt?: (q: string) => Promise<string>
   loadConfig?: (p: string) => CollectivusConfig
@@ -172,6 +174,8 @@ export interface ParsedTokenIssue {
   gatewayId: string
   serverConfig: string
   ttlSeconds?: number
+  rendezvous?: string
+  rendezvousToken?: string
 }
 
 export interface ParsedTokenRevoke {

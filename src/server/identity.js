@@ -7,6 +7,7 @@ import path from 'node:path'
  *   IdentityIssuerConfig,
  * } from '../types.js'
  * @import {
+ *   BootstrapTokenInspection,
  *   BootstrapRecord,
  *   IssueFromBootstrapResult,
  *   JwtClaims,
@@ -233,6 +234,7 @@ export class BootstrapStore {
    * @returns {{ token: string, expiresAt: number }}
    */
   register(args) {
+    this.load()
     const { gatewayId } = args
     if (typeof gatewayId !== 'string' || gatewayId.length === 0) {
       throw new Error('BootstrapStore.register: gatewayId is required')
@@ -267,19 +269,33 @@ export class BootstrapStore {
    * @returns {{ ok: true, gatewayId: string } | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }}
    */
   tryConsume(token) {
-    if (typeof token !== 'string' || token.length === 0) {
-      return { ok: false, reason: 'unknown_token' }
-    }
-    const tokenHash = sha256Hex(token)
-    const record = this.records.get(tokenHash)
-    if (!record) return { ok: false, reason: 'unknown_token' }
-    const nowSec = Math.floor(this.now() / 1000)
-    if (record.expiresAt <= nowSec) return { ok: false, reason: 'expired' }
-    if (record.used) return { ok: false, reason: 'already_used' }
+    this.load()
+    const lookedUp = this.lookup(token)
+    if (lookedUp.ok === false) return lookedUp
+    const { tokenHash, record } = lookedUp
     const updated = { ...record, used: true }
     this.records.set(tokenHash, updated)
     this.flush()
     return { ok: true, gatewayId: record.gatewayId }
+  }
+
+  /**
+   * Inspect a bootstrap token without consuming it. This is used by the
+   * setup-config endpoint: fetching the config URL must not burn the one-shot
+   * token before the gateway can exchange it at `/v1/identity/bootstrap`.
+   *
+   * @param {string} token
+   * @returns {BootstrapTokenInspection}
+   */
+  inspect(token) {
+    this.load()
+    const lookedUp = this.lookup(token)
+    if (lookedUp.ok === false) return lookedUp
+    return {
+      ok: true,
+      gatewayId: lookedUp.record.gatewayId,
+      expiresAt: lookedUp.record.expiresAt,
+    }
   }
 
   /**
@@ -292,6 +308,7 @@ export class BootstrapStore {
    * @returns {number}
    */
   revokeUnusedForGateway(gatewayId) {
+    this.load()
     if (typeof gatewayId !== 'string' || gatewayId.length === 0) {
       throw new Error('BootstrapStore.revokeUnusedForGateway: gatewayId is required')
     }
@@ -313,6 +330,25 @@ export class BootstrapStore {
    */
   size() {
     return this.records.size
+  }
+
+  /**
+   * Lookup against the currently loaded records map.
+   *
+   * @param {string} token
+   * @returns {{ ok: true, tokenHash: string, record: BootstrapRecord } | { ok: false, reason: 'unknown_token' | 'already_used' | 'expired' }}
+   */
+  lookup(token) {
+    if (typeof token !== 'string' || token.length === 0) {
+      return { ok: false, reason: 'unknown_token' }
+    }
+    const tokenHash = sha256Hex(token)
+    const record = this.records.get(tokenHash)
+    if (!record) return { ok: false, reason: 'unknown_token' }
+    const nowSec = Math.floor(this.now() / 1000)
+    if (record.expiresAt <= nowSec) return { ok: false, reason: 'expired' }
+    if (record.used) return { ok: false, reason: 'already_used' }
+    return { ok: true, tokenHash, record }
   }
 }
 

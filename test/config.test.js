@@ -443,6 +443,7 @@ describe('loadConfig - role / server / central_server', () => {
       role: 'server',
       server: {
         control_plane_listen: '0.0.0.0:9090',
+        public_url: 'https://collectivus.example.com',
         identity_issuer: { secret: SECRET },
       },
     }
@@ -549,6 +550,19 @@ describe('loadConfig - role / server / central_server', () => {
       },
     })
     expect(() => loadConfig(p)).toThrow(/invalid port in host:port/)
+  })
+
+  it('rejects server.public_url that is not a URL', () => {
+    const p = writeJson('bad-public-url.json', {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        public_url: 'not a url',
+        identity_issuer: { secret: SECRET },
+      },
+    })
+    expect(() => loadConfig(p)).toThrow(/\/server\/public_url.*http\(s\) URL/)
   })
 
   it('accepts an IPv6 host:port literal in control_plane_listen', () => {

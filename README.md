@@ -125,14 +125,27 @@ accepts ingest from each gateway. Gateways pull their config every
 `central_server.poll_interval_seconds` (default 30, range 5–3600) and
 hot-reload only the listener whose section changed.
 
+Run `npx collectivus` interactively and choose Central server to write a
+server config. That flow asks for `server.public_url`, which should be the URL
+gateways can actually reach (for ECS/Docker, usually the load balancer URL).
+Start the server with either npm or a container:
+
+```bash
+npx -p collectivus ctvs --config /etc/collectivus-server.json
+# or after npm install -g collectivus:
+ctvs --config /etc/collectivus-server.json
+# or in Docker/ECS, mount the config + data_dir and pass:
+docker run -p 8788:8788 -v /host/config:/config -v /host/data:/data <image> --config /config/collectivus-server.json
+```
+
 Operator workflow on the server host:
 
 ```bash
-# 1. Issue a one-shot bootstrap token for a new gateway. Hand the printed token
-#    to the gateway operator over a secure channel — it can be redeemed exactly
-#    once.
+# 1. Issue a one-shot bootstrap token for a new gateway. If server.public_url is
+#    set, stderr also prints the one-line gateway setup command.
 ctvs config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
-# → bt_abc123...
+# stdout → bt_abc123...
+# stderr → npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
 
 # 2. Register the per-gateway config the gateway will pull. Validated server-
 #    side; an invalid file is rejected before any bytes hit disk.
@@ -148,28 +161,62 @@ These commands are local operator tools for the central server host. They read
 the server config only to find the same on-disk config registry and bootstrap
 token store used by the running central server.
 
-Gateway side, with the token pasted into `central_server.identity.bootstrap_token`:
-
-```jsonc
-// /etc/collectivus.json (gateway)
-{
-  "version": 1,
-  "role": "gateway",
-  "central_server": {
-    "url": "https://collectivus.internal:8788",
-    "identity": { "bootstrap_token": "bt_abc123..." }
-  }
-}
-```
+Gateway side, run the setup command printed by the token issuer:
 
 ```bash
-ctvs --config /etc/collectivus.json
-# → exchanges the bootstrap token for a 30-day JWT, persists it to
-#   ~/.hyp/collectivus/identity.json, then begins polling /v1/config.
+npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
+# → fetches a minimal gateway config, exchanges the bootstrap token for a
+#   30-day JWT, persists it to ~/.hyp/collectivus/identity.json, then begins
+#   polling /v1/config.
 ```
 
-Once the gateway has a JWT, the bootstrap token can be removed from the config
-— refresh against the central server takes over until the JWT itself rotates.
+The config endpoint does not consume the token; the token is consumed only when
+the gateway posts to `/v1/identity/bootstrap`. Once the gateway has a JWT, the
+persisted identity handles refresh until the JWT itself rotates.
+
+### Hosted discovery rendezvous
+
+For private Central server URLs that are hard to type or distribute, you can
+run a hosted-discovery rendezvous service. Rendezvous stores only
+`sha256(join_code)`, the Central server connect URL, gateway id, expiry, and
+optional display metadata; it never stores plaintext join codes, configs,
+telemetry, JWTs, issuer secrets, or bootstrap tokens.
+
+Start rendezvous with a shared registration bearer token:
+
+```bash
+ctvs rendezvous --listen 0.0.0.0:8789 --data-dir ~/.hyp/collectivus/rendezvous \
+  --registration-token "$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN"
+```
+
+Then issue a normal Central server bootstrap token and register its hash with
+rendezvous in one step:
+
+```bash
+ctvs config bootstrap-token issue gw-prod-1 \
+  --server-config /etc/collectivus-server.json \
+  --rendezvous https://join.collectivus.example
+```
+
+`--rendezvous-token` can be passed explicitly; otherwise the operator CLI reads
+`COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN`. The raw token still prints on
+stdout for scripts. Stderr prints the gateway command:
+
+```bash
+npx collectivus join <join-code> --rendezvous https://join.collectivus.example
+```
+
+`ctvs join` submits the join code in a POST body, resolves the Central server
+URL, builds the gateway bootstrap config in memory, and then bootstraps
+directly against the customer Central server. It does not write the bootstrap
+config to disk; the long-lived JWT is still persisted to
+`~/.hyp/collectivus/identity.json`.
+
+Security note: in v1, rendezvous does not pin or cryptographically verify the
+Central server URL it returns. This is appropriate when gateways can reach the
+Central server only through private/VPC networking or constrained egress. If a
+gateway can reach arbitrary internet destinations, a compromised rendezvous
+server could return a fake Central URL that the gateway would trust.
 
 The interactive walkthrough builds all three roles: Standalone, Gateway, and
 Central server.

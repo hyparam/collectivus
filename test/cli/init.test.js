@@ -433,6 +433,7 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '3', // central server
         '', // accept default central-server listen
+        'https://collectivus.example.com:8788', // gateway-facing URL
         dataDir, // server data directory
         '', // generate identity-issuer secret
         '', // no S3 upload
@@ -450,6 +451,7 @@ describe('runInit', function() {
       expect(written.version).toBe(1)
       expect(written.role).toBe('server')
       expect(written.server.control_plane_listen).toBe('0.0.0.0:8788')
+      expect(written.server.public_url).toBe('https://collectivus.example.com:8788')
       expect(written.server.data_dir).toBe(dataDir)
       expect(written.server.sink_dir).toBe(path.join(dataDir, 'ingested'))
       expect(written.server.identity_issuer.bootstrap_store_path).toBe(path.join(dataDir, 'bootstrap.json'))
@@ -460,6 +462,7 @@ describe('runInit', function() {
       const loaded = loadConfig(cfgPath)
       expect(loaded.role).toBe('server')
       expect(stdout.value()).toMatch(/ctvs config bootstrap-token issue/)
+      expect(stdout.value()).toMatch(/npx collectivus --config-endpoint='https:\/\/collectivus\.example\.com:8788\/v1\/bootstrap-config\?token=<bootstrap-token>'/)
       expect(stdout.value()).toMatch(/ctvs config set <gateway-id>/)
     })
 
@@ -470,6 +473,7 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '3',
         '127.0.0.1:9999', // explicit central-server listen
+        '', // default gateway-facing URL derived from listen
         '', // default data_dir
         'too-short', // shorter than 32 chars
         '', // no upload
@@ -485,6 +489,7 @@ describe('runInit', function() {
       expect(code).toBe(0)
       expect(stderr.value()).toMatch(/secret shorter than 32 chars/)
       const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.server.public_url).toBe('http://127.0.0.1:9999')
       expect(written.server.identity_issuer.secret).not.toBe('too-short')
       expect(written.server.identity_issuer.secret.length).toBe(64)
     })
@@ -496,6 +501,7 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '3',
         '', // default listen
+        '', // default gateway-facing URL
         path.join(tmpDir, 'server-data'),
         '', // generate secret
         'y', // upload

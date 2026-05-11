@@ -177,6 +177,7 @@ export class ControlPlane {
     if (path === '/v1/identity/refresh') {
       if (method !== 'POST') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
+      if (!this.ensureGatewayRegistered(req, res)) return
       this.handleRefresh(req, res)
       return
     }
@@ -197,6 +198,7 @@ export class ControlPlane {
     if (path.startsWith('/v1/ingest/')) {
       if (method !== 'POST') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
+      if (!this.ensureGatewayRegistered(req, res)) return
       const signal = path.slice('/v1/ingest/'.length)
       this.ingest.handleRequest(req, res, signal).catch((err) => {
         // `Ingest.handleRequest` writes its own 4xx/5xx responses for
@@ -334,6 +336,35 @@ export class ControlPlane {
     }, {
       'cache-control': 'no-store',
     })
+  }
+
+  /**
+   * Require a registered per-gateway config for ordinary gateway JWT use.
+   * Bootstrap remains governed by bootstrap tokens, but once a config is
+   * deleted the old gateway JWT can no longer ingest or renew itself.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @returns {boolean}
+   */
+  ensureGatewayRegistered(req, res) {
+    const claims = getClaims(req)
+    if (!claims) {
+      writeError(res, 500, 'auth claims missing after authorize')
+      return false
+    }
+    try {
+      if (getConfig(this.configRegistry, claims.sub)) return true
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      writeError(res, 500, `config registry error: ${msg}`)
+      return false
+    }
+    writeJson(res, 401, {
+      error: 'unauthorized',
+      reason: 'no config registered for this gateway',
+    })
+    return false
   }
 
   /**

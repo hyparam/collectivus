@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ControlPlane } from '../../src/server/control_plane.js'
+import { createConfigRegistry, setConfig } from '../../src/server/config_registry.js'
 import { Ingest } from '../../src/server/ingest.js'
 import { signJwt } from '../../src/server/identity.js'
 import { TokenBucket } from '../../src/server/rate_limit.js'
@@ -47,6 +48,17 @@ function fakeClock(initialMs) {
  */
 function ndjson(rows) {
   return rows.map((r) => JSON.stringify(r)).join('\n') + '\n'
+}
+
+/**
+ * @returns {object}
+ */
+function gatewayConfig() {
+  return {
+    version: 1,
+    role: 'gateway',
+    central_server: { url: 'https://central.example.com', identity: {} },
+  }
 }
 
 /**
@@ -102,7 +114,12 @@ function makeHarness() {
   async function boot(opts = {}) {
     const gatewayId = opts.gatewayId ?? 'gw-1'
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
-    plane = new ControlPlane(serverConfig({ sinkDir: dir, ingest: opts.ingest }), { now: clock.now })
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, gatewayId, gatewayConfig())
+    plane = new ControlPlane(
+      serverConfig({ sinkDir: dir, ingest: opts.ingest }),
+      { now: clock.now, configRegistry: registry }
+    )
     if (opts.holdWrites) {
       // Replace the per-file write step with a function that blocks until
       // we call `release()`. We still bump/decrement pendingRows ourselves
@@ -263,9 +280,11 @@ describe('Ingest pending-row backpressure', () => {
         highWaterPct: 50, // high-water threshold = 5
         onThrottle: (info) => kinds.push(info.kind),
       })
+      const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+      setConfig(registry, 'gw-1', gatewayConfig())
       const cp = new ControlPlane(
         serverConfig({ sinkDir: dir }),
-        { now: clock.now, ingest }
+        { now: clock.now, ingest, configRegistry: registry }
       )
       await cp.start()
       try {
@@ -346,9 +365,11 @@ describe('Ingest disk-rate throttle', () => {
 
   it('returns 429 when a single batch would exceed the bytes-per-second ceiling', async () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, 'gw-1', gatewayConfig())
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 64 } }),
-      { now: clock.now }
+      { now: clock.now, configRegistry: registry }
     )
     await plane.start()
     const addr = plane.server?.address()
@@ -375,9 +396,11 @@ describe('Ingest disk-rate throttle', () => {
 
   it('drains the budget over time so steady-state traffic eventually accepts', async () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, 'gw-1', gatewayConfig())
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 300 } }),
-      { now: clock.now }
+      { now: clock.now, configRegistry: registry }
     )
     await plane.start()
     const addr = plane.server?.address()
@@ -416,7 +439,9 @@ describe('Ingest disk-rate throttle', () => {
 
   it('does not throttle when max_bytes_per_second is omitted (default unlimited)', async () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
-    plane = new ControlPlane(serverConfig({ sinkDir: dir }), { now: clock.now })
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, 'gw-1', gatewayConfig())
+    plane = new ControlPlane(serverConfig({ sinkDir: dir }), { now: clock.now, configRegistry: registry })
     await plane.start()
     const addr = plane.server?.address()
     if (!addr || typeof addr === 'string') throw new Error('no address')
@@ -437,9 +462,11 @@ describe('Ingest disk-rate throttle', () => {
 
   it('skips the byte budget for empty (zero-row) batches so they cannot consume tokens', async () => {
     const clock = fakeClock(Date.UTC(2026, 4, 8, 12, 0, 0))
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
+    setConfig(registry, 'gw-1', gatewayConfig())
     plane = new ControlPlane(
       serverConfig({ sinkDir: dir, ingest: { max_bytes_per_second: 100 } }),
-      { now: clock.now }
+      { now: clock.now, configRegistry: registry }
     )
     await plane.start()
     const addr = plane.server?.address()

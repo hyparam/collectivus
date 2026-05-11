@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { run } from '../../src/cli.js'
-import { createConfigRegistry, setConfig } from '../../src/server/config_registry.js'
+import { createConfigRegistry, deleteConfig, setConfig } from '../../src/server/config_registry.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
 import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
@@ -43,6 +43,20 @@ function memo() {
 }
 
 function noop() {}
+
+/**
+ * @returns {CollectivusConfig}
+ */
+function gatewayCfg() {
+  return {
+    version: 1,
+    role: 'gateway',
+    central_server: {
+      url: 'https://control.example.com',
+      identity: {},
+    },
+  }
+}
 
 /**
  * @param {() => boolean} predicate
@@ -205,11 +219,12 @@ describe('Identity flow end-to-end (HTTP)', () => {
    * Spin up a control plane backed by a real BootstrapStore at `dir`.
    *
    * @param {{ clock?: { now: () => number }, publicUrl?: string }} [opts]
-   * @returns {Promise<{ store: BootstrapStore, plane: ControlPlane }>}
+   * @returns {Promise<{ store: BootstrapStore, plane: ControlPlane, registry: ConfigRegistry }>}
    */
   async function bootPlane(opts = {}) {
     const storePath = path.join(dir, 'bootstrap.json')
     const store = new BootstrapStore({ path: storePath, now: opts.clock?.now })
+    const registry = createConfigRegistry({ configsDir: path.join(dir, 'configs') })
     /** @type {ServerConfig} */
     const cfg = {
       control_plane_listen: '127.0.0.1:0',
@@ -218,13 +233,13 @@ describe('Identity flow end-to-end (HTTP)', () => {
     if (opts.publicUrl) cfg.public_url = opts.publicUrl
     plane = new ControlPlane(
       cfg,
-      { bootstrapStore: store, now: opts.clock?.now }
+      { bootstrapStore: store, now: opts.clock?.now, configRegistry: registry }
     )
     await plane.start()
     const addr = plane.server?.address()
     if (!addr || typeof addr === 'string') throw new Error('no address')
     baseUrl = `http://127.0.0.1:${addr.port}`
-    return { store, plane }
+    return { store, plane, registry }
   }
 
   it('exchanges a bootstrap token for a usable JWT exactly once', async () => {
@@ -286,7 +301,8 @@ describe('Identity flow end-to-end (HTTP)', () => {
   })
 
   it('refresh issues a new JWT for an authenticated gateway', async () => {
-    await bootPlane()
+    const { registry } = await bootPlane()
+    setConfig(registry, 'gw-7', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw-7', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
     const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
       method: 'POST',
@@ -302,9 +318,27 @@ describe('Identity flow end-to-end (HTTP)', () => {
     expect(verified.claims.sub).toBe('gw-7')
   })
 
+  it('rejects refresh after the gateway config is deleted', async () => {
+    const { registry } = await bootPlane()
+    setConfig(registry, 'gw-offboarded', gatewayCfg())
+    const jwt = signJwt({ gatewayId: 'gw-offboarded', ttlSeconds: 60, secret: PLACEHOLDER_SECRET })
+    expect(deleteConfig(registry, 'gw-offboarded')).toBe(true)
+
+    const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({
+      error: 'unauthorized',
+      reason: 'no config registered for this gateway',
+    })
+  })
+
   it('rejects refresh with an expired JWT', async () => {
     const clock = fakeClock(1_700_000_000_000)
-    await bootPlane({ clock })
+    const { registry } = await bootPlane({ clock })
+    setConfig(registry, 'gw', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw', ttlSeconds: 60, secret: PLACEHOLDER_SECRET, now: clock.now })
     clock.advance(61_000)
     const res = await fetch(`${baseUrl}/v1/identity/refresh`, {
@@ -338,7 +372,8 @@ describe('Identity flow end-to-end (HTTP)', () => {
 
   it('rate-limits refresh to 1 request/min/gateway', async () => {
     const clock = fakeClock(1_700_000_000_000)
-    await bootPlane({ clock })
+    const { registry } = await bootPlane({ clock })
+    setConfig(registry, 'gw', gatewayCfg())
     const jwt = signJwt({ gatewayId: 'gw', ttlSeconds: 600, secret: PLACEHOLDER_SECRET, now: clock.now })
     const first = await fetch(`${baseUrl}/v1/identity/refresh`, {
       method: 'POST',

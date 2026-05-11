@@ -295,7 +295,7 @@ describe('runInit', function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gw.json')
-      const sinkDir = path.join(tmpDir, 'gw-sink')
+      const outboxDir = path.join(tmpDir, 'gw-outbox')
       const { prompt, asked } = scriptedPrompt([
         '2', // gateway
         'https://central.example.com:8788', // central server URL
@@ -303,8 +303,7 @@ describe('runInit', function() {
         '1', // capture mode: proxy only
         '1', // anthropic
         '', // default proxy listen
-        sinkDir,
-        '', // keep local query cache
+        outboxDir,
         cfgPath, // save path
         'y', // confirm write
         'n', // decline daemon install
@@ -314,7 +313,7 @@ describe('runInit', function() {
         platform: 'darwin',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
-        defaultSinkDir: sinkDir,
+        defaultSinkDir: path.join(tmpDir, 'gw-spool'),
       })
       expect(code).toBe(0)
       const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
@@ -323,10 +322,11 @@ describe('runInit', function() {
       expect(written.central_server.url).toBe('https://central.example.com:8788')
       expect(written.central_server.poll_interval_seconds).toBe(60)
       expect(written.central_server.identity).toEqual({})
+      expect(written.central_server.outbox_dir).toBe(outboxDir)
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
       expect(written.proxy.upstreams[0].name).toBe('anthropic')
-      expect(written.sink.dir).toBe(sinkDir)
-      expect(written.query).toEqual({ parquet: { enabled: true } })
+      expect(written.sink).toBeUndefined()
+      expect(written.query).toBeUndefined()
       expect(written.otel).toBeUndefined()
       const loaded = loadConfig(cfgPath)
       expect(loaded.role).toBe('gateway')
@@ -347,7 +347,6 @@ describe('runInit', function() {
         '2', // capture: otel only
         '127.0.0.1:4319', // otel listen override
         path.join(tmpDir, 'gw-sink'),
-        '',
         cfgPath,
         'y',
       ])
@@ -378,7 +377,6 @@ describe('runInit', function() {
         '1', // capture: proxy only
         '1', '', // anthropic, default listen
         path.join(tmpDir, 'gw-sink'),
-        '',
         cfgPath,
         'y', 'n',
       ])
@@ -408,7 +406,6 @@ describe('runInit', function() {
         '1', // capture proxy
         '1', '', // anthropic, default listen
         path.join(tmpDir, 'gw-sink'),
-        '',
         cfgPath, 'y', 'n',
       ])
       const code = await runInit({

@@ -6,6 +6,7 @@ import { resolveStandaloneGatewayId } from './gateway_id.js'
 import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
+import { OutboxSink, defaultOutboxDir } from './gateway/outbox_sink.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { ControlPlane } from './server/control_plane.js'
@@ -29,6 +30,7 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from './types.js'
  * @import { ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
  * @import { ConfigChangedEvent } from './gateway/types.d.ts'
+ * @import { IngestSignal } from './server/types.d.ts'
  */
 
 const USAGE = `Usage:
@@ -337,50 +339,91 @@ function buildConfigListeners(config, ctx) {
   const factories = new Map()
 
   if (config.otel) {
-    if (!config.sink) {
-      throw new Error('otel is configured but sink is missing')
-    }
     const { listen } = config.otel
-    const outputDir = config.sink.dir
     const { gatewayId } = ctx
-    factories.set('otel', async () => {
-      const { host, port } = parseListen(listen)
-      const collector = new Collector({ host, port, outputDir, gatewayId })
-      await collector.start()
-      const effective = effectiveBinding(collector.server, host, port)
-      return {
-        description: `OTLP listener bound on ${effective}, writing to ${outputDir}/${gatewayId}/<signal>/<UTC-date>.jsonl`,
-        stop: () => collector.stop(),
+    if (config.role === 'gateway') {
+      const outboxDir = resolveGatewayOutboxDir(config, ctx)
+      factories.set('otel', async () => {
+        const { host, port } = parseListen(listen)
+        const rowSinks = {
+          logs: createGatewayOutboxSink(config, ctx, 'logs'),
+          traces: createGatewayOutboxSink(config, ctx, 'traces'),
+          metrics: createGatewayOutboxSink(config, ctx, 'metrics'),
+        }
+        const collector = new Collector({ host, port, gatewayId, rowSinks })
+        await collector.start()
+        const effective = effectiveBinding(collector.server, host, port)
+        return {
+          description: `OTLP listener bound on ${effective}, spooling to ${outboxDir}/<signal> for Central ingest`,
+          stop: async () => {
+            await collector.stop()
+            await Promise.all(Object.values(rowSinks).map((sink) => sink.close()))
+          },
+        }
+      })
+    } else {
+      if (!config.sink) {
+        throw new Error('otel is configured but sink is missing')
       }
-    })
+      const outputDir = config.sink.dir
+      factories.set('otel', async () => {
+        const { host, port } = parseListen(listen)
+        const collector = new Collector({ host, port, outputDir, gatewayId })
+        await collector.start()
+        const effective = effectiveBinding(collector.server, host, port)
+        return {
+          description: `OTLP listener bound on ${effective}, writing to ${outputDir}/${gatewayId}/<signal>/<UTC-date>.jsonl`,
+          stop: () => collector.stop(),
+        }
+      })
+    }
   }
 
   if (config.proxy) {
-    if (!config.sink) {
-      throw new Error('proxy is configured but sink is missing')
-    }
     const proxyConfig = config.proxy
-    const sinkDir = config.sink.dir
     const { gatewayId } = ctx
-    factories.set('proxy', async () => {
-      const sink = new FileSink(sinkDir, gatewayId)
-      const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
-      const proxy = new Proxy(proxyConfig, { recorder })
-      await proxy.start()
-      const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
-      return {
-        description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/${gatewayId}/proxy/<UTC-date>.jsonl`,
-        // Stop accepting new connections, drain any in-flight exchanges (their
-        // finalization can be async, e.g. a gzip decoder still flushing the
-        // tail of an SSE stream), then flush+close the sink so the final
-        // `exchange` row lands before exit.
-        stop: async () => {
-          await proxy.stop()
-          await recorder.drain()
-          await sink.close()
-        },
+    if (config.role === 'gateway') {
+      const outboxDir = resolveGatewayOutboxDir(config, ctx)
+      factories.set('proxy', async () => {
+        const sink = createGatewayOutboxSink(config, ctx, 'proxy')
+        const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
+        const proxy = new Proxy(proxyConfig, { recorder })
+        await proxy.start()
+        const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
+        return {
+          description: `Proxy listener bound on ${effective}, spooling to ${outboxDir}/proxy for Central ingest`,
+          stop: async () => {
+            await proxy.stop()
+            await recorder.drain()
+            await sink.close()
+          },
+        }
+      })
+    } else {
+      if (!config.sink) {
+        throw new Error('proxy is configured but sink is missing')
       }
-    })
+      const sinkDir = config.sink.dir
+      factories.set('proxy', async () => {
+        const sink = new FileSink(sinkDir, gatewayId)
+        const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
+        const proxy = new Proxy(proxyConfig, { recorder })
+        await proxy.start()
+        const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
+        return {
+          description: `Proxy listener bound on ${effective}, recording to ${sinkDir}/${gatewayId}/proxy/<UTC-date>.jsonl`,
+          // Stop accepting new connections, drain any in-flight exchanges (their
+          // finalization can be async, e.g. a gzip decoder still flushing the
+          // tail of an SSE stream), then flush+close the sink so the final
+          // `exchange` row lands before exit.
+          stop: async () => {
+            await proxy.stop()
+            await recorder.drain()
+            await sink.close()
+          },
+        }
+      })
+    }
   }
 
   if (config.upload) {
@@ -449,18 +492,18 @@ function buildConfigListeners(config, ctx) {
   // an orphaned setTimeout in the event loop. The hot-reload pipeline
   // subscribes to `config-changed` events emitted by this client.
   if (config.role === 'gateway' && ctx.configClient) {
-    const configClient = ctx.configClient
+    const { configClient } = ctx
     const url = config.central_server?.url ?? 'central server'
     const poll = configClient.pollIntervalSeconds
-    factories.set('configPoll', async () => {
+    factories.set('configPoll', () => {
       configClient.start()
-      return {
+      return Promise.resolve({
         description: `Config poll loop active (${url} every ${poll}s)`,
         stop: async () => {
           configClient.stop()
           await configClient.whenIdle()
         },
-      }
+      })
     })
   }
 
@@ -471,6 +514,39 @@ function buildConfigListeners(config, ctx) {
   }
 
   return factories
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {{ identityClient?: IdentityClient, stderr: { write: (s: string) => void } }} ctx
+ * @param {IngestSignal} signal
+ * @returns {OutboxSink}
+ */
+function createGatewayOutboxSink(config, ctx, signal) {
+  const centralServer = config.central_server
+  const { identityClient } = ctx
+  if (!centralServer || !identityClient) {
+    throw new Error('gateway outbox requires central_server and an acquired identity')
+  }
+  return new OutboxSink({
+    outboxDir: defaultOutboxDir(centralServer),
+    centralUrl: centralServer.url,
+    identityClient,
+    signal,
+    stderr: ctx.stderr,
+  })
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @param {{ identityClient?: IdentityClient }} ctx
+ * @returns {string}
+ */
+function resolveGatewayOutboxDir(config, ctx) {
+  if (!config.central_server || !ctx.identityClient) {
+    throw new Error('gateway outbox requires central_server and an acquired identity')
+  }
+  return defaultOutboxDir(config.central_server)
 }
 
 /**

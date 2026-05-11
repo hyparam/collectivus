@@ -32,7 +32,7 @@ function decodeProtobufRequest(signal, body) {
 }
 
 /**
- * @param {(signal: string, data: unknown) => void} handler
+ * @param {(signal: string, data: unknown) => void | Promise<void>} handler
  * @returns {Server}
  */
 function createServer(handler) {
@@ -106,7 +106,16 @@ function createServer(handler) {
       return
     }
 
-    handler(signal, data)
+    try {
+      await handler(signal, data)
+    } catch (err) {
+      res.writeHead(500, JSON_CT)
+      res.end(JSON.stringify({
+        code: 13,
+        message: err instanceof Error ? err.message : String(err),
+      }))
+      return
+    }
 
     if (acceptProtobuf) {
       res.writeHead(200, PROTOBUF_CT)

@@ -186,6 +186,11 @@ change within `poll_interval_seconds` and hot-reloads only the changed
 listener) or when you want every gateway's recordings to land in a single S3
 archive without per-host AWS credentials.
 
+In Gateway mode, local disk is only a durable delivery outbox. Proxy and OTLP
+rows are fsynced under `central_server.outbox_dir` (default:
+`<dirname(identity.json)>/outbox`) and shipped to Central server ingest; the
+Central server's ingest directory is the canonical recording source.
+
 The interactive walkthrough exposes both sides:
 
 ```bash
@@ -209,9 +214,11 @@ npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstra
 collectivus config set gw-prod-1 --server-config server.json --file gw-prod-1.json
 ```
 
-Option 2 still writes a gateway config by hand for advanced setups. The normal
-enterprise path is the one-line `--config-endpoint` command printed by the
-central server's token issuer.
+Option 2 still writes a gateway config by hand for advanced setups. It prompts
+for the central-server URL, `poll_interval_seconds` (default 30), capture mode,
+and an optional local outbox directory. The normal enterprise path is the
+one-line `--config-endpoint` command printed by the central server's token
+issuer.
 
 If gateways need a shorter hosted-discovery command, run a rendezvous service:
 
@@ -255,9 +262,9 @@ section of the README for the full operator workflow and the on-disk schema.
 
 ## Archiving recordings to S3
 
-The interactive walkthrough (`npx collectivus` with no args) includes an
+The Standalone and Central server walkthroughs (`npx collectivus` with no args) include an
 optional **"Upload daily snapshots to S3 as Parquet?"** step after the
-sink-directory prompt. Answer `y` and it collects bucket / region / prefix /
+recording-root prompt. Answer `y` and it collects bucket / region / prefix /
 time / signals (no AWS keys — those are read from the environment at daemon
 start) and writes an `upload` block into the saved config. Once configured,
 collectivus drains each previous day's JSONL into Hive-partitioned Parquet

@@ -174,14 +174,17 @@ describe('gateway durable data path', () => {
       traces: outboxSink(centralUrl, outboxDir, gatewayId, 'traces'),
       metrics: outboxSink(centralUrl, outboxDir, gatewayId, 'metrics'),
     }
+    const unusedOutputDir = path.join(tmpDir, 'unused-otel-data')
     const collector = new Collector({
       port: 0,
       host: '127.0.0.1',
+      outputDir: unusedOutputDir,
       gatewayId,
       rowSinks: sinks,
     })
     try {
       await collector.start()
+      expect(fs.existsSync(unusedOutputDir)).toBe(false)
       const addr = collector.server?.address()
       if (!addr || typeof addr === 'string') throw new Error('collector did not bind')
       const otlpUrl = `http://127.0.0.1:${addr.port}`

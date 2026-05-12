@@ -46,20 +46,32 @@ docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
 To run Central server and rendezvous on the same host, run two containers from
 the same image with separate commands, ports, and data volumes.
 
-### AWS ECS
+### Self-hosting
 
-This repo includes an AWS CDK app for running Central server and rendezvous as
-two ECS Fargate services backed by encrypted EFS state and a new private S3
-archive bucket:
+The repo ships a reference [`docker-compose.yml`](docker-compose.yml) and a
+matching [`.env.example`](.env.example) that bring up the central server and
+rendezvous together so the `ctvs invite create` → `ctvs join` flow works end
+to end:
 
 ```bash
-cd infra/aws
-npm install
-npm run deploy -- -c imageUri=ghcr.io/hyparam/collectivus:latest
+cp .env.example .env
+# fill in three high-entropy secrets (openssl rand -hex 32) and two public URLs:
+#   COLLECTIVUS_ADMIN_TOKEN, COLLECTIVUS_IDENTITY_SECRET,
+#   COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN, COLLECTIVUS_RENDEZVOUS_URL,
+#   COLLECTIVUS_PUBLIC_URL
+docker compose up -d
 ```
 
-See [`infra/aws/README.md`](infra/aws/README.md) for TLS, VPC, ECS Exec, and
-operator-command details.
+See [`docs/self-hosting-docker.md`](docs/self-hosting-docker.md) for the full
+walkthrough — TLS termination (Caddy / nginx / Traefik), token rotation,
+volume backup, and a troubleshooting checklist.
+
+### AWS ECS (optional)
+
+An AWS CDK app under [`infra/aws/`](infra/aws/) deploys the same two services
+as ECS Fargate tasks behind ALBs, backed by encrypted EFS state and a private
+S3 archive bucket. The compose path above is the supported default; reach for
+the CDK app only if you already have an AWS deployment target.
 
 ## Quick start: record claude-code
 

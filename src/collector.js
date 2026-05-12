@@ -33,7 +33,9 @@ export class Collector {
   }
 
   async start() {
-    ensureDir(this.outputDir)
+    if (!this.rowSinks || this.uploadOptions) {
+      ensureDir(this.outputDir)
+    }
 
     const server = createServer(this.handleData.bind(this))
     this.server = server

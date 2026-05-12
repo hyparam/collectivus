@@ -47,4 +47,5 @@ export declare function createEnrollmentStore(opts: { path: string, now?: () => 
 export declare function resolveEnrollmentStorePath(config: ServerConfig, opts?: { homeDir?: string }): string
 export declare function generateEnrollmentCode(length?: number): string
 export declare function registerEnrollment(store: EnrollmentStore, input: RegisterEnrollmentInput): EnrollmentRecord
+export declare function deleteEnrollment(store: EnrollmentStore, joinCodeHash: string): boolean
 export declare function issueEnrollmentBootstrap(input: IssueEnrollmentInput): EnrollmentIssueResult

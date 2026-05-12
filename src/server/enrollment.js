@@ -98,6 +98,26 @@ export function registerEnrollment(store, input) {
 }
 
 /**
+ * Remove an enrollment record by joinCodeHash. Idempotent — returns false
+ * when no record matched the hash, true when a record existed and was
+ * removed. Used by the admin-invite handler to roll back the enrollment
+ * row when the downstream rendezvous registration fails so we don't leave a
+ * usable join code with no rendezvous mapping behind it.
+ *
+ * @param {EnrollmentStore} store
+ * @param {string} joinCodeHash
+ * @returns {boolean}
+ */
+export function deleteEnrollment(store, joinCodeHash) {
+  const normalized = normalizeHash(joinCodeHash)
+  const records = loadRecords(store)
+  const next = records.filter((record) => record.joinCodeHash !== normalized)
+  if (next.length === records.length) return false
+  flushRecords(store, next)
+  return true
+}
+
+/**
  * @param {IssueEnrollmentInput} input
  * @returns {EnrollmentIssueResult}
  */

@@ -16,6 +16,7 @@ import {
   resolveEnrollmentStorePath,
 } from '../server/enrollment.js'
 import { BootstrapStore, DEFAULT_BOOTSTRAP_TTL_SECONDS } from '../server/identity.js'
+import { shellSingleQuote } from '../server/util.js'
 import { defaultPrompt } from './common.js'
 
 /**
@@ -887,11 +888,3 @@ async function readErrorDetail(response) {
   return `HTTP ${response.status} ${response.statusText}`
 }
 
-/**
- * @param {string} value
- * @returns {string}
- */
-function shellSingleQuote(value) {
-  const quote = '\''
-  return quote + value.replace(/'/g, quote + '\\' + quote + quote) + quote
-}

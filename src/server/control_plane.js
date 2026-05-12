@@ -38,6 +38,10 @@ const BOOTSTRAP_RATE_MAX = 5
 const REFRESH_RATE_WINDOW_MS = 60_000
 const REFRESH_RATE_MAX = 1
 
+/** Admin invite rate limit: 10 requests per 60s per source IP. */
+const ADMIN_INVITE_RATE_WINDOW_MS = 60_000
+const ADMIN_INVITE_RATE_MAX = 10
+
 /**
  * Server-mode control-plane HTTP listener. Mounts the v0 identity endpoints
  * (`/v1/identity/bootstrap`, `/v1/identity/refresh`) plus a no-auth `/health`
@@ -134,6 +138,8 @@ export class ControlPlane {
     this.adminAuth = undefined
     /** @type {((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined} */
     this.adminInvitesHandler = undefined
+    /** @type {SlidingWindowRateLimiter | undefined} */
+    this.adminInviteLimiter = undefined
     if (config.admin) {
       const adminToken = resolveSecret({
         direct: config.admin.token,
@@ -154,6 +160,11 @@ export class ControlPlane {
         now: this.now,
         env,
         logger: opts.logger,
+      })
+      this.adminInviteLimiter = new SlidingWindowRateLimiter({
+        windowMs: ADMIN_INVITE_RATE_WINDOW_MS,
+        max: ADMIN_INVITE_RATE_MAX,
+        now: this.now,
       })
     }
   }
@@ -259,11 +270,16 @@ export class ControlPlane {
       if (method !== 'POST') return writeError(res, 405, 'method not allowed')
       const adminAuth = this.adminAuth
       const handler = this.adminInvitesHandler
-      if (!adminAuth || !handler) {
+      const limiter = this.adminInviteLimiter
+      if (!adminAuth || !handler || !limiter) {
         // Admin not configured — surface 404 so the existence of the
         // endpoint can't be probed without operator intent.
         return writeError(res, 404, 'not found')
       }
+      // Rate limit BEFORE auth so a hostile loop can't burn the constant-
+      // time admin-token compare path.
+      const limit = limiter.check(clientIp(req))
+      if (!limit.allowed) return writeRateLimited(res, limit.retryAfterMs)
       if (!adminAuth(req, res)) return
       handler(req, res).catch((err) => {
         if (!res.writableEnded) {

@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import process from 'node:process'
-import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from './gateway_id.js'
+import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN, isValidGatewayId } from './gateway_id.js'
 
 /**
  * @import { CollectivusConfig } from './types.js'
@@ -33,6 +33,7 @@ const ALLOWED_QUERY_KEYS = new Set(['parquet'])
 const ALLOWED_QUERY_PARQUET_KEYS = new Set(['enabled', 'dir'])
 const ALLOWED_SERVER_KEYS = new Set([
   'control_plane_listen', 'public_url', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
+  'admin', 'enrollment', 'rendezvous',
 ])
 const ALLOWED_INGEST_KEYS = new Set([
   'max_pending_rows', 'high_water_pct', 'retry_after_seconds', 'max_bytes_per_second',
@@ -40,12 +41,18 @@ const ALLOWED_INGEST_KEYS = new Set([
 const ALLOWED_IDENTITY_ISSUER_KEYS = new Set([
   'secret', 'secret_env', 'jwt_ttl_seconds', 'bootstrap_ttl_seconds', 'bootstrap_store_path',
 ])
+const ALLOWED_ADMIN_KEYS = new Set(['token', 'token_env'])
+const ALLOWED_ENROLLMENT_KEYS = new Set(['gateway_prefix'])
+const ALLOWED_RENDEZVOUS_KEYS = new Set([
+  'url', 'url_env', 'registration_token', 'registration_token_env',
+])
 const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds', 'outbox_dir'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
 const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
 const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 const IDENTITY_SECRET_MIN_LENGTH = 32
+const ADMIN_TOKEN_MIN_LENGTH = 32
 
 /**
  * Returns true when `value` is a `http://` or `https://` URL that
@@ -337,6 +344,98 @@ function validateServer(server) {
   }
   if (server.ingest !== undefined) {
     validateIngest(server.ingest)
+  }
+  if (server.admin !== undefined) {
+    validateAdmin(server.admin)
+    // Admin invite responses bake `public_url` into the join command; a
+    // missing value produces a broken `npx collectivus join` line, so
+    // require it explicitly whenever admin is active.
+    if (server.public_url === undefined) {
+      throw new ConfigError(
+        'public_url is required when server.admin is configured',
+        { pointer: '/server/public_url' }
+      )
+    }
+  }
+  if (server.enrollment !== undefined) {
+    validateEnrollment(server.enrollment)
+  }
+  if (server.rendezvous !== undefined) {
+    validateRendezvous(server.rendezvous)
+  }
+}
+
+/** @param {unknown} admin */
+function validateAdmin(admin) {
+  assertObject(admin, '/server/admin')
+  assertOnlyKeys(admin, ALLOWED_ADMIN_KEYS, '/server/admin')
+  const hasToken = admin.token !== undefined
+  const hasTokenEnv = admin.token_env !== undefined
+  if (hasToken === hasTokenEnv) {
+    throw new ConfigError(
+      'must set exactly one of token or token_env',
+      { pointer: '/server/admin' }
+    )
+  }
+  if (hasToken) {
+    assertNonEmptyString(admin.token, '/server/admin/token')
+    if (admin.token.length < ADMIN_TOKEN_MIN_LENGTH) {
+      throw new ConfigError(
+        `must be at least ${ADMIN_TOKEN_MIN_LENGTH} characters`,
+        { pointer: '/server/admin/token' }
+      )
+    }
+  }
+  if (hasTokenEnv) {
+    assertNonEmptyString(admin.token_env, '/server/admin/token_env')
+  }
+}
+
+/** @param {unknown} enrollment */
+function validateEnrollment(enrollment) {
+  assertObject(enrollment, '/server/enrollment')
+  assertOnlyKeys(enrollment, ALLOWED_ENROLLMENT_KEYS, '/server/enrollment')
+  if (enrollment.gateway_prefix !== undefined) {
+    if (!isValidGatewayId(enrollment.gateway_prefix)) {
+      throw new ConfigError(
+        `must match ${GATEWAY_ID_PATTERN} and be 1..${GATEWAY_ID_MAX_LENGTH} characters`,
+        { pointer: '/server/enrollment/gateway_prefix' }
+      )
+    }
+  }
+}
+
+/** @param {unknown} rendezvous */
+function validateRendezvous(rendezvous) {
+  assertObject(rendezvous, '/server/rendezvous')
+  assertOnlyKeys(rendezvous, ALLOWED_RENDEZVOUS_KEYS, '/server/rendezvous')
+  const hasUrl = rendezvous.url !== undefined
+  const hasUrlEnv = rendezvous.url_env !== undefined
+  if (hasUrl === hasUrlEnv) {
+    throw new ConfigError(
+      'must set exactly one of url or url_env',
+      { pointer: '/server/rendezvous' }
+    )
+  }
+  if (hasUrl) {
+    assertHttpUrl(rendezvous.url, '/server/rendezvous/url')
+  }
+  if (hasUrlEnv) {
+    assertNonEmptyString(rendezvous.url_env, '/server/rendezvous/url_env')
+  }
+  const hasToken = rendezvous.registration_token !== undefined
+  const hasTokenEnv = rendezvous.registration_token_env !== undefined
+  if (hasToken === hasTokenEnv) {
+    throw new ConfigError(
+      'must set exactly one of registration_token or registration_token_env',
+      { pointer: '/server/rendezvous' }
+    )
+  }
+  if (hasToken) {
+    assertNonEmptyString(rendezvous.registration_token, '/server/rendezvous/registration_token')
+  }
+  if (hasTokenEnv) {
+    assertNonEmptyString(rendezvous.registration_token_env, '/server/rendezvous/registration_token_env')
   }
 }
 

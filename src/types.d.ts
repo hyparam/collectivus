@@ -159,7 +159,9 @@ export interface ServerConfig {
   /**
    * Gateway-facing base URL for this control plane. Used to build one-line
    * enrollment commands and bootstrap configs. When omitted, the server
-   * derives a best-effort URL from the incoming request host.
+   * derives a best-effort URL from the incoming request host. Required when
+   * `admin` is configured — admin invite responses bake `public_url` into
+   * the join command.
    */
   public_url?: string
   /** JWT issuer settings for the control-plane. */
@@ -179,6 +181,52 @@ export interface ServerConfig {
   sink_dir?: string
   /** Backpressure / disk I/O throttle settings for the ingest endpoint. */
   ingest?: IngestThrottleConfig
+  /** Operator-facing admin API authentication. Enables `POST /v1/admin/invites`. */
+  admin?: AdminConfig
+  /** Enrollment defaults applied to invites issued through the admin API. */
+  enrollment?: EnrollmentConfig
+  /** Shared rendezvous backend the admin API uses to register short codes. */
+  rendezvous?: ServerRendezvousConfig
+}
+
+/**
+ * Operator-facing admin API authentication. Exactly one of `token` or
+ * `token_env` must be set; the resolved value must be at least 32 bytes.
+ */
+export interface AdminConfig {
+  /** Inline admin token, ≥32 chars. */
+  token?: string
+  /** Environment variable that holds the admin token at runtime. */
+  token_env?: string
+}
+
+/**
+ * Enrollment defaults applied when the admin API mints invites. Optional —
+ * when omitted, invites are issued without a gateway-id namespace prefix.
+ */
+export interface EnrollmentConfig {
+  /**
+   * Optional namespace prefix prepended to gateway IDs minted from this
+   * server. Validated against the same character class that the ingest
+   * endpoint enforces on `claims.sub`.
+   */
+  gateway_prefix?: string
+}
+
+/**
+ * Shared rendezvous backend the admin API contacts to register invite codes.
+ * Exactly one of `url` / `url_env` and one of `registration_token` /
+ * `registration_token_env` must be set.
+ */
+export interface ServerRendezvousConfig {
+  /** Inline base URL for the rendezvous service (http or https). */
+  url?: string
+  /** Environment variable that holds the rendezvous URL at runtime. */
+  url_env?: string
+  /** Inline registration token used to authenticate to the rendezvous service. */
+  registration_token?: string
+  /** Environment variable that holds the rendezvous registration token at runtime. */
+  registration_token_env?: string
 }
 
 /**

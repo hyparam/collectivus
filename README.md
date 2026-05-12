@@ -286,13 +286,13 @@ npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 
 When invoked through `npx`, `ctvs join` submits the join code in a POST body,
 resolves the Central server URL, fetches the registered gateway config from
-that server without consuming the join token, writes it to
-`~/.hyp/collectivus.json`, runs `npm install -g collectivus`, and installs the
-background daemon against that config. The written config includes the
-bootstrap token under `central_server.identity` so the daemon can exchange it
-for a long-lived JWT on first start. That JWT is persisted to
-`~/.hyp/collectivus/identity.json`. A globally installed `ctvs join` still runs
-the gateway in the foreground for debugging.
+that server, runs `npm install -g collectivus`, exchanges the join token for a
+long-lived JWT, writes the authenticated Central-vended config to
+`~/.hyp/collectivus.json`, and installs the background daemon against that
+config. The JWT is persisted to `~/.hyp/collectivus/identity.json` before the
+daemon starts. If the vended config has a proxy listener, `join` also points
+Claude Code at that local proxy. A globally installed `ctvs join` still runs the
+gateway in the foreground for debugging.
 
 Security note: in v1, rendezvous does not pin or cryptographically verify the
 Central server URL it returns. This is appropriate when gateways can reach the

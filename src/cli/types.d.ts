@@ -373,6 +373,47 @@ export interface AdminHooks {
   clearAdminConfig?: (configPath: string) => boolean
 }
 
+// ---------- CLI invite ----------
+
+export interface InviteResponseBody {
+  joinCode: string
+  expiresAt: string
+  maxUses: number
+  gatewayPrefix: string
+  rendezvousUrl: string
+  command: string
+}
+
+export interface InviteCreateOptions {
+  adminUrl?: string
+  adminToken?: string
+  gatewayPrefix?: string
+  maxUses?: number
+  ttlSeconds?: number
+  displayName?: string
+  json: boolean
+}
+
+export type InviteParseResult =
+  | { kind: 'help' }
+  | { kind: 'create-help' }
+  | { kind: 'error', message: string, exitCode: number }
+  | ({ kind: 'create' } & InviteCreateOptions)
+
+export interface InviteHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `~`. */
+  homeDir?: string
+  /** Override the resolved admin config path. */
+  configPath?: string
+  /** Override `process.env` for env-var resolution. */
+  env?: NodeJS.ProcessEnv
+  /** Override `fetch`. */
+  fetchFn?: typeof fetch
+  readAdminConfig?: (configPath: string) => AdminConfigFile | undefined
+}
+
 export interface InstalledPlistFields {
   /** Path passed via `--config` in ProgramArguments. */
   configPath?: string

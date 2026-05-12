@@ -16,6 +16,7 @@ import type {
 } from '../types.js'
 import type { DaemonInstallOptions, DaemonUninstallOptions, MacosStatusOptions } from '../daemon/types.d.ts'
 import type { ConfigClient } from '../gateway/config_client.js'
+import type { EnrollmentStore } from '../server/enrollment.d.ts'
 import type { BootstrapStore } from '../server/identity.js'
 import type { SkillInstallOptions, SkillInstallResult } from '../skills/types.d.ts'
 import type { ConfigRegistry } from '../server/types.d.ts'
@@ -143,6 +144,7 @@ export interface ConfigCliHooks {
   readFile?: (p: string) => string
   makeRegistry?: (server: ServerConfig) => ConfigRegistry
   makeBootstrapStore?: (storePath: string) => BootstrapStore
+  makeEnrollmentStore?: (storePath: string) => EnrollmentStore
 }
 
 export interface ParsedServerConfigSource {
@@ -185,6 +187,7 @@ export interface ParsedTokenIssue extends ParsedServerConfigSource {
   kind: 'token-issue'
   gatewayId: string
   ttlSeconds?: number
+  maxUses?: number
   rendezvous?: string
   rendezvousToken?: string
 }

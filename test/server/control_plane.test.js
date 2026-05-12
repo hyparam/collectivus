@@ -3,8 +3,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { run } from '../../src/cli.js'
+import { sha256Hex } from '../../src/rendezvous/store.js'
 import { createConfigRegistry, deleteConfig, setConfig } from '../../src/server/config_registry.js'
 import { ControlPlane } from '../../src/server/control_plane.js'
+import { createEnrollmentStore, registerEnrollment } from '../../src/server/enrollment.js'
 import { BootstrapStore, signJwt, verifyJwt } from '../../src/server/identity.js'
 
 /**
@@ -500,6 +502,72 @@ describe('Identity flow end-to-end (HTTP)', () => {
       expect(unknown.status).toBe(401)
       const body = await unknown.json()
       expect(body.error).toBe('invalid bootstrap token')
+    })
+  })
+
+  describe('POST /v1/enrollments/bootstrap-config (no auth)', () => {
+    it('mints per-use bootstrap tokens and enforces max uses', async () => {
+      const clock = fakeClock(Date.parse('2026-05-11T12:00:00.000Z'))
+      await bootPlane({ clock, publicUrl: 'https://collectivus.example.com' })
+      const enrollmentStore = createEnrollmentStore({ path: path.join(dir, 'enrollments.json'), now: clock.now })
+      const joinCode = 'ACME7K9Q2P'
+      registerEnrollment(enrollmentStore, {
+        joinCodeHash: sha256Hex(joinCode),
+        gatewayId: 'acme-user',
+        ttlSeconds: 60,
+        maxUses: 2,
+      })
+      if (!plane) throw new Error('plane missing')
+      plane.enrollmentStore = enrollmentStore
+
+      const first = await fetch(`${baseUrl}/v1/enrollments/bootstrap-config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ join_code: joinCode }),
+      })
+      expect(first.status).toBe(200)
+      const firstBody = await first.json()
+      expect(firstBody.gateway_id).toBe('acme-user-1')
+      expect(firstBody.config.central_server.identity.bootstrap_token).toMatch(/^[0-9a-f]{64}$/)
+
+      const second = await fetch(`${baseUrl}/v1/enrollments/bootstrap-config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ join_code: joinCode }),
+      })
+      expect(second.status).toBe(200)
+      const secondBody = await second.json()
+      expect(secondBody.gateway_id).toBe('acme-user-2')
+
+      const exhausted = await fetch(`${baseUrl}/v1/enrollments/bootstrap-config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ join_code: joinCode }),
+      })
+      expect(exhausted.status).toBe(409)
+    })
+
+    it('rejects expired enrollment keys', async () => {
+      const clock = fakeClock(Date.parse('2026-05-11T12:00:00.000Z'))
+      await bootPlane({ clock })
+      const enrollmentStore = createEnrollmentStore({ path: path.join(dir, 'enrollments.json'), now: clock.now })
+      const joinCode = 'ACMEEXPIRE'
+      registerEnrollment(enrollmentStore, {
+        joinCodeHash: sha256Hex(joinCode),
+        gatewayId: 'acme-expire',
+        ttlSeconds: 1,
+        maxUses: 1,
+      })
+      if (!plane) throw new Error('plane missing')
+      plane.enrollmentStore = enrollmentStore
+      clock.advance(1000)
+
+      const expired = await fetch(`${baseUrl}/v1/enrollments/bootstrap-config`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ join_code: joinCode }),
+      })
+      expect(expired.status).toBe(410)
     })
   })
 })

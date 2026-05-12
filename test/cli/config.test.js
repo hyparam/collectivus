@@ -619,7 +619,7 @@ describe('runConfig', () => {
       )
     })
 
-    it('registers rendezvous invites with a token hash and env auth fallback', async () => {
+    it('registers rendezvous invites with a short join key, max uses, and env auth fallback', async () => {
       const m = makeHooks({ publicUrl: 'https://collectivus.internal:8788' })
       /** @type {Array<{ url: string, init: RequestInit | undefined }>} */
       const calls = []
@@ -628,6 +628,7 @@ describe('runConfig', () => {
           'bootstrap-token', 'issue', 'gw-rv',
           '--server-config', m.serverConfigPath,
           '--rendezvous', 'https://join.example',
+          '--max-uses', '3',
         ],
         {
           ...m.hooks,
@@ -642,7 +643,8 @@ describe('runConfig', () => {
         }
       )
       expect(code).toBe(0)
-      const token = m.stdout.value().trim()
+      const joinCode = m.stdout.value().trim()
+      expect(joinCode).toMatch(/^[A-Z2-9]{10}$/)
       expect(calls).toHaveLength(1)
       expect(calls[0].url).toBe('https://join.example/v1/rendezvous/invites')
       expect(calls[0].init?.method).toBe('POST')
@@ -652,13 +654,22 @@ describe('runConfig', () => {
       })
       const body = JSON.parse(String(calls[0].init?.body))
       expect(body).toEqual({
-        join_code_hash: sha256Hex(token),
+        kind: 'enterprise_enrollment',
+        join_code_hash: sha256Hex(joinCode),
         connect_url: 'https://collectivus.internal:8788',
         gateway_id: 'gw-rv',
         expires_at: expect.any(String),
+        max_uses: 3,
       })
-      expect(JSON.stringify(body)).not.toContain(token)
-      expect(m.stderr.value()).toContain(`npx collectivus join '${token}' --rendezvous 'https://join.example'`)
+      expect(JSON.stringify(body)).not.toContain(joinCode)
+      const enrollmentRows = JSON.parse(fs.readFileSync(path.join(dataDir, 'enrollments.json'), 'utf8'))
+      expect(enrollmentRows).toMatchObject([{
+        joinCodeHash: sha256Hex(joinCode),
+        gatewayId: 'gw-rv',
+        maxUses: 3,
+        usedCount: 0,
+      }])
+      expect(m.stderr.value()).toContain(`npx collectivus join '${joinCode}' --rendezvous 'https://join.example'`)
     })
 
     it('requires server.public_url when issuing with rendezvous', async () => {

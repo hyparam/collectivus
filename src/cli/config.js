@@ -9,7 +9,13 @@ import {
 import { GATEWAY_ID_MAX_LENGTH, GATEWAY_ID_PATTERN } from '../gateway_id.js'
 import { sha256Hex } from '../rendezvous/store.js'
 import { createConfigRegistry, deleteConfig, getConfig, listGateways, resolveConfigsDir, setConfig } from '../server/config_registry.js'
-import { BootstrapStore } from '../server/identity.js'
+import {
+  createEnrollmentStore,
+  generateEnrollmentCode,
+  registerEnrollment,
+  resolveEnrollmentStorePath,
+} from '../server/enrollment.js'
+import { BootstrapStore, DEFAULT_BOOTSTRAP_TTL_SECONDS } from '../server/identity.js'
 import { defaultPrompt } from './common.js'
 
 /**
@@ -25,6 +31,7 @@ const USAGE = `Usage:
   ctvs config delete <gateway-id> --server-config <path> [--yes]
   ctvs config bootstrap-token issue <gateway-id> --server-config <path> [--ttl-seconds <n>]
                                                [--rendezvous <url>] [--rendezvous-token <token>]
+                                               [--max-uses <n>]
   ctvs config bootstrap-token revoke <gateway-id> --server-config <path>
 
 Options:
@@ -33,9 +40,10 @@ Options:
   --file <path>            For \`set\`: path to the JSON config to register
   --yes, -y                For \`delete\`: skip the interactive confirmation
   --ttl-seconds <n>        For \`bootstrap-token issue\`: TTL override in seconds
-  --rendezvous <url>       For \`bootstrap-token issue\`: register the issued token with rendezvous
+  --rendezvous <url>       For \`bootstrap-token issue\`: register a short join key with rendezvous
   --rendezvous-token <t>   For \`bootstrap-token issue\`: rendezvous registration bearer token
                            (or COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN)
+  --max-uses <n>           For rendezvous issue: number of successful joins allowed (default 1)
   --help, -h               Show this help`
 
 const RENDEZVOUS_TOKEN_ENV = 'COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN'
@@ -214,6 +222,7 @@ function parseTokenIssue(argv) {
   /** @type {string | undefined} */ let serverConfig
   /** @type {string | undefined} */ let serverConfigEnv
   /** @type {number | undefined} */ let ttlSeconds
+  /** @type {number | undefined} */ let maxUses
   /** @type {string | undefined} */ let rendezvous
   /** @type {string | undefined} */ let rendezvousToken
   for (let i = 0; i < argv.length; i++) {
@@ -235,6 +244,16 @@ function parseTokenIssue(argv) {
         return parseError('--ttl-seconds must be a positive integer')
       }
       ttlSeconds = n
+      continue
+    }
+    if (arg === '--max-uses' || arg.startsWith('--max-uses=')) {
+      const value = arg === '--max-uses' ? argv[++i] : arg.slice('--max-uses='.length)
+      if (!value) return parseError('--max-uses requires a value')
+      const n = Number.parseInt(value, 10)
+      if (!Number.isInteger(n) || n <= 0 || String(n) !== value.trim()) {
+        return parseError('--max-uses must be a positive integer')
+      }
+      maxUses = n
       continue
     }
     if (arg === '--rendezvous' || arg.startsWith('--rendezvous=')) {
@@ -260,9 +279,11 @@ function parseTokenIssue(argv) {
   const sourceError = validateServerConfigSource(serverConfig, serverConfigEnv)
   if (sourceError) return sourceError
   if (rendezvousToken && !rendezvous) return parseError('--rendezvous-token requires --rendezvous')
+  if (maxUses !== undefined && !rendezvous) return parseError('--max-uses requires --rendezvous')
   /** @type {ParsedTokenIssue} */
   const result = withServerConfigSource({ kind: 'token-issue', gatewayId }, serverConfig, serverConfigEnv)
   if (ttlSeconds !== undefined) result.ttlSeconds = ttlSeconds
+  if (maxUses !== undefined) result.maxUses = maxUses
   if (rendezvous !== undefined) result.rendezvous = rendezvous
   if (rendezvousToken !== undefined) result.rendezvousToken = rendezvousToken
   return result
@@ -397,6 +418,7 @@ export async function runConfig(argv, hooks = {}) {
   const fetchFn = hooks.fetch ?? fetch
   const makeRegistry = hooks.makeRegistry ?? ((/** @type {ServerConfig} */ s) => createConfigRegistry({ configsDir: resolveConfigsDir(s) }))
   const makeBootstrapStore = hooks.makeBootstrapStore ?? ((/** @type {string} */ p) => new BootstrapStore({ path: p }))
+  const makeEnrollmentStore = hooks.makeEnrollmentStore ?? ((/** @type {string} */ p) => createEnrollmentStore({ path: p }))
 
   const parsed = parseConfigArgs(argv)
   if (parsed.kind === 'help') {
@@ -431,7 +453,7 @@ export async function runConfig(argv, hooks = {}) {
   case 'get': return runGet(parsed, server, { stdout, stderr, makeRegistry })
   case 'list': return runList(parsed, server, { stdout, makeRegistry })
   case 'delete': return runDelete(parsed, server, { stdout, stderr, isTTY, prompt: promptFn, makeRegistry })
-  case 'token-issue': return runTokenIssue(parsed, server, { stdout, stderr, env, fetchFn, makeBootstrapStore })
+  case 'token-issue': return runTokenIssue(parsed, server, { stdout, stderr, env, fetchFn, makeBootstrapStore, makeEnrollmentStore })
   case 'token-revoke': return runTokenRevoke(parsed, server, { stdout, makeBootstrapStore })
   default: {
     /** @type {never} */ const exhaustive = parsed
@@ -612,6 +634,7 @@ async function runDelete(parsed, server, ctx) {
  *   env: NodeJS.ProcessEnv,
  *   fetchFn: typeof fetch,
  *   makeBootstrapStore: (p: string) => BootstrapStore,
+ *   makeEnrollmentStore: (p: string) => import('../server/enrollment.d.ts').EnrollmentStore,
  * }} ctx
  * @returns {Promise<number>}
  */
@@ -638,8 +661,20 @@ async function runTokenIssue(parsed, server, ctx) {
     )
     return 1
   }
-  const store = ctx.makeBootstrapStore(storePath)
+
   const ttlSeconds = parsed.ttlSeconds ?? server.identity_issuer.bootstrap_ttl_seconds
+  if (parsed.rendezvous && rendezvousToken && server.public_url) {
+    return await runRendezvousTokenIssue({ ...parsed, rendezvous: parsed.rendezvous }, { ...server, public_url: server.public_url }, {
+      stdout: ctx.stdout,
+      stderr: ctx.stderr,
+      fetchFn: ctx.fetchFn,
+      makeEnrollmentStore: ctx.makeEnrollmentStore,
+      rendezvousToken,
+      ttlSeconds: ttlSeconds ?? DEFAULT_BOOTSTRAP_TTL_SECONDS,
+    })
+  }
+
+  const store = ctx.makeBootstrapStore(storePath)
   /** @type {{ token: string, expiresAt: number }} */
   let result
   try {
@@ -658,31 +693,70 @@ async function runTokenIssue(parsed, server, ctx) {
     `Token issued for ${parsed.gatewayId}; expires at ${formatExpiry(result.expiresAt)}.\n` +
     'Hand this token to the gateway in central_server.identity.bootstrap_token. It can be redeemed exactly once.\n'
   )
-  if (parsed.rendezvous && rendezvousToken && server.public_url) {
-    try {
-      await registerRendezvousInvite({
-        rendezvousUrl: parsed.rendezvous,
-        registrationToken: rendezvousToken,
-        joinCodeHash: sha256Hex(result.token),
-        connectUrl: server.public_url,
-        gatewayId: parsed.gatewayId,
-        expiresAt: result.expiresAt,
-        fetchFn: ctx.fetchFn,
-      })
-    } catch (err) {
-      ctx.stderr.write(`error: failed to register rendezvous invite: ${formatError(err)}\n`)
-      return 1
-    }
-    ctx.stderr.write(
-      'One-line gateway setup via rendezvous:\n' +
-      `  npx collectivus join ${shellSingleQuote(result.token)} --rendezvous ${shellSingleQuote(parsed.rendezvous)}\n`
-    )
-  } else if (server.public_url) {
+  if (server.public_url) {
     ctx.stderr.write(
       'One-line gateway setup:\n' +
       `  npx collectivus --config-endpoint='${bootstrapConfigUrl(server.public_url, result.token)}'\n`
     )
   }
+  return 0
+}
+
+/**
+ * @param {ParsedTokenIssue & { rendezvous: string }} parsed
+ * @param {ServerConfig & { public_url: string }} server
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   fetchFn: typeof fetch,
+ *   makeEnrollmentStore: (p: string) => import('../server/enrollment.d.ts').EnrollmentStore,
+ *   rendezvousToken: string,
+ *   ttlSeconds: number,
+ * }} ctx
+ * @returns {Promise<number>}
+ */
+async function runRendezvousTokenIssue(parsed, server, ctx) {
+  const joinCode = generateEnrollmentCode()
+  const maxUses = parsed.maxUses ?? 1
+  const enrollmentStore = ctx.makeEnrollmentStore(resolveEnrollmentStorePath(server))
+  /** @type {ReturnType<typeof registerEnrollment>} */
+  let record
+  try {
+    record = registerEnrollment(enrollmentStore, {
+      joinCodeHash: sha256Hex(joinCode),
+      gatewayId: parsed.gatewayId,
+      ttlSeconds: ctx.ttlSeconds,
+      maxUses,
+    })
+  } catch (err) {
+    ctx.stderr.write(`error: failed to register enrollment: ${formatError(err)}\n`)
+    return 1
+  }
+
+  try {
+    await registerRendezvousInvite({
+      kind: 'enterprise_enrollment',
+      rendezvousUrl: parsed.rendezvous,
+      registrationToken: ctx.rendezvousToken,
+      joinCodeHash: sha256Hex(joinCode),
+      connectUrl: server.public_url,
+      gatewayId: parsed.gatewayId,
+      expiresAt: record.expiresAt,
+      maxUses,
+      fetchFn: ctx.fetchFn,
+    })
+  } catch (err) {
+    ctx.stderr.write(`error: failed to register rendezvous invite: ${formatError(err)}\n`)
+    return 1
+  }
+
+  ctx.stdout.write(joinCode + '\n')
+  ctx.stderr.write(
+    `Rendezvous join key issued for ${parsed.gatewayId}; ` +
+    `expires at ${formatExpiry(record.expiresAt)}; max uses ${maxUses}.\n` +
+    'One-line gateway setup via rendezvous:\n' +
+    `  npx collectivus join ${shellSingleQuote(joinCode)} --rendezvous ${shellSingleQuote(parsed.rendezvous)}\n`
+  )
   return 0
 }
 
@@ -752,12 +826,14 @@ function isHttpUrl(value) {
 
 /**
  * @param {{
+ *   kind?: 'one_time_gateway' | 'enterprise_enrollment',
  *   rendezvousUrl: string,
  *   registrationToken: string,
  *   joinCodeHash: string,
  *   connectUrl: string,
  *   gatewayId: string,
  *   expiresAt: number,
+ *   maxUses?: number,
  *   fetchFn: typeof fetch,
  * }} args
  * @returns {Promise<void>}
@@ -770,10 +846,12 @@ async function registerRendezvousInvite(args) {
       'content-type': 'application/json',
     },
     body: JSON.stringify({
+      kind: args.kind ?? 'one_time_gateway',
       join_code_hash: args.joinCodeHash,
       connect_url: args.connectUrl,
       gateway_id: args.gatewayId,
       expires_at: formatExpiry(args.expiresAt),
+      ...args.maxUses !== undefined ? { max_uses: args.maxUses } : {},
     }),
   })
   if (!response.ok) {

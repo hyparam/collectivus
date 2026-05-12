@@ -2,6 +2,11 @@ import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
 import { createBearerAuth, getClaims } from './auth.js'
 import { createConfigRegistry, getConfig, resolveConfigsDir } from './config_registry.js'
+import {
+  createEnrollmentStore,
+  issueEnrollmentBootstrap,
+  resolveEnrollmentStorePath,
+} from './enrollment.js'
 import { clientIp, readJsonBody, writeError, writeJson, writeRetryAfterJson } from './http.js'
 import {
   BootstrapStore,
@@ -15,6 +20,7 @@ import { SlidingWindowRateLimiter } from './rate_limit.js'
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
  * @import { CollectivusConfig, ServerConfig } from '../types.js'
+ * @import { EnrollmentStore } from './enrollment.d.ts'
  * @import { ConfigRegistry } from './types.d.ts'
  */
 
@@ -39,7 +45,7 @@ const REFRESH_RATE_MAX = 1
 export class ControlPlane {
   /**
    * @param {ServerConfig} config
-   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, ingest?: Ingest, now?: () => number }} [opts]
+   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, enrollmentStore?: EnrollmentStore, ingest?: Ingest, now?: () => number }} [opts]
    *   Test hooks. `bootstrapStore` overrides the file-backed store derived
    *   from `config.identity_issuer.bootstrap_store_path`. `configRegistry`
    *   overrides the file-backed registry derived from `config.data_dir`.
@@ -72,6 +78,12 @@ export class ControlPlane {
         now: this.now,
       })
     }
+
+    /** @type {EnrollmentStore} */
+    this.enrollmentStore = opts.enrollmentStore ?? createEnrollmentStore({
+      path: resolveEnrollmentStorePath(config),
+      now: this.now,
+    })
 
     /** @type {ConfigRegistry} */
     this.configRegistry = opts.configRegistry ?? createConfigRegistry({
@@ -185,6 +197,12 @@ export class ControlPlane {
     if (path === '/v1/bootstrap-config') {
       if (method !== 'GET') return writeError(res, 405, 'method not allowed')
       this.handleBootstrapConfig(req, res, url)
+      return
+    }
+
+    if (path === '/v1/enrollments/bootstrap-config') {
+      if (method !== 'POST') return writeError(res, 405, 'method not allowed')
+      this.handleEnrollmentBootstrapConfig(req, res)
       return
     }
 
@@ -323,6 +341,86 @@ export class ControlPlane {
       return writeJson(res, 401, { error: 'invalid bootstrap token', reason: inspected.reason })
     }
 
+    this.writeBootstrapConfig(res, req, inspected.gatewayId, token)
+  }
+
+  /**
+   * Handle `POST /v1/enrollments/bootstrap-config`. The short join key is
+   * exchanged for a fresh one-shot bootstrap token inside Central so the
+   * human-friendly key never becomes the long-lived bootstrap credential.
+   *
+   * @param {IncomingMessage} req
+   * @param {ServerResponse} res
+   * @returns {void}
+   */
+  handleEnrollmentBootstrapConfig(req, res) {
+    const ip = clientIp(req)
+    const limit = this.bootstrapLimiter.check(ip)
+    if (!limit.allowed) return writeRateLimited(res, limit.retryAfterMs)
+
+    const bootstrapStore = this.bootstrapStore
+    if (!bootstrapStore) {
+      writeJson(res, 503, { error: 'bootstrap not provisioned' })
+      return
+    }
+
+    readJsonBody(req, MAX_BODY_BYTES).then((body) => {
+      if (body.error) return writeError(res, body.status, body.error)
+      const parsed = body.value
+      if (!isPlainObject(parsed) || typeof parsed.join_code !== 'string') {
+        return writeError(res, 400, 'join_code is required')
+      }
+      const joinCode = parsed.join_code
+      if (joinCode.length === 0) return writeError(res, 400, 'join_code is required')
+
+      const issued = issueEnrollmentBootstrap({
+        joinCode,
+        enrollmentStore: this.enrollmentStore,
+        bootstrapStore,
+      })
+      if (issued.ok === false) {
+        if (issued.reason === 'expired') return writeJson(res, 410, { error: 'enrollment expired' })
+        if (issued.reason === 'exhausted') return writeJson(res, 409, { error: 'enrollment use limit reached' })
+        return writeJson(res, 401, { error: 'invalid enrollment key' })
+      }
+
+      const config = this.bootstrapConfigForGateway(req, issued.gatewayId, issued.token)
+      if (config.ok === false) return writeError(res, 500, config.error)
+      writeJson(res, 200, {
+        config: config.value,
+        gateway_id: issued.gatewayId,
+        expires_at: issued.expiresAt,
+      }, {
+        'cache-control': 'no-store',
+      })
+    }).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err)
+      writeError(res, 500, `enrollment failed: ${msg}`)
+    })
+  }
+
+  /**
+   * @param {ServerResponse} res
+   * @param {IncomingMessage} req
+   * @param {string} gatewayId
+   * @param {string} token
+   * @returns {void}
+   */
+  writeBootstrapConfig(res, req, gatewayId, token) {
+    const config = this.bootstrapConfigForGateway(req, gatewayId, token)
+    if (config.ok === false) return writeError(res, 500, config.error)
+    writeJson(res, 200, config.value, {
+      'cache-control': 'no-store',
+    })
+  }
+
+  /**
+   * @param {IncomingMessage} req
+   * @param {string} gatewayId
+   * @param {string} token
+   * @returns {{ ok: true, value: CollectivusConfig } | { ok: false, error: string }}
+   */
+  bootstrapConfigForGateway(req, gatewayId, token) {
     const centralUrl = normalizeBaseUrl(this.config.public_url ?? requestBaseUrl(req))
     /** @type {CollectivusConfig} */
     let config = {
@@ -334,16 +432,14 @@ export class ControlPlane {
       },
     }
     try {
-      const entry = getConfig(this.configRegistry, inspected.gatewayId)
+      const entry = getConfig(this.configRegistry, gatewayId)
       if (entry) config = entry.config
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      return writeError(res, 500, `config registry error: ${msg}`)
+      return { ok: false, error: `config registry error: ${msg}` }
     }
 
-    writeJson(res, 200, withBootstrapToken(config, centralUrl, token), {
-      'cache-control': 'no-store',
-    })
+    return { ok: true, value: withBootstrapToken(config, centralUrl, token) }
   }
 
   /**

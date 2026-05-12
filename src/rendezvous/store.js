@@ -51,10 +51,12 @@ export function createRendezvousStore(opts) {
  * @returns {RendezvousInviteRecord}
  */
 export function registerInvite(store, input) {
+  const kind = validateKind(input.kind)
   const joinCodeHash = normalizeHash(input.join_code_hash)
   const connectUrl = normalizeConnectUrl(input.connect_url)
   const gatewayId = validateGatewayId(input.gateway_id)
   const expiresAt = validateFutureIsoTime(input.expires_at, store.now())
+  const maxUses = validateMaxUses(input.max_uses)
 
   if (input.display_name !== undefined && (typeof input.display_name !== 'string' || input.display_name.length === 0)) {
     throw new RendezvousStoreError('invalid_display_name', 'display_name must be a non-empty string when provided')
@@ -67,12 +69,14 @@ export function registerInvite(store, input) {
 
   /** @type {RendezvousInviteRecord} */
   const record = {
+    kind,
     join_code_hash: joinCodeHash,
     connect_url: connectUrl,
     gateway_id: gatewayId,
     expires_at: expiresAt,
     created_at: new Date(store.now()).toISOString(),
   }
+  if (maxUses !== undefined) record.max_uses = maxUses
   if (input.display_name !== undefined) record.display_name = input.display_name
   writeInvite(store, record)
   return record
@@ -201,20 +205,24 @@ function validateRecord(value) {
   if (!isPlainObject(value)) {
     throw new RendezvousStoreError('invalid_record', 'invite record must be an object')
   }
+  const kind = validateKind(value.kind)
   const joinCodeHash = normalizeHash(value.join_code_hash)
   const connectUrl = normalizeConnectUrl(value.connect_url)
   const gatewayId = validateGatewayId(value.gateway_id)
   const expiresAt = validateIsoTime(value.expires_at)
+  const maxUses = validateMaxUses(value.max_uses)
   const createdAt = validateIsoTime(value.created_at)
 
   /** @type {RendezvousInviteRecord} */
   const record = {
+    kind,
     join_code_hash: joinCodeHash,
     connect_url: connectUrl,
     gateway_id: gatewayId,
     expires_at: expiresAt,
     created_at: createdAt,
   }
+  if (maxUses !== undefined) record.max_uses = maxUses
   if (value.display_name !== undefined) {
     if (typeof value.display_name !== 'string' || value.display_name.length === 0) {
       throw new RendezvousStoreError('invalid_record', 'invite record display_name must be a non-empty string')
@@ -222,6 +230,18 @@ function validateRecord(value) {
     record.display_name = value.display_name
   }
   return record
+}
+
+/**
+ * @param {unknown} value
+ * @returns {'one_time_gateway' | 'enterprise_enrollment'}
+ */
+function validateKind(value) {
+  // Existing rendezvous files did not carry `kind`; those active invites are
+  // one-time gateway bootstrap-token invites and should survive this rollout.
+  if (value === undefined) return 'one_time_gateway'
+  if (value === 'one_time_gateway' || value === 'enterprise_enrollment') return value
+  throw new RendezvousStoreError('invalid_kind', 'kind must be one_time_gateway or enterprise_enrollment')
 }
 
 /**
@@ -264,6 +284,18 @@ function validateGatewayId(value) {
   }
   if (value.length > GATEWAY_ID_MAX_LENGTH || !GATEWAY_ID_PATTERN.test(value) || value === '.' || value === '..') {
     throw new RendezvousStoreError('invalid_gateway_id', 'gateway_id is invalid')
+  }
+  return value
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number | undefined}
+ */
+function validateMaxUses(value) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new RendezvousStoreError('invalid_max_uses', 'max_uses must be a positive integer')
   }
   return value
 }

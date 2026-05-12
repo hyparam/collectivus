@@ -247,7 +247,9 @@ For private Central server URLs that are hard to type or distribute, you can
 run a hosted-discovery rendezvous service. Rendezvous stores only
 `sha256(join_code)`, the Central server connect URL, gateway id, expiry, and
 optional display metadata; it never stores plaintext join codes, configs,
-telemetry, JWTs, issuer secrets, or bootstrap tokens.
+telemetry, JWTs, issuer secrets, or bootstrap tokens. With rendezvous, the
+short join key is not the bootstrap token; Central mints a fresh one-shot
+bootstrap token after the key is resolved.
 
 Start rendezvous with a shared registration bearer token:
 
@@ -267,27 +269,29 @@ docker run --rm -p 8789:8789 \
   rendezvous --listen 0.0.0.0:8789 --data-dir /data/rendezvous
 ```
 
-Then issue a normal Central server bootstrap token and register its hash with
-rendezvous in one step:
+Then issue a short join key and register its hash with rendezvous in one step:
 
 ```bash
-ctvs config bootstrap-token issue gw-prod-1 \
+ctvs config bootstrap-token issue acme-gateway \
   --server-config /etc/collectivus-server.json \
-  --rendezvous https://join.collectivus.example
+  --rendezvous https://join.collectivus.example \
+  --max-uses 25
 ```
 
 `--rendezvous-token` can be passed explicitly; otherwise the operator CLI reads
-`COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN`. The raw token still prints on
-stdout for scripts. Stderr prints the gateway command:
+`COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN`. The short join key prints on
+stdout for scripts. `--max-uses` defaults to 1; values greater than 1 enroll
+gateways as `<gateway-id>-1`, `<gateway-id>-2`, and so on. `--ttl-seconds`
+controls the key expiry. Stderr prints the gateway command:
 
 ```bash
 npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 ```
 
 When invoked through `npx`, `ctvs join` submits the join code in a POST body,
-resolves the Central server URL, fetches the registered gateway config from
-that server, runs `npm install -g collectivus`, exchanges the join token for a
-long-lived JWT, writes the authenticated Central-vended config to
+resolves the Central server URL, asks that server to mint a one-shot bootstrap
+token for this enrollment, runs `npm install -g collectivus`, exchanges the
+bootstrap token for a long-lived JWT, writes the authenticated Central-vended config to
 `~/.hyp/collectivus.json`, and installs the background daemon against that
 config. The JWT is persisted to `~/.hyp/collectivus/identity.json` before the
 daemon starts. If the vended config has a proxy listener, `join` also points

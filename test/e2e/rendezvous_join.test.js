@@ -53,6 +53,7 @@ describe('rendezvous join e2e', () => {
 
     central = new ControlPlane({
       control_plane_listen: '127.0.0.1:0',
+      data_dir: path.join(tmpDir, 'server-data'),
       identity_issuer: { secret: SECRET, bootstrap_store_path: bootstrapStorePath },
     }, { bootstrapStore: store })
     await central.start()
@@ -88,6 +89,7 @@ describe('rendezvous join e2e', () => {
       role: 'server',
       server: {
         control_plane_listen: '127.0.0.1:0',
+        data_dir: path.join(tmpDir, 'server-data'),
         public_url: centralUrl,
         identity_issuer: {
           secret: SECRET,
@@ -111,7 +113,7 @@ describe('rendezvous join e2e', () => {
       }
     )
     expect(issueCode).toBe(0)
-    expect(issueStdout.value().trim()).toMatch(/^[0-9a-f]{64}$/)
+    expect(issueStdout.value().trim()).toMatch(/^[A-Z2-9]{10}$/)
     expect(issueStderr.value()).toMatch(/npx collectivus join/)
 
     const joinStdout = memo()

@@ -1283,4 +1283,31 @@ describe('POST /v1/admin/invites (admin auth)', () => {
     const stored = fs.existsSync(enrollPath) ? JSON.parse(fs.readFileSync(enrollPath, 'utf8')) : []
     expect(stored).toEqual([])
   })
+
+  it('rate-limits POST /v1/admin/invites to 10 requests/min/IP before auth', async () => {
+    await bootAdminPlane()
+    // 10 unauthorized requests consume the window — each one is 401 but
+    // counts because the rate limiter runs BEFORE admin auth.
+    for (let i = 0; i < 10; i++) {
+      const r = await fetch(`${baseUrl}/v1/admin/invites`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${'X'.repeat(48)}` },
+      })
+      expect(r.status).toBe(401)
+    }
+    // The 11th request in the same window must be 429 with Retry-After,
+    // not 401 — the limit is checked ahead of the constant-time token
+    // compare so a hostile loop can't burn that path.
+    const limited = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${'X'.repeat(48)}` },
+    })
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).toMatch(/^\d+$/)
+    const body = await limited.json()
+    expect(body.error).toBe('rate limited')
+    expect(typeof body.retry_after_seconds).toBe('number')
+    // No rendezvous traffic — the request never reached the handler.
+    expect(fetchCalls).toEqual([])
+  })
 })

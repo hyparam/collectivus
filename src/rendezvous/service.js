@@ -180,21 +180,32 @@ export class RendezvousService {
     readJsonBody(req, MAX_BODY_BYTES).then((body) => {
       if (body.error) return writeNoStoreError(res, body.status, body.error)
       if (!isPlainObject(body.value)) return writeNoStoreError(res, 400, 'request body must be an object')
+      if (body.value.kind !== undefined && body.value.kind !== 'one_time_gateway' && body.value.kind !== 'enterprise_enrollment') {
+        return writeNoStoreError(res, 400, 'kind must be one_time_gateway or enterprise_enrollment')
+      }
       if (typeof body.value.join_code_hash !== 'string') return writeNoStoreError(res, 400, 'join_code_hash is required')
       if (typeof body.value.connect_url !== 'string') return writeNoStoreError(res, 400, 'connect_url is required')
       if (typeof body.value.gateway_id !== 'string') return writeNoStoreError(res, 400, 'gateway_id is required')
       if (typeof body.value.expires_at !== 'string') return writeNoStoreError(res, 400, 'expires_at is required')
+      if (
+        body.value.max_uses !== undefined &&
+        (typeof body.value.max_uses !== 'number' || !Number.isInteger(body.value.max_uses) || body.value.max_uses <= 0)
+      ) {
+        return writeNoStoreError(res, 400, 'max_uses must be a positive integer when provided')
+      }
       if (body.value.display_name !== undefined && typeof body.value.display_name !== 'string') {
         return writeNoStoreError(res, 400, 'display_name must be a string when provided')
       }
       try {
         /** @type {import('./types.d.ts').RegisterInviteInput} */
         const input = {
+          kind: body.value.kind === 'enterprise_enrollment' ? 'enterprise_enrollment' : 'one_time_gateway',
           join_code_hash: body.value.join_code_hash,
           connect_url: body.value.connect_url,
           gateway_id: body.value.gateway_id,
           expires_at: body.value.expires_at,
         }
+        if (typeof body.value.max_uses === 'number') input.max_uses = body.value.max_uses
         if (typeof body.value.display_name === 'string') input.display_name = body.value.display_name
         const record = registerInvite(this.store, input)
         writeNoStoreJson(res, 200, { ok: true, expires_at: record.expires_at })
@@ -219,13 +230,15 @@ export class RendezvousService {
       }
       try {
         const record = resolveInvite(this.store, body.value.join_code)
-        /** @type {Record<string, string>} */
+        /** @type {Record<string, string | number>} */
         const payload = {
+          kind: record.kind,
           connect_url: record.connect_url,
           gateway_id: record.gateway_id,
           expires_at: record.expires_at,
         }
         if (record.display_name !== undefined) payload.display_name = record.display_name
+        if (record.max_uses !== undefined) payload.max_uses = record.max_uses
         writeNoStoreJson(res, 200, payload)
       } catch (err) {
         writeStoreError(res, err)

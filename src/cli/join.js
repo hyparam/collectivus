@@ -96,17 +96,19 @@ export async function runJoin(argv, env, hooks = {}) {
     return 1
   }
 
-  /** @type {CollectivusConfig} */
-  let config
+  /** @type {{ config: CollectivusConfig, gatewayId: string }} */
+  let joined
   try {
-    config = await fetchJoinedGatewayConfig(opts.joinCode, resolved.connect_url, hooks.fetchFn ?? fetch)
+    joined = await fetchJoinedGatewayConfig(opts.joinCode, resolved, hooks.fetchFn ?? fetch)
   } catch (err) {
     stderr.write(`error: ${formatError(err)}\n`)
     return 1
   }
+  const config = joined.config
+  const resolvedInstall = { ...resolved, gateway_id: joined.gatewayId }
 
   if (isNpxCollectivusBinPath(binPath)) {
-    return installJoinedGateway(config, resolved, {
+    return installJoinedGateway(config, resolvedInstall, {
       stdout,
       stderr,
       fetchFn: hooks.fetchFn ?? fetch,
@@ -327,7 +329,7 @@ function withoutBootstrapToken(config) {
  * @param {string} joinCode
  * @param {string} rendezvousUrl
  * @param {typeof fetch} fetchFn
- * @returns {Promise<{ connect_url: string, gateway_id: string, expires_at: string, display_name?: string }>}
+ * @returns {Promise<{ kind: 'one_time_gateway' | 'enterprise_enrollment', connect_url: string, gateway_id: string, expires_at: string, display_name?: string, max_uses?: number }>}
  */
 export async function resolveJoinCode(joinCode, rendezvousUrl, fetchFn = fetch) {
   const url = joinUrl(rendezvousUrl, '/v1/rendezvous/resolve')
@@ -359,14 +361,18 @@ export async function resolveJoinCode(joinCode, rendezvousUrl, fetchFn = fetch) 
   if (typeof body.connect_url !== 'string' || !isHttpUrl(body.connect_url)) {
     throw new Error('rendezvous resolve failed: response missing http(s) connect_url')
   }
+  // Older rendezvous servers did not return `kind`; those join codes are
+  // one-time bootstrap-token invites.
+  const kind = body.kind === 'enterprise_enrollment' ? 'enterprise_enrollment' : 'one_time_gateway'
   if (typeof body.gateway_id !== 'string' || body.gateway_id.length === 0) {
     throw new Error('rendezvous resolve failed: response missing gateway_id')
   }
   if (typeof body.expires_at !== 'string' || !Number.isFinite(Date.parse(body.expires_at))) {
     throw new Error('rendezvous resolve failed: response missing expires_at')
   }
-  /** @type {{ connect_url: string, gateway_id: string, expires_at: string, display_name?: string }} */
+  /** @type {{ kind: 'one_time_gateway' | 'enterprise_enrollment', connect_url: string, gateway_id: string, expires_at: string, display_name?: string, max_uses?: number }} */
   const resolved = {
+    kind,
     connect_url: body.connect_url.replace(/\/+$/, ''),
     gateway_id: body.gateway_id,
     expires_at: new Date(Date.parse(body.expires_at)).toISOString(),
@@ -374,20 +380,27 @@ export async function resolveJoinCode(joinCode, rendezvousUrl, fetchFn = fetch) 
   if (typeof body.display_name === 'string' && body.display_name.length > 0) {
     resolved.display_name = body.display_name
   }
+  if (typeof body.max_uses === 'number' && Number.isInteger(body.max_uses) && body.max_uses > 0) {
+    resolved.max_uses = body.max_uses
+  }
   return resolved
 }
 
 /**
- * Fetch the Central server's bootstrap config without consuming the one-shot
- * join token, then overlay that token locally so first daemon start can
- * acquire identity even when the registered config keeps identity empty.
+ * Fetch the Central server's bootstrap config. Enterprise enrollments exchange
+ * the short key for a fresh bootstrap token; legacy one-time rendezvous keys
+ * are themselves the bootstrap token and use the existing GET endpoint.
  *
  * @param {string} joinCode
- * @param {string} centralUrl
+ * @param {{ kind: 'one_time_gateway' | 'enterprise_enrollment', connect_url: string, gateway_id: string }} resolved
  * @param {typeof fetch} fetchFn
- * @returns {Promise<CollectivusConfig>}
+ * @returns {Promise<{ config: CollectivusConfig, gatewayId: string }>}
  */
-async function fetchJoinedGatewayConfig(joinCode, centralUrl, fetchFn = fetch) {
+async function fetchJoinedGatewayConfig(joinCode, resolved, fetchFn = fetch) {
+  if (resolved.kind === 'enterprise_enrollment') {
+    return fetchEnrollmentGatewayConfig(joinCode, resolved.connect_url, fetchFn)
+  }
+  const centralUrl = resolved.connect_url
   const url = new URL(joinUrl(centralUrl, '/v1/bootstrap-config'))
   url.searchParams.set('token', joinCode)
 
@@ -419,7 +432,57 @@ async function fetchJoinedGatewayConfig(joinCode, centralUrl, fetchFn = fetch) {
   } catch (err) {
     throw new Error(`failed to fetch gateway config from ${centralUrl}: invalid config: ${formatError(err)}`)
   }
-  return /** @type {CollectivusConfig} */ (config)
+  return { config: /** @type {CollectivusConfig} */ (config), gatewayId: resolved.gateway_id }
+}
+
+/**
+ * @param {string} joinCode
+ * @param {string} centralUrl
+ * @param {typeof fetch} fetchFn
+ * @returns {Promise<{ config: CollectivusConfig, gatewayId: string }>}
+ */
+async function fetchEnrollmentGatewayConfig(joinCode, centralUrl, fetchFn) {
+  const url = joinUrl(centralUrl, '/v1/enrollments/bootstrap-config')
+  let response
+  try {
+    response = await fetchFn(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ join_code: joinCode }),
+    })
+  } catch (err) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: ${formatError(err)}`)
+  }
+
+  if (!response.ok) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: ${await readErrorDetail(response)}`)
+  }
+
+  /** @type {unknown} */
+  let body
+  try {
+    body = await response.json()
+  } catch (err) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: invalid JSON response: ${formatError(err)}`)
+  }
+  if (!isPlainObject(body)) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: response is not an object`)
+  }
+  if (typeof body.gateway_id !== 'string' || body.gateway_id.length === 0) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: response missing gateway_id`)
+  }
+  if (!isPlainObject(body.config)) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: response missing config`)
+  }
+  try {
+    validateCollectivusConfig(body.config)
+  } catch (err) {
+    throw new Error(`failed to fetch enrollment config from ${centralUrl}: invalid config: ${formatError(err)}`)
+  }
+  return {
+    config: /** @type {CollectivusConfig} */ (body.config),
+    gatewayId: body.gateway_id,
+  }
 }
 
 /**

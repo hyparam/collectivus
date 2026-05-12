@@ -108,9 +108,13 @@ aws ecs execute-command \
   --task "$TASK_ARN" \
   --container collectivus-central \
   --interactive \
-  --command "node bin/cli.js config bootstrap-token issue gw-prod-1 --server-config-env COLLECTIVUS_SERVER_CONFIG --rendezvous https://join.collectivus.example.com"
+  --command "node bin/cli.js config bootstrap-token issue acme-gateway --server-config-env COLLECTIVUS_SERVER_CONFIG --rendezvous https://join.collectivus.example.com --max-uses 25"
 ```
 
 The Central task also receives `COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN` from
 Secrets Manager, so `ctvs config bootstrap-token issue --rendezvous ...` can use
-the existing environment fallback.
+the existing environment fallback. With `--rendezvous`, the command prints a
+short join key instead of the underlying bootstrap token; each successful join
+mints its own one-shot bootstrap token inside Central. `--max-uses` controls how
+many gateways can enroll before the key is exhausted, and `--ttl-seconds`
+controls the key expiry.

@@ -243,18 +243,21 @@ volumes.
 Then issue a join code from the Central server host:
 
 ```bash
-collectivus config bootstrap-token issue gw-prod-1 --server-config server.json \
-  --rendezvous https://join.collectivus.example
+collectivus config bootstrap-token issue acme-gateway --server-config server.json \
+  --rendezvous https://join.collectivus.example \
+  --max-uses 25
 # prints:
 npx collectivus join <join-code> --rendezvous https://join.collectivus.example
 ```
 
-Rendezvous stores only the join-code hash and Central server connect metadata.
-When run through `npx`, the gateway resolves the join code, writes
-`~/.hyp/collectivus.json`, installs `collectivus` globally, installs the
-background daemon against that config, and attaches Claude Code when the vended
-config includes a proxy listener. V1 does not pin the Central URL, so use this
-only when gateway egress is private or constrained.
+Rendezvous stores only the join-code hash and Central server connect metadata;
+the short key is not the bootstrap token. Central mints a fresh one-shot
+bootstrap token after each successful join until `--max-uses` is exhausted or
+the `--ttl-seconds` expiry passes. When run through `npx`, the gateway resolves
+the join code, writes `~/.hyp/collectivus.json`, installs `collectivus`
+globally, installs the background daemon against that config, and attaches
+Claude Code when the vended config includes a proxy listener. V1 does not pin
+the Central URL, so use this only when gateway egress is private or constrained.
 
 See the [Config vending](../README.md#config-vending-multi-host-deployments)
 section of the README for the full operator workflow and the on-disk schema.

@@ -51,10 +51,12 @@ describe('RendezvousService HTTP API', () => {
         'content-type': 'application/json',
       },
       body: JSON.stringify({
+        kind: 'enterprise_enrollment',
         join_code_hash: sha256Hex(joinCode),
         connect_url: 'https://collectivus.internal:8788',
         gateway_id: 'gw-prod-1',
         expires_at: opts.expiresAt ?? '2999-01-01T00:00:00.000Z',
+        max_uses: 5,
         display_name: 'Acme prod',
       }),
     })
@@ -95,9 +97,11 @@ describe('RendezvousService HTTP API', () => {
     expect(resolved.headers.get('cache-control')).toBe('no-store')
     const resolvedBody = await resolved.json()
     expect(resolvedBody).toEqual({
+      kind: 'enterprise_enrollment',
       connect_url: 'https://collectivus.internal:8788',
       gateway_id: 'gw-prod-1',
       expires_at: '2999-01-01T00:00:00.000Z',
+      max_uses: 5,
       display_name: 'Acme prod',
     })
   })

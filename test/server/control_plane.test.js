@@ -1127,3 +1127,187 @@ describe('CLI lifecycle wiring', () => {
     expect(stderr.value()).not.toMatch(/drain exceeded/)
   })
 })
+
+describe('POST /v1/admin/invites (admin auth)', () => {
+  const ADMIN_TOKEN = 'A'.repeat(48)
+  const RDV_TOKEN = 'r'.repeat(40)
+  const RDV_URL = 'https://rdv.example.com'
+  const PUBLIC_URL = 'https://central.example.com'
+
+  /** @type {string} */
+  let dir
+  /** @type {ControlPlane | undefined} */
+  let plane
+  /** @type {string} */
+  let baseUrl
+  /** @type {Array<{ url: string, init: RequestInit }>} */
+  let fetchCalls
+
+  /**
+   * @param {{ ok?: boolean, status?: number, json?: unknown, throws?: Error, withAdmin?: boolean, withRendezvous?: boolean }} [opts]
+   */
+  async function bootAdminPlane(opts = {}) {
+    fetchCalls = []
+    /**
+     * @param {string | URL | Request} url
+     * @param {RequestInit} [init]
+     * @returns {Promise<any>}
+     */
+    async function fakeFetch(url, init) {
+      fetchCalls.push({ url: String(url), init: /** @type {RequestInit} */ (init) })
+      if (opts.throws) throw opts.throws
+      const ok = opts.ok ?? true
+      const status = opts.status ?? (ok ? 200 : 500)
+      return {
+        ok,
+        status,
+        statusText: ok ? 'OK' : 'Error',
+        json: () => Promise.resolve(opts.json ?? (ok ? {} : { error: 'rdv unavailable' })),
+      }
+    }
+    /** @type {ServerConfig} */
+    const cfg = {
+      control_plane_listen: '127.0.0.1:0',
+      identity_issuer: { secret: PLACEHOLDER_SECRET },
+    }
+    if (opts.withAdmin !== false) {
+      cfg.public_url = PUBLIC_URL
+      cfg.admin = { token: ADMIN_TOKEN }
+      cfg.enrollment = { gateway_prefix: 'team-frontend' }
+      if (opts.withRendezvous !== false) {
+        cfg.rendezvous = { url: RDV_URL, registration_token: RDV_TOKEN }
+      }
+    }
+    plane = new ControlPlane(cfg, {
+      enrollmentStore: createEnrollmentStore({ path: path.join(dir, 'enrollments.json') }),
+      fetch: fakeFetch,
+      env: {},
+    })
+    await plane.start()
+    const addr = plane.server?.address()
+    if (!addr || typeof addr === 'string') throw new Error('no address')
+    baseUrl = `http://127.0.0.1:${addr.port}`
+  }
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-cp-admin-'))
+  })
+
+  afterEach(async () => {
+    if (plane) await plane.stop()
+    plane = undefined
+    fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns 401 when the admin Bearer token is missing', async () => {
+    await bootAdminPlane()
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, { method: 'POST' })
+    expect(res.status).toBe(401)
+    expect(res.headers.get('www-authenticate')).toBe('Bearer')
+    expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('returns 401 with the wrong token (constant-time compare in admin_auth)', async () => {
+    await bootAdminPlane()
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${'X'.repeat(48)}` },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 200 with a valid admin token and a syntactically valid join command', async () => {
+    await bootAdminPlane()
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    const body = await res.json()
+    expect(typeof body.joinCode).toBe('string')
+    expect(body.joinCode.length).toBe(10)
+    expect(body.gatewayPrefix).toBe('team-frontend')
+    expect(body.maxUses).toBe(1)
+    expect(body.rendezvousUrl).toBe(RDV_URL)
+    // expiresAt is an ISO timestamp roughly 7d from now
+    const expiry = new Date(body.expiresAt).getTime()
+    expect(expiry - Date.now()).toBeGreaterThan(6 * 24 * 60 * 60 * 1000)
+    expect(expiry - Date.now()).toBeLessThan(8 * 24 * 60 * 60 * 1000)
+    // command must parse as `npx collectivus join '<code>' --rendezvous '<url>'`
+    expect(body.command).toMatch(
+      /^npx collectivus join '[A-Z0-9]{10}' --rendezvous 'https:\/\/rdv\.example\.com'$/
+    )
+
+    // Rendezvous was contacted exactly once with the bearer token
+    expect(fetchCalls).toHaveLength(1)
+    expect(fetchCalls[0].url).toBe(`${RDV_URL}/v1/rendezvous/invites`)
+    expect(/** @type {Record<string, string>} */ (fetchCalls[0].init.headers).authorization)
+      .toBe(`Bearer ${RDV_TOKEN}`)
+  })
+
+  it('returns 405 on non-POST methods', async () => {
+    await bootAdminPlane()
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    })
+    expect(res.status).toBe(405)
+  })
+
+  it('returns 404 when the server is not configured for admin (route hidden)', async () => {
+    await bootAdminPlane({ withAdmin: false })
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    })
+    expect(res.status).toBe(404)
+  })
+
+  it('returns 502 and rolls back the enrollment when rendezvous fails', async () => {
+    await bootAdminPlane({ ok: false, status: 503, json: { error: 'down' } })
+    const enrollPath = path.join(dir, 'enrollments.json')
+    const res = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(502)
+    const body = await res.json()
+    expect(body.error).toMatch(/rendezvous registration failed/)
+    expect(body.error).not.toContain(RDV_TOKEN)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+
+    /** @type {unknown[]} */
+    const stored = fs.existsSync(enrollPath) ? JSON.parse(fs.readFileSync(enrollPath, 'utf8')) : []
+    expect(stored).toEqual([])
+  })
+
+  it('rate-limits POST /v1/admin/invites to 10 requests/min/IP before auth', async () => {
+    await bootAdminPlane()
+    // 10 unauthorized requests consume the window — each one is 401 but
+    // counts because the rate limiter runs BEFORE admin auth.
+    for (let i = 0; i < 10; i++) {
+      const r = await fetch(`${baseUrl}/v1/admin/invites`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${'X'.repeat(48)}` },
+      })
+      expect(r.status).toBe(401)
+    }
+    // The 11th request in the same window must be 429 with Retry-After,
+    // not 401 — the limit is checked ahead of the constant-time token
+    // compare so a hostile loop can't burn that path.
+    const limited = await fetch(`${baseUrl}/v1/admin/invites`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${'X'.repeat(48)}` },
+    })
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('retry-after')).toMatch(/^\d+$/)
+    const body = await limited.json()
+    expect(body.error).toBe('rate limited')
+    expect(typeof body.retry_after_seconds).toBe('number')
+    // No rendezvous traffic — the request never reached the handler.
+    expect(fetchCalls).toEqual([])
+  })
+})

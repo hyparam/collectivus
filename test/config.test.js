@@ -846,6 +846,197 @@ describe('loadConfig - role / server / central_server', () => {
   })
 })
 
+describe('loadConfig - server.admin / enrollment / rendezvous', () => {
+  // 32+ chars to satisfy issuer-secret and admin-token minimums.
+  const SECRET = 'a'.repeat(40)
+  const ADMIN_TOKEN = 'A'.repeat(40)
+  const RENDEZVOUS_TOKEN = 'r'.repeat(48)
+
+  /**
+   * @param {Record<string, unknown>} [serverOverrides]
+   * @returns {{
+   *   version: 1,
+   *   role: 'server',
+   *   server: {
+   *     control_plane_listen: string,
+   *     public_url?: string,
+   *     identity_issuer: { secret: string },
+   *     admin?: Record<string, unknown>,
+   *     enrollment?: Record<string, unknown>,
+   *     rendezvous?: Record<string, unknown>,
+   *   },
+   * }}
+   */
+  function serverConfig(serverOverrides = {}) {
+    return {
+      version: 1,
+      role: 'server',
+      server: {
+        control_plane_listen: '0.0.0.0:9090',
+        public_url: 'https://collectivus.example.com',
+        identity_issuer: { secret: SECRET },
+        ...serverOverrides,
+      },
+    }
+  }
+
+  it('accepts server.admin with an inline token', () => {
+    const cfg = serverConfig({ admin: { token: ADMIN_TOKEN } })
+    const p = writeJson('admin-inline.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('accepts server.admin with token_env (env var resolved at runtime)', () => {
+    const cfg = serverConfig({ admin: { token_env: 'COLLECTIVUS_ADMIN_TOKEN' } })
+    const p = writeJson('admin-env.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects server.admin with both token and token_env', () => {
+    const cfg = serverConfig({
+      admin: { token: ADMIN_TOKEN, token_env: 'COLLECTIVUS_ADMIN_TOKEN' },
+    })
+    const p = writeJson('admin-both.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/admin.*exactly one of token or token_env/)
+  })
+
+  it('rejects server.admin missing both token and token_env', () => {
+    const cfg = serverConfig({ admin: {} })
+    const p = writeJson('admin-neither.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/admin.*exactly one of token or token_env/)
+  })
+
+  it('rejects server.admin.token shorter than 32 chars', () => {
+    const cfg = serverConfig({ admin: { token: 'a'.repeat(31) } })
+    const p = writeJson('admin-short.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/admin\/token.*at least 32/)
+  })
+
+  it('rejects server.admin without server.public_url', () => {
+    const cfg = serverConfig({ admin: { token: ADMIN_TOKEN } })
+    delete cfg.server.public_url
+    const p = writeJson('admin-no-public-url.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/public_url.*required when server\.admin/)
+  })
+
+  it('rejects unknown keys inside server.admin', () => {
+    const cfg = serverConfig({ admin: { token: ADMIN_TOKEN, scope: 'rw' } })
+    const p = writeJson('admin-typo.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/admin\/scope/)
+  })
+
+  it('accepts server.enrollment.gateway_prefix when it matches the gateway-id pattern', () => {
+    const cfg = serverConfig({ enrollment: { gateway_prefix: 'acme.eng-' } })
+    const p = writeJson('enrollment-ok.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects server.enrollment.gateway_prefix containing forbidden characters', () => {
+    const cfg = serverConfig({ enrollment: { gateway_prefix: 'bad/prefix' } })
+    const p = writeJson('enrollment-bad.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/enrollment\/gateway_prefix/)
+  })
+
+  it('rejects server.enrollment.gateway_prefix that starts with a dot', () => {
+    const cfg = serverConfig({ enrollment: { gateway_prefix: '.hidden' } })
+    const p = writeJson('enrollment-leading-dot.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/enrollment\/gateway_prefix/)
+  })
+
+  it('accepts an empty server.enrollment block', () => {
+    const cfg = serverConfig({ enrollment: {} })
+    const p = writeJson('enrollment-empty.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects unknown keys inside server.enrollment', () => {
+    const cfg = serverConfig({ enrollment: { gateway_prefix: 'acme', extra: true } })
+    const p = writeJson('enrollment-typo.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/enrollment\/extra/)
+  })
+
+  it('accepts server.rendezvous with inline url and inline token', () => {
+    const cfg = serverConfig({
+      rendezvous: {
+        url: 'https://rendezvous.example.com',
+        registration_token: RENDEZVOUS_TOKEN,
+      },
+    })
+    const p = writeJson('rdv-inline.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('accepts server.rendezvous with env-based url and token', () => {
+    const cfg = serverConfig({
+      rendezvous: {
+        url_env: 'COLLECTIVUS_RENDEZVOUS_URL',
+        registration_token_env: 'COLLECTIVUS_RENDEZVOUS_TOKEN',
+      },
+    })
+    const p = writeJson('rdv-env.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects server.rendezvous missing both url and url_env', () => {
+    const cfg = serverConfig({
+      rendezvous: { registration_token: RENDEZVOUS_TOKEN },
+    })
+    const p = writeJson('rdv-no-url.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/rendezvous.*exactly one of url or url_env/)
+  })
+
+  it('rejects server.rendezvous missing both registration_token and registration_token_env', () => {
+    const cfg = serverConfig({
+      rendezvous: { url: 'https://rendezvous.example.com' },
+    })
+    const p = writeJson('rdv-no-token.json', cfg)
+    expect(() => loadConfig(p)).toThrow(
+      /\/server\/rendezvous.*exactly one of registration_token or registration_token_env/
+    )
+  })
+
+  it('rejects server.rendezvous with both url and url_env', () => {
+    const cfg = serverConfig({
+      rendezvous: {
+        url: 'https://rendezvous.example.com',
+        url_env: 'COLLECTIVUS_RENDEZVOUS_URL',
+        registration_token: RENDEZVOUS_TOKEN,
+      },
+    })
+    const p = writeJson('rdv-both-url.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/rendezvous.*exactly one of url or url_env/)
+  })
+
+  it('rejects server.rendezvous.url that is not http(s)', () => {
+    const cfg = serverConfig({
+      rendezvous: {
+        url: 'ftp://rendezvous.example.com',
+        registration_token: RENDEZVOUS_TOKEN,
+      },
+    })
+    const p = writeJson('rdv-bad-url.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/rendezvous\/url.*http\(s\) URL/)
+  })
+
+  it('rejects unknown keys inside server.rendezvous', () => {
+    const cfg = serverConfig({
+      rendezvous: {
+        url: 'https://rendezvous.example.com',
+        registration_token: RENDEZVOUS_TOKEN,
+        strategy: 'rotate',
+      },
+    })
+    const p = writeJson('rdv-typo.json', cfg)
+    expect(() => loadConfig(p)).toThrow(/\/server\/rendezvous\/strategy/)
+  })
+
+  it('keeps existing server configs without admin/enrollment/rendezvous loading unchanged', () => {
+    const cfg = serverConfig()
+    const p = writeJson('server-no-admin.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+})
+
 describe('loadConfig - valid configs', () => {
   it('loads a version-only config (every section is optional)', () => {
     const cfg = { version: 1 }

@@ -5,6 +5,7 @@ import process from 'node:process'
 import { runWithConfig } from '../cli.js'
 import { defaultConfigPath, isNpxBinPath } from './common.js'
 import { validateCollectivusConfig } from '../config.js'
+import { IdentityClient } from '../gateway/identity.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
@@ -61,10 +62,12 @@ export function parseJoinArgs(argv) {
  *   binPath?: string,
  *   configPath?: string,
  *   logDir?: string,
+ *   settingsPath?: string,
  *   installGlobal?: () => Promise<boolean>,
  *   resolveGlobalBinPath?: () => Promise<string>,
  *   writeConfig?: (configPath: string, config: CollectivusConfig) => void,
  *   installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>,
+ *   attach?: InstallHooks['attach'],
  *   runInstall?: (argv: string[], hooks?: InstallHooks) => Promise<number>,
  * }} [hooks]
  * @returns {Promise<number>}
@@ -106,12 +109,16 @@ export async function runJoin(argv, env, hooks = {}) {
     return installJoinedGateway(config, resolved, {
       stdout,
       stderr,
+      fetchFn: hooks.fetchFn ?? fetch,
       configPath: hooks.configPath,
       logDir: hooks.logDir,
+      settingsPath: hooks.settingsPath,
+      identityPersistedPath: hooks.identityPersistedPath,
       installGlobal: hooks.installGlobal,
       resolveGlobalBinPath: hooks.resolveGlobalBinPath,
       writeConfig: hooks.writeConfig,
       installLaunchAgent: hooks.installLaunchAgent,
+      attach: hooks.attach,
       runInstall: hooks.runInstall,
     })
   }
@@ -130,12 +137,16 @@ export async function runJoin(argv, env, hooks = {}) {
  * @param {{
  *   stdout: { write: (s: string) => void },
  *   stderr: { write: (s: string) => void },
+ *   fetchFn: typeof fetch,
  *   configPath?: string,
  *   logDir?: string,
+ *   settingsPath?: string,
+ *   identityPersistedPath?: string,
  *   installGlobal?: () => Promise<boolean>,
  *   resolveGlobalBinPath?: () => Promise<string>,
  *   writeConfig?: (configPath: string, config: CollectivusConfig) => void,
  *   installLaunchAgent?: (opts: DaemonInstallOptions) => Promise<void>,
+ *   attach?: InstallHooks['attach'],
  *   runInstall?: (argv: string[], hooks?: InstallHooks) => Promise<number>,
  * }} opts
  * @returns {Promise<number>}
@@ -173,6 +184,18 @@ async function installJoinedGateway(config, resolved, opts) {
   }
 
   try {
+    config = await fetchAuthenticatedInstallConfig(config, {
+      fetchFn: opts.fetchFn,
+      stdout: opts.stdout,
+      stderr: opts.stderr,
+      identityPersistedPath: opts.identityPersistedPath,
+    })
+  } catch (err) {
+    opts.stderr.write(`error: failed to prepare gateway config: ${formatError(err)}\n`)
+    return 1
+  }
+
+  try {
     writeConfig(configPath, config)
   } catch (err) {
     opts.stderr.write(`error: failed to write gateway config: ${formatError(err)}\n`)
@@ -181,13 +204,123 @@ async function installJoinedGateway(config, resolved, opts) {
   opts.stdout.write(`✓ Gateway config written to ${configPath}\n`)
 
   const runInstallFn = opts.runInstall ?? (await import('./install.js')).runInstall
-  return runInstallFn(['--config', configPath, '--no'], {
+  return runInstallFn(['--config', configPath, '--yes'], {
     stdout: opts.stdout,
     stderr: opts.stderr,
     binPath: globalBinPath,
     ...opts.logDir !== undefined ? { logDir: opts.logDir } : {},
+    ...opts.settingsPath !== undefined ? { settingsPath: opts.settingsPath } : {},
     ...opts.installLaunchAgent !== undefined ? { installLaunchAgent: opts.installLaunchAgent } : {},
+    ...opts.attach !== undefined ? { attach: opts.attach } : {},
   })
+}
+
+/**
+ * Consume the one-shot bootstrap token during the npx install flow, then use
+ * the resulting JWT to fetch the canonical per-gateway config. This makes the
+ * persisted config match what Central vends at `/v1/config`; the daemon starts
+ * from the persisted identity instead of replaying the bootstrap token.
+ *
+ * If Central has not registered a per-gateway config yet, keep the starter
+ * config so the daemon can poll until one appears. The consumed token is
+ * removed from that fallback config because replaying it would fail.
+ *
+ * @param {CollectivusConfig} config
+ * @param {{
+ *   fetchFn: typeof fetch,
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   identityPersistedPath?: string,
+ * }} opts
+ * @returns {Promise<CollectivusConfig>}
+ */
+async function fetchAuthenticatedInstallConfig(config, opts) {
+  if (config.role !== 'gateway' || !config.central_server) return config
+  const bootstrapToken = config.central_server.identity.bootstrap_token
+  if (typeof bootstrapToken !== 'string' || bootstrapToken.length === 0) return config
+
+  const identityClient = new IdentityClient(config.central_server, {
+    fetchFn: opts.fetchFn,
+    ...opts.identityPersistedPath !== undefined ? { persistedPath: opts.identityPersistedPath } : {},
+  })
+  await identityClient.bootstrap()
+  const id = identityClient.identity?.gateway_id ?? 'gateway'
+  opts.stdout.write(`✓ Identity bootstrapped for ${id}\n`)
+
+  const jwt = await identityClient.getCurrentJwt()
+  const response = await fetchGatewayConfig(config.central_server.url, jwt, opts.fetchFn)
+  if (response.status === 404) {
+    opts.stderr.write(
+      'warning: Central server has no registered config for this gateway yet; ' +
+      'writing starter config and the daemon will keep polling\n'
+    )
+    return withoutBootstrapToken(config)
+  }
+  if (!response.ok) {
+    opts.stderr.write(
+      `warning: failed to fetch authenticated gateway config: ${await readErrorDetail(response)}; ` +
+      'writing starter config and the daemon will retry through config polling\n'
+    )
+    return withoutBootstrapToken(config)
+  }
+
+  /** @type {unknown} */
+  let body
+  try {
+    body = await response.json()
+  } catch (err) {
+    opts.stderr.write(
+      `warning: authenticated gateway config response was invalid JSON: ${formatError(err)}; ` +
+      'writing starter config and the daemon will retry through config polling\n'
+    )
+    return withoutBootstrapToken(config)
+  }
+  try {
+    validateCollectivusConfig(body)
+  } catch (err) {
+    opts.stderr.write(
+      `warning: authenticated gateway config failed validation: ${formatError(err)}; ` +
+      'writing starter config and the daemon will retry through config polling\n'
+    )
+    return withoutBootstrapToken(config)
+  }
+  opts.stdout.write('✓ Gateway config fetched from Central server\n')
+  return /** @type {CollectivusConfig} */ (body)
+}
+
+/**
+ * @param {string} centralUrl
+ * @param {string} jwt
+ * @param {typeof fetch} fetchFn
+ * @returns {Promise<Response>}
+ */
+async function fetchGatewayConfig(centralUrl, jwt, fetchFn) {
+  try {
+    return await fetchFn(joinUrl(centralUrl, '/v1/config'), {
+      method: 'GET',
+      headers: { authorization: `Bearer ${jwt}` },
+    })
+  } catch (err) {
+    throw new Error(`failed to reach Central server ${centralUrl}: ${formatError(err)}`)
+  }
+}
+
+/**
+ * @param {CollectivusConfig} config
+ * @returns {CollectivusConfig}
+ */
+function withoutBootstrapToken(config) {
+  const central = config.central_server
+  if (!central) return config
+  const identity = { ...central.identity }
+  delete identity.bootstrap_token
+  return {
+    ...config,
+    central_server: {
+      ...central,
+      identity,
+    },
+  }
 }
 
 /**

@@ -68,6 +68,93 @@ export function defaultConfigPath(homeDir) {
 }
 
 /**
+ * Path to the admin client config: `~/.hyp/collectivus/admin.json`.
+ *
+ * Stored beside the daemon log directory so a self-hosting operator can keep
+ * admin state alongside the running collectivus install. Used by
+ * `ctvs admin configure/status/clear` and read by `ctvs invite create` when
+ * talking to the central admin API.
+ *
+ * @param {string} [homeDir] Override for tests.
+ * @returns {string}
+ */
+export function adminConfigPath(homeDir) {
+  return path.join(homeDir ?? os.homedir(), '.hyp', 'collectivus', 'admin.json')
+}
+
+/**
+ * Read the admin config at `configPath`. Returns undefined when the file does
+ * not exist; throws on parse errors or other I/O failures so the caller can
+ * surface a clear message instead of pretending the operator has no config.
+ *
+ * @param {string} configPath
+ * @returns {{ central_url: string, admin_token: string } | undefined}
+ */
+export function readAdminConfig(configPath) {
+  /** @type {string} */
+  let raw
+  try {
+    raw = fs.readFileSync(configPath, 'utf8')
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return undefined
+    throw err
+  }
+  /** @type {unknown} */
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(`admin config ${configPath} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`admin config ${configPath} must be a JSON object`)
+  }
+  const obj = /** @type {Record<string, unknown>} */ (parsed)
+  if (typeof obj.central_url !== 'string' || obj.central_url.length === 0) {
+    throw new Error(`admin config ${configPath} is missing a string \`central_url\``)
+  }
+  if (typeof obj.admin_token !== 'string' || obj.admin_token.length === 0) {
+    throw new Error(`admin config ${configPath} is missing a string \`admin_token\``)
+  }
+  return { central_url: obj.central_url, admin_token: obj.admin_token }
+}
+
+/**
+ * Atomically write the admin config to `configPath`. Creates the parent
+ * directory and uses tmp+rename with mode 0600 (same pattern as
+ * `flushRecords` in `src/server/enrollment.js`).
+ *
+ * @param {string} configPath
+ * @param {{ central_url: string, admin_token: string }} config
+ * @returns {void}
+ */
+export function writeAdminConfig(configPath, config) {
+  const dir = path.dirname(configPath)
+  fs.mkdirSync(dir, { recursive: true })
+  const tmp = `${configPath}.tmp.${process.pid}.${Date.now()}`
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 })
+  fs.renameSync(tmp, configPath)
+}
+
+/**
+ * Remove the admin config file. Returns true when a file was unlinked, false
+ * when it was already absent. Errors other than ENOENT propagate so the
+ * caller can surface them.
+ *
+ * @param {string} configPath
+ * @returns {boolean}
+ */
+export function clearAdminConfig(configPath) {
+  try {
+    fs.unlinkSync(configPath)
+    return true
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return false
+    throw err
+  }
+}
+
+/**
  * Default LaunchAgent plist path: `~/Library/LaunchAgents/com.hyparam.collectivus.plist`.
  *
  * @param {string} [homeDir] Override for tests.

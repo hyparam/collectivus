@@ -344,6 +344,35 @@ export interface SkillsHooks {
   installSkill?: (opts: SkillInstallOptions) => Promise<SkillInstallResult>
 }
 
+// ---------- CLI admin ----------
+
+export interface AdminConfigFile {
+  central_url: string
+  admin_token: string
+}
+
+export type AdminParseResult =
+  | { kind: 'help' }
+  | { kind: 'configure-help' }
+  | { kind: 'status-help' }
+  | { kind: 'clear-help' }
+  | { kind: 'error', message: string, exitCode: number }
+  | { kind: 'configure', central: string, adminToken: string }
+  | { kind: 'status' }
+  | { kind: 'clear' }
+
+export interface AdminHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `~`. */
+  homeDir?: string
+  /** Override the resolved config path entirely (takes precedence over homeDir). */
+  configPath?: string
+  readAdminConfig?: (configPath: string) => AdminConfigFile | undefined
+  writeAdminConfig?: (configPath: string, config: AdminConfigFile) => void
+  clearAdminConfig?: (configPath: string) => boolean
+}
+
 export interface InstalledPlistFields {
   /** Path passed via `--config` in ProgramArguments. */
   configPath?: string

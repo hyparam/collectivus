@@ -1,5 +1,7 @@
 import http from 'node:http'
 import { readPackageVersion } from '../cli/common.js'
+import { createAdminAuth } from './admin_auth.js'
+import { createAdminInvitesHandler } from './admin_invites.js'
 import { createBearerAuth, getClaims } from './auth.js'
 import { createConfigRegistry, getConfig, resolveConfigsDir } from './config_registry.js'
 import {
@@ -16,6 +18,7 @@ import {
 } from './identity.js'
 import { Ingest, defaultSinkDir } from './ingest.js'
 import { SlidingWindowRateLimiter } from './rate_limit.js'
+import { resolveSecret } from './secret_resolver.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse } from 'node:http'
@@ -45,7 +48,16 @@ const REFRESH_RATE_MAX = 1
 export class ControlPlane {
   /**
    * @param {ServerConfig} config
-   * @param {{ bootstrapStore?: BootstrapStore, configRegistry?: ConfigRegistry, enrollmentStore?: EnrollmentStore, ingest?: Ingest, now?: () => number }} [opts]
+   * @param {{
+   *   bootstrapStore?: BootstrapStore,
+   *   configRegistry?: ConfigRegistry,
+   *   enrollmentStore?: EnrollmentStore,
+   *   ingest?: Ingest,
+   *   now?: () => number,
+   *   fetch?: typeof fetch,
+   *   env?: NodeJS.ProcessEnv,
+   *   logger?: (line: string) => void,
+   * }} [opts]
    *   Test hooks. `bootstrapStore` overrides the file-backed store derived
    *   from `config.identity_issuer.bootstrap_store_path`. `configRegistry`
    *   overrides the file-backed registry derived from `config.data_dir`.
@@ -53,7 +65,9 @@ export class ControlPlane {
    *   inject a temp sink directory). `now` is injected into the JWT signer/
    *   verifier, rate limiters, and the ingest endpoint so tests can drive
    *   token expiry, rate-limit windows, and the date used for daily-rolled
-   *   JSONL files.
+   *   JSONL files. `fetch`/`env`/`logger` are seams for the admin-invites
+   *   handler so tests can stub the rendezvous HTTP call, env-var lookups,
+   *   and the success log line.
    */
   constructor(config, opts = {}) {
     /** @type {ServerConfig} */
@@ -114,6 +128,34 @@ export class ControlPlane {
       retryAfterSeconds: config.ingest?.retry_after_seconds,
       maxBytesPerSecond: config.ingest?.max_bytes_per_second,
     })
+
+    const env = opts.env ?? process.env
+    /** @type {((req: IncomingMessage, res: ServerResponse) => boolean) | undefined} */
+    this.adminAuth = undefined
+    /** @type {((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined} */
+    this.adminInvitesHandler = undefined
+    if (config.admin) {
+      const adminToken = resolveSecret({
+        direct: config.admin.token,
+        envVar: config.admin.token_env,
+        env,
+        // Schema enforces 32-byte minimum on the inline form. Mirror that
+        // here for env-sourced tokens so a too-short env value fails fast
+        // at server startup rather than at first admin request.
+        minBytes: 32,
+        pointer: '/server/admin/token',
+        envVarPointer: '/server/admin/token_env',
+      })
+      this.adminAuth = createAdminAuth({ token: adminToken, now: this.now })
+      this.adminInvitesHandler = createAdminInvitesHandler({
+        config,
+        enrollmentStore: this.enrollmentStore,
+        fetchFn: opts.fetch,
+        now: this.now,
+        env,
+        logger: opts.logger,
+      })
+    }
   }
 
   /**
@@ -210,6 +252,25 @@ export class ControlPlane {
       if (method !== 'GET') return writeError(res, 405, 'method not allowed')
       if (!this.authorize(req, res)) return
       this.handleGetConfig(req, res)
+      return
+    }
+
+    if (path === '/v1/admin/invites') {
+      if (method !== 'POST') return writeError(res, 405, 'method not allowed')
+      const adminAuth = this.adminAuth
+      const handler = this.adminInvitesHandler
+      if (!adminAuth || !handler) {
+        // Admin not configured — surface 404 so the existence of the
+        // endpoint can't be probed without operator intent.
+        return writeError(res, 404, 'not found')
+      }
+      if (!adminAuth(req, res)) return
+      handler(req, res).catch((err) => {
+        if (!res.writableEnded) {
+          const msg = err instanceof Error ? err.message : String(err)
+          writeError(res, 500, `admin invite failed: ${msg}`)
+        }
+      })
       return
     }
 

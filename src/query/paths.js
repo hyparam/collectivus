@@ -187,12 +187,53 @@ export function expectedCachePartitions(paths, scope) {
   const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   /** @type {CachePartition[]} */
   const partitions = []
+  /** @type {Set<string>} */
+  const seen = new Set()
   for (const source of discoverSourceFiles(paths.recordingRoot, scope)) {
     for (const dataset of datasetsForSource(source, datasets)) {
-      partitions.push(cachePartitionForSource(paths.parquetDir, dataset, source))
+      const partition = cachePartitionForSource(paths.parquetDir, dataset, source)
+      seen.add(partitionKey(partition))
+      partitions.push(partition)
     }
   }
+  for (const meta of listCacheMetas(paths.parquetDir, scope)) {
+    const key = `${meta.dataset}\0${meta.gateway_id}\0${meta.date}`
+    if (seen.has(key)) continue
+    partitions.push(cachePartitionFromMeta(paths.parquetDir, meta))
+  }
   return partitions
+}
+
+/**
+ * @param {CachePartition} partition
+ * @returns {string}
+ */
+function partitionKey(partition) {
+  return `${partition.dataset}\0${partition.gatewayId}\0${partition.date}`
+}
+
+/**
+ * Synthesize a {@link CachePartition} from a recorded {@link CacheMeta}. Used
+ * for cache-only ("sealed") partitions whose source JSONL has been drained
+ * away — `jsonlPath`, `sourceSize`, and `sourceMtimeMs` reflect what the meta
+ * recorded at the moment of last refresh, not the current filesystem state.
+ *
+ * @param {string} parquetDir
+ * @param {CacheMeta} meta
+ * @returns {CachePartition}
+ */
+function cachePartitionFromMeta(parquetDir, meta) {
+  const parquetPath = parquetPathFor(parquetDir, meta.dataset, meta.gateway_id, meta.date)
+  return {
+    dataset: meta.dataset,
+    gatewayId: meta.gateway_id,
+    date: meta.date,
+    jsonlPath: meta.source_path,
+    sourceSize: meta.source_size,
+    sourceMtimeMs: meta.source_mtime_ms,
+    parquetPath,
+    metaPath: metaPathForParquet(parquetPath),
+  }
 }
 
 /**
@@ -211,9 +252,31 @@ export function inspectCachePartition(partition) {
   if (!meta) {
     return { partition, status: 'stale', reason: 'metadata sidecar is missing or invalid' }
   }
+  // Sealed partition: the source JSONL was drained after the cache was
+  // written. The size/mtime checks can't apply to a missing file, so trust
+  // the internally-consistent cache (schema/dataset/gateway/date still
+  // verified via sealedIdentityReason).
+  if (!isFile(partition.jsonlPath)) {
+    const reason = sealedIdentityReason(partition, meta)
+    if (reason) return { partition, status: 'stale', meta, reason }
+    return { partition, status: 'fresh', meta }
+  }
   const reason = staleReason(partition, meta)
   if (reason) return { partition, status: 'stale', meta, reason }
   return { partition, status: 'fresh', meta }
+}
+
+/**
+ * Identity checks that apply regardless of whether the source still exists.
+ * @param {CachePartition} partition
+ * @param {CacheMeta} meta
+ * @returns {string | undefined}
+ */
+function sealedIdentityReason(partition, meta) {
+  if (meta.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION) return 'cache schema version changed'
+  if (meta.dataset !== partition.dataset) return 'metadata dataset does not match partition'
+  if (meta.gateway_id !== partition.gatewayId) return 'metadata gateway_id does not match partition'
+  if (meta.date !== partition.date) return 'metadata date does not match partition'
 }
 
 /**

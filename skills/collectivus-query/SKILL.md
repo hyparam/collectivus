@@ -11,7 +11,10 @@ Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL r
 
 1. Run `ctvs query doctor` or `ctvs query status` first to verify the recording root and cache state.
 2. If the command cannot find the intended config, discover the service config once with `ctvs status`, a LaunchAgent/systemd unit, or the user, then reuse `--config <path>` only for that setup.
-3. If cache data is missing or stale, run the exact refresh command printed by the CLI, or rerun the target query with `--refresh always`.
+3. Cache freshness is handled asymmetrically:
+   - **Stale partitions are queried by default** and the CLI prints a `warning: querying stale data; …` line to stderr. Read stderr alongside stdout, and surface any stale warning to the user so they know the data may be outdated (and can rerun with `--refresh always` to update).
+   - **Missing partitions still error.** Run the exact `ctvs query refresh …` command the CLI prints, or rerun the target query with `--refresh always`.
+   - Pass `--strict-freshness` only when the user explicitly needs the pre-1.7 strict mode (e.g., scheduled checks that must never read stale data); it turns stale partitions back into a hard error.
 4. Prefer structured output for analysis: use `--format json` for follow-up reasoning, `--format markdown` when showing a table to the user, and `--limit` to keep output bounded.
 5. Use high-level query commands before custom SQL. Switch to `ctvs query sql` only when the built-in commands cannot answer the question.
 
@@ -33,7 +36,8 @@ ctvs query errors --since 24h --format json
 
 ## Guardrails
 
-- Do not assume the cache auto-refreshes. Query commands default to `--refresh never`.
+- Do not assume the cache auto-refreshes. Query commands default to `--refresh never`, and stale partitions return data with a stderr warning rather than refreshing themselves.
+- Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated Parquet, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
 - Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_exchanges`, and `proxy_stream_events`.

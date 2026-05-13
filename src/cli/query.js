@@ -61,7 +61,10 @@ Shared options:
   --service <name>               Restrict serviceName for OTLP datasets
   --limit <n>                    Max rows to render (default: 100, max: 1000)
   --format <fmt>                 table, json, jsonl, markdown
-  --refresh <mode>               never or always (default: never)
+  --refresh <mode>               never or always (default: never).
+                                 Stale partitions query with a stderr warning;
+                                 missing partitions always error.
+  --strict-freshness             Treat stale partitions as errors (pre-1.7 behavior)
   --help, -h                     Show this help`
 
 const DEFAULT_LIMIT = 100

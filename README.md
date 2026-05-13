@@ -526,9 +526,26 @@ ctvs query sql "select serviceName, count(*) as logs from logs group by serviceN
 
 Cache files are written under
 `<recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet`
-with `data.parquet.meta.json` sidecars. If a command needs missing or stale
-cache data, it exits with the exact `ctvs query refresh ...` command to run.
-Use `--refresh always` when you want a query command to refresh first.
+with `data.parquet.meta.json` sidecars.
+
+Freshness is treated asymmetrically (since v1.7.0):
+
+| Partition state | Behavior |
+| --- | --- |
+| `fresh` | Query proceeds silently. |
+| `stale` (Parquet exists, may be outdated) | Query proceeds; a `warning: querying stale data; …` line is written to stderr. Stdout is unchanged. |
+| `missing` (no Parquet at all) | Query exits with the exact `ctvs query refresh …` command to run. |
+
+Use `--refresh always` to force a refresh before the query runs. Use
+`--strict-freshness` to restore the pre-1.7 behavior where stale partitions
+are a hard error (useful in CI / scheduled jobs that must never read
+outdated data).
+
+> **Migration note (v1.7.0).** Stale partitions no longer exit non-zero
+> by default — scripts that depended on that exit code must add
+> `--strict-freshness`. Stdout formats (table, json, jsonl, markdown) are
+> unchanged; the new warning is written only to stderr. `missing`
+> partitions still error.
 
 Logical datasets are `logs`, `traces`, `metrics`, `proxy_exchanges`, and
 `proxy_stream_events`. `ctvs query schema <dataset>` prints the static schema,

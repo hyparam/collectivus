@@ -6,7 +6,15 @@
 <recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet
 ```
 
-The cache is explicit. Query commands do not refresh it unless `--refresh always` is passed. When cache data is missing or stale, the CLI exits with the exact `ctvs query refresh ...` command to run.
+The cache is explicit. Query commands do not refresh it unless `--refresh always` is passed.
+
+Freshness is asymmetric (since v1.7.0):
+
+- `fresh` — query proceeds silently.
+- `stale` (Parquet exists but may be outdated) — query proceeds and writes a `warning: querying stale data; N partition(s) outdated [...] — run '...' to update` line to stderr. Stdout is unchanged.
+- `missing` (no Parquet at all) — query exits with the exact `ctvs query refresh ...` command to run.
+
+Pass `--strict-freshness` to restore the pre-1.7 behavior where stale partitions are a hard error.
 
 Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL collector was installed with another config, discover it once with `ctvs status` or the service definition, then add `--config <path>` to the examples below.
 
@@ -22,6 +30,7 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `--limit <n>`: Maximum rows to render. Default `100`, maximum `1000`.
 - `--format <fmt>`: `table`, `json`, `jsonl`, or `markdown`.
 - `--refresh <mode>`: `never` or `always`. Default `never`.
+- `--strict-freshness`: Treat stale partitions as a hard error (pre-1.7 behavior). Off by default.
 
 ## Commands
 

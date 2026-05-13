@@ -217,7 +217,7 @@ describe('ctvs query', function() {
     expect(doctorOut.value()).toMatch(/cache_freshness\s+ok/)
   })
 
-  it('detects staleness when a drained source reappears with a different size', async function() {
+  it('warns when a drained source reappears with a different size', async function() {
     writeAllSignals()
     expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
@@ -228,7 +228,7 @@ describe('ctvs query', function() {
       stdout: memo(), stderr: memo(),
     })).toBe(0)
 
-    // Source reappears with different content — staleness should fire again.
+    // Source reappears with different content — staleness should be reported.
     writeJsonl('gw1', 'logs', '2026-05-11', [
       { serviceName: 'svc-a', timestamp: '2026-05-11T10:00:00.000Z', body: 'different', resource: {}, scope: { attributes: {} }, attributes: {} },
       { serviceName: 'svc-b', timestamp: '2026-05-11T10:00:01.000Z', body: 'second', resource: {}, scope: { attributes: {} }, attributes: {} },
@@ -236,7 +236,9 @@ describe('ctvs query', function() {
     const stdout = memo()
     const stderr = memo()
     const code = await runQuery(['sql', 'select count(*) as n from logs', '--config', configPath], { stdout, stderr })
-    expect(code).toBe(1)
+    expect(code).toBe(0)
+    expect(stdout.value()).toMatch(/\b1\b/)
+    expect(stderr.value()).toMatch(/warning: querying stale data/)
     expect(stderr.value()).toMatch(/source size changed|source mtime changed/)
   })
 

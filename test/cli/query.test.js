@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runQuery } from '../../src/cli/query.js'
+import { parseQueryArgs, runQuery } from '../../src/cli/query.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -196,5 +196,170 @@ describe('ctvs query', function() {
     const schema = JSON.parse(schemaOut.value())
     expect(schema.map((column) => column.name)).toContain('gateway_id')
     expect(schema.map((column) => column.name)).toContain('date')
+  })
+})
+
+describe('ctvs query freshness gate', function() {
+  describe('parseQueryArgs --strict-freshness', function() {
+    it('defaults strictFreshness to false', function() {
+      const parsed = parseQueryArgs([])
+      expect(parsed.error).toBeUndefined()
+      expect(parsed.strictFreshness).toBe(false)
+    })
+
+    it('sets strictFreshness=true when --strict-freshness is passed', function() {
+      const parsed = parseQueryArgs(['logs', '--strict-freshness'])
+      expect(parsed.error).toBeUndefined()
+      expect(parsed.strictFreshness).toBe(true)
+    })
+
+    it('treats --strict-freshness as a boolean flag (does not consume the next argv)', function() {
+      const parsed = parseQueryArgs(['--strict-freshness', '--config', '/tmp/cfg.json'])
+      expect(parsed.error).toBeUndefined()
+      expect(parsed.strictFreshness).toBe(true)
+      expect(parsed.configPath).toBe('/tmp/cfg.json')
+    })
+  })
+
+  /**
+   * @param {string} body
+   * @returns {Record<string, unknown>}
+   */
+  function logRow(body) {
+    return {
+      serviceName: 'svc-a',
+      timestamp: '2026-05-11T10:00:00.000Z',
+      severityNumber: 9,
+      severityText: 'INFO',
+      body,
+      resource: {},
+      scope: { attributes: {} },
+      attributes: {},
+    }
+  }
+
+  /**
+   * Write JSONL, refresh into parquet+meta, then mutate JSONL so its size
+   * differs from the recorded source_size — making the logs partition stale.
+   * @returns {Promise<void>}
+   */
+  async function makeStaleLogs() {
+    writeJsonl('gw1', 'logs', '2026-05-11', [logRow('a')])
+    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    writeJsonl('gw1', 'logs', '2026-05-11', [logRow('a'), logRow('bb-longer-body')])
+  }
+
+  describe('ensureCacheReady (via runQuery)', function() {
+    it('fresh cache → query runs with empty stderr', async function() {
+      writeJsonl('gw1', 'logs', '2026-05-11', [logRow('hi')])
+      expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+
+      const stdout = memo()
+      const stderr = memo()
+      const code = await runQuery(['logs', '--config', configPath], { stdout, stderr })
+      expect(code).toBe(0)
+      expect(stderr.value()).toBe('')
+      expect(stdout.value()).toMatch(/\bhi\b/)
+    })
+
+    it('stale cache, default → query runs and stderr warning is emitted', async function() {
+      await makeStaleLogs()
+      const stdout = memo()
+      const stderr = memo()
+      const code = await runQuery(['logs', '--config', configPath], { stdout, stderr })
+      expect(code).toBe(0)
+      expect(stdout.value()).toMatch(/\ba\b/)
+      // Warning shape from co-g835 spec.
+      expect(stderr.value()).toMatch(/^warning: querying stale data; 1 partition\(s\) outdated \[logs\/gw1\/2026-05-11/)
+      expect(stderr.value()).toMatch(/run 'ctvs query refresh --config /)
+    })
+
+    it('stale cache + --strict-freshness → exit 1, error message, empty stdout', async function() {
+      await makeStaleLogs()
+      const stdout = memo()
+      const stderr = memo()
+      const code = await runQuery(['logs', '--config', configPath, '--strict-freshness'], { stdout, stderr })
+      expect(code).toBe(1)
+      expect(stdout.value()).toBe('')
+      expect(stderr.value()).toMatch(/^error: query cache is stale for logs\/gw1\/2026-05-11/)
+      expect(stderr.value()).toMatch(/--strict-freshness set/)
+      expect(stderr.value()).toMatch(/Run: ctvs query refresh --config /)
+    })
+
+    it('missing cache → exit 1 regardless of --strict-freshness', async function() {
+      writeJsonl('gw1', 'logs', '2026-05-11', [logRow('hi')])
+
+      const defaultStdout = memo()
+      const defaultStderr = memo()
+      expect(await runQuery(['logs', '--config', configPath], { stdout: defaultStdout, stderr: defaultStderr })).toBe(1)
+      expect(defaultStdout.value()).toBe('')
+      expect(defaultStderr.value()).toMatch(/error: query cache is missing for logs\/gw1\/2026-05-11/)
+
+      const strictStdout = memo()
+      const strictStderr = memo()
+      expect(await runQuery(['logs', '--config', configPath, '--strict-freshness'], { stdout: strictStdout, stderr: strictStderr })).toBe(1)
+      expect(strictStdout.value()).toBe('')
+      expect(strictStderr.value()).toMatch(/error: query cache is missing for logs\/gw1\/2026-05-11/)
+      // Missing path stays the "missing" error — --strict-freshness never converts it to a "stale" message.
+      expect(strictStderr.value()).not.toMatch(/--strict-freshness set/)
+    })
+
+    it('--refresh always + stale source → refresh succeeds, no stale warning', async function() {
+      await makeStaleLogs()
+      const stdout = memo()
+      const stderr = memo()
+      const code = await runQuery(['logs', '--config', configPath, '--refresh', 'always'], { stdout, stderr })
+      expect(code).toBe(0)
+      expect(stderr.value()).toBe('')
+      // The refreshed cache now contains the appended row, proving the source was re-read.
+      expect(stdout.value()).toMatch(/bb-longer-body/)
+    })
+  })
+
+  describe('warning stdout/stderr separation across --format modes', function() {
+    /** @type {('table' | 'json' | 'jsonl' | 'markdown')[]} */
+    const formats = ['table', 'json', 'jsonl', 'markdown']
+    for (const format of formats) {
+      it(`${format}: warning lands on stderr; stdout is unchanged by the warning`, async function() {
+        await makeStaleLogs()
+        const stdout = memo()
+        const stderr = memo()
+        const code = await runQuery(['logs', '--config', configPath, '--format', format], { stdout, stderr })
+        expect(code).toBe(0)
+
+        // Warning on stderr.
+        expect(stderr.value()).toMatch(/warning: querying stale data/)
+        // Warning never bleeds into stdout.
+        expect(stdout.value()).not.toMatch(/warning:/)
+
+        // Format-specific stdout shape (proves the warning didn't corrupt the leading bytes).
+        switch (format) {
+        case 'table':
+          // Column header row appears at the start of stdout.
+          expect(stdout.value()).toMatch(/^gateway_id\s+date\s+timestamp/)
+          break
+        case 'json': {
+          const rows = JSON.parse(stdout.value())
+          expect(Array.isArray(rows)).toBe(true)
+          // Cache still holds the single pre-mutation row.
+          expect(rows).toHaveLength(1)
+          expect(rows[0]).toMatchObject({ gateway_id: 'gw1', body: 'a' })
+          break
+        }
+        case 'jsonl': {
+          const lines = stdout.value().trimEnd().split('\n').filter(Boolean)
+          expect(lines).toHaveLength(1)
+          for (const line of lines) {
+            const row = JSON.parse(line)
+            expect(row).toMatchObject({ gateway_id: 'gw1' })
+          }
+          break
+        }
+        case 'markdown':
+          expect(stdout.value().startsWith('| gateway_id |')).toBe(true)
+          break
+        }
+      })
+    }
   })
 })

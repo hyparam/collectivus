@@ -12,7 +12,6 @@ import {
 import {
   discoverSourceFiles,
   expectedCachePartitions,
-  hasUnfreshPartitions,
   inspectCachePartitions,
   resolveQueryPaths,
 } from '../query/paths.js'
@@ -177,6 +176,7 @@ export async function runQuery(argv, hooks = {}) {
  *   format: QueryFormat,
  *   refresh: QueryRefreshMode,
  *   force: boolean,
+ *   strictFreshness: boolean,
  *   error?: string,
  * }}
  */
@@ -190,11 +190,13 @@ export function parseQueryArgs(argv) {
     format: 'table',
     refresh: 'never',
     force: false,
+    strictFreshness: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') { out.help = true; return out }
     if (arg === '--force') { out.force = true; continue }
+    if (arg === '--strict-freshness') { out.strictFreshness = true; continue }
     /**
      * @param {string} name
      * @returns {string | undefined}
@@ -716,6 +718,9 @@ async function executePrepared(paths, parsed, stdout, stderr, datasets, statemen
     stderr.write(ready.message + '\n')
     return 1
   }
+  if (ready.warnings) {
+    for (const warning of ready.warnings) stderr.write(warning + '\n')
+  }
   const result = await executeLogicalSql({ paths, scope, datasets, statement })
   stdout.write(renderResult(result, parsed.format))
   return 0
@@ -725,7 +730,7 @@ async function executePrepared(paths, parsed, stdout, stderr, datasets, statemen
  * @param {QueryPaths} paths
  * @param {QueryScope} scope
  * @param {ReturnType<typeof parseQueryArgs>} parsed
- * @returns {Promise<{ ok: true } | { ok: false, message: string }>}
+ * @returns {Promise<{ ok: true, warnings?: string[] } | { ok: false, message: string }>}
  */
 async function ensureCacheReady(paths, scope, parsed) {
   if (!paths.parquetEnabled || !paths.parquetDir) {
@@ -738,16 +743,36 @@ async function ensureCacheReady(paths, scope, parsed) {
     }
   }
   const states = inspectCachePartitions(expectedCachePartitions(paths, scope))
-  if (!hasUnfreshPartitions(states)) return { ok: true }
-  const bad = states.filter((state) => state.status !== 'fresh')
-  const first = bad[0]
-  const detail = first
-    ? `${first.partition.dataset}/${first.partition.gatewayId}/${first.partition.date}: ${first.status}${first.reason ? ` (${first.reason})` : ''}`
-    : 'cache is missing or stale'
-  return {
-    ok: false,
-    message: `error: query cache is missing or stale for ${detail}. Run: ${refreshCommand(parsed)}`,
+  const missing = states.filter((state) => state.status === 'missing')
+  const stale = states.filter((state) => state.status === 'stale')
+
+  if (missing.length > 0) {
+    const first = missing[0]
+    const detail = `${first.partition.dataset}/${first.partition.gatewayId}/${first.partition.date}: missing${first.reason ? ` (${first.reason})` : ''}`
+    return {
+      ok: false,
+      message: `error: query cache is missing for ${detail}. Run: ${refreshCommand(parsed)}`,
+    }
   }
+
+  if (stale.length > 0) {
+    if (parsed.strictFreshness) {
+      const first = stale[0]
+      const detail = `${first.partition.dataset}/${first.partition.gatewayId}/${first.partition.date}: stale${first.reason ? ` (${first.reason})` : ''}`
+      return {
+        ok: false,
+        message: `error: query cache is stale for ${detail} (--strict-freshness set). Run: ${refreshCommand(parsed)}`,
+      }
+    }
+    const summary = stale.slice(0, 3).map((state) => `${state.partition.dataset}/${state.partition.gatewayId}/${state.partition.date}${state.reason ? ` (${state.reason})` : ''}`).join(', ')
+    const more = stale.length > 3 ? `, +${stale.length - 3} more` : ''
+    return {
+      ok: true,
+      warnings: [`warning: querying stale data; ${stale.length} partition(s) outdated [${summary}${more}] — run '${refreshCommand(parsed)}' to update`],
+    }
+  }
+
+  return { ok: true }
 }
 
 /**

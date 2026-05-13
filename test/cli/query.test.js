@@ -142,7 +142,7 @@ describe('ctvs query', function() {
     const code = await runQuery(['logs', '--config', configPath], { stdout, stderr })
     expect(code).toBe(1)
     expect(stdout.value()).toBe('')
-    expect(stderr.value()).toMatch(/query cache is missing or stale/)
+    expect(stderr.value()).toMatch(/query cache is missing/)
     expect(stderr.value()).toMatch(/Run: ctvs query refresh --config/)
   })
 

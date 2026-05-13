@@ -173,6 +173,73 @@ describe('ctvs query', function() {
     expect(badErr.value()).toMatch(/logical query tables/)
   })
 
+  it('surfaces cache-only partitions whose source JSONL was drained', async function() {
+    writeAllSignals()
+    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+
+    // Simulate a drain: remove the source JSONLs but keep the parquet+meta.
+    for (const signal of /** @type {const} */ (['logs', 'traces', 'metrics', 'proxy'])) {
+      fs.unlinkSync(path.join(sinkDir, 'gw1', signal, '2026-05-11.jsonl'))
+    }
+
+    // status: each dataset should still show the cached row, with 0 sources.
+    const statusOut = memo()
+    expect(await runQuery(['status', '--config', configPath, '--format', 'json'], { stdout: statusOut, stderr: memo() })).toBe(0)
+    /** @type {Array<{ dataset: string, sources: number, fresh: number, stale: number, rows: number }>} */
+    const statusRows = JSON.parse(statusOut.value())
+    const proxyExch = statusRows.find((r) => r.dataset === 'proxy_exchanges')
+    expect(proxyExch).toMatchObject({ sources: 0, fresh: 1, stale: 0, rows: 1 })
+    const logsRow = statusRows.find((r) => r.dataset === 'logs')
+    expect(logsRow).toMatchObject({ sources: 0, fresh: 1, stale: 0, rows: 1 })
+
+    // catalog: cached_rows should reflect drained partitions.
+    const catalogOut = memo()
+    expect(await runQuery(['catalog', '--config', configPath, '--format', 'json'], { stdout: catalogOut, stderr: memo() })).toBe(0)
+    /** @type {Array<{ dataset: string, cached_rows: number, source_partitions: number }>} */
+    const catalog = JSON.parse(catalogOut.value())
+    const catalogProxy = catalog.find((r) => r.dataset === 'proxy_exchanges')
+    expect(catalogProxy).toMatchObject({ cached_rows: 1, source_partitions: 0 })
+
+    // sql: the drained logs partition is queryable.
+    const sqlOut = memo()
+    const sqlErr = memo()
+    expect(await runQuery([
+      'sql',
+      'select gateway_id, body from logs',
+      '--config', configPath,
+    ], { stdout: sqlOut, stderr: sqlErr })).toBe(0)
+    expect(sqlErr.value()).toBe('')
+    expect(sqlOut.value()).toMatch(/gw1\s+boom/)
+
+    // doctor: still reports ok with the drained partitions counted.
+    const doctorOut = memo()
+    expect(await runQuery(['doctor', '--config', configPath], { stdout: doctorOut, stderr: memo() })).toBe(0)
+    expect(doctorOut.value()).toMatch(/cache_freshness\s+ok/)
+  })
+
+  it('detects staleness when a drained source reappears with a different size', async function() {
+    writeAllSignals()
+    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+
+    // Drain logs only, then later re-create with different content (different size).
+    fs.unlinkSync(path.join(sinkDir, 'gw1', 'logs', '2026-05-11.jsonl'))
+    // While drained: query should succeed.
+    expect(await runQuery(['sql', 'select count(*) as n from logs', '--config', configPath], {
+      stdout: memo(), stderr: memo(),
+    })).toBe(0)
+
+    // Source reappears with different content — staleness should fire again.
+    writeJsonl('gw1', 'logs', '2026-05-11', [
+      { serviceName: 'svc-a', timestamp: '2026-05-11T10:00:00.000Z', body: 'different', resource: {}, scope: { attributes: {} }, attributes: {} },
+      { serviceName: 'svc-b', timestamp: '2026-05-11T10:00:01.000Z', body: 'second',    resource: {}, scope: { attributes: {} }, attributes: {} },
+    ])
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(['sql', 'select count(*) as n from logs', '--config', configPath], { stdout, stderr })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/source size changed|source mtime changed/)
+  })
+
   it('runs high-level metrics, proxy, tail, and schema commands', async function() {
     writeAllSignals()
     expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)

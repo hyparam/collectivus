@@ -44,8 +44,16 @@ export interface CachePartition {
   dataset: QueryDataset
   gatewayId: string
   date: string
+  /**
+   * Where the source JSONL was, or still is, on disk. For sealed
+   * (drained) partitions synthesized from a CacheMeta, this is the path
+   * the meta recorded at last refresh — the file itself may no longer
+   * exist.
+   */
   jsonlPath: string
+  /** Source size at last refresh. Meaningless once the source is drained. */
   sourceSize: number
+  /** Source mtime at last refresh. Meaningless once the source is drained. */
   sourceMtimeMs: number
   parquetPath: string
   metaPath: string

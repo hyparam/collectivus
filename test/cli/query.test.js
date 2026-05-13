@@ -231,7 +231,7 @@ describe('ctvs query', function() {
     // Source reappears with different content — staleness should fire again.
     writeJsonl('gw1', 'logs', '2026-05-11', [
       { serviceName: 'svc-a', timestamp: '2026-05-11T10:00:00.000Z', body: 'different', resource: {}, scope: { attributes: {} }, attributes: {} },
-      { serviceName: 'svc-b', timestamp: '2026-05-11T10:00:01.000Z', body: 'second',    resource: {}, scope: { attributes: {} }, attributes: {} },
+      { serviceName: 'svc-b', timestamp: '2026-05-11T10:00:01.000Z', body: 'second', resource: {}, scope: { attributes: {} }, attributes: {} },
     ])
     const stdout = memo()
     const stderr = memo()

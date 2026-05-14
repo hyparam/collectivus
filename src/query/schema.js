@@ -1,5 +1,6 @@
 import { columnsForSignal } from '../upload/schema.js'
 import { columnsForMessages } from '../cli/messages-parquet.js'
+import { GASCITY_MESSAGES_COLUMNS } from '../gascity/schema.js'
 
 /**
  * @import { ColumnSpec } from '../upload/upload.d.ts'
@@ -22,6 +23,7 @@ export const QUERY_DATASETS = [
   'traces',
   'metrics',
   'proxy_messages',
+  'gascity_messages',
 ]
 
 /** @type {ColumnSpec} */
@@ -56,6 +58,16 @@ const SCHEMAS = {
     dataset: 'proxy_messages',
     sourceSignal: 'proxy',
     columns: withDateColumn(columnsForMessages(['gateway_id'])),
+  },
+  // The gascity source writes Parquet directly to
+  // `~/.collectivus/sink/gascity_messages/date=<date>/city=<city>/part-*.parquet`
+  // (no JSONL stage). `GASCITY_MESSAGES_COLUMNS` already includes `date`,
+  // `gateway_id`, and `city` as data columns, so the column list passes
+  // through unwrapped.
+  gascity_messages: {
+    dataset: 'gascity_messages',
+    sourceSignal: 'gascity',
+    columns: GASCITY_MESSAGES_COLUMNS,
   },
 }
 
@@ -94,7 +106,7 @@ export function columnsForDataset(dataset) {
 
 /**
  * @param {QueryDataset} dataset
- * @returns {'logs' | 'traces' | 'metrics' | 'proxy'}
+ * @returns {'logs' | 'traces' | 'metrics' | 'proxy' | 'gascity'}
  */
 export function sourceSignalForDataset(dataset) {
   return SCHEMAS[dataset].sourceSignal
@@ -110,6 +122,7 @@ export function primaryTimestampColumn(dataset) {
   case 'traces': return 'startTimestamp'
   case 'metrics': return 'timestamp'
   case 'proxy_messages': return 'message_created_at'
+  case 'gascity_messages': return 'message_created_at'
   default: return undefined
   }
 }
@@ -124,6 +137,7 @@ export function fallbackTimestampColumns(dataset) {
   case 'traces': return ['startTimestamp', 'endTimestamp']
   case 'metrics': return ['timestamp', 'startTimestamp']
   case 'proxy_messages': return ['message_created_at', 'conversation_started_at']
+  case 'gascity_messages': return ['message_created_at', 'conversation_started_at']
   default: return []
   }
 }

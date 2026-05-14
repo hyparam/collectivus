@@ -107,7 +107,7 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 - Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated Parquet, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
-- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, and registered collection tables from `ctvs query catalog`.
+- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and registered collection tables from `ctvs query catalog`.
 - Use UTC dates with `--date YYYY-MM-DD`.
 - Use `--service`, `--gateway-id`, `--from`, `--to`, or `--since` to narrow broad investigations.
 

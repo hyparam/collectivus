@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-05-13
+
+### Added
+
+- `ctvs collect <file.jsonl> --name <name>` registers external JSONL files as
+  dynamic query tables with inferred top-level fields and an explicit Parquet
+  cache.
+- S3 uploads can include proxy traffic with `upload.signals: ["proxy"]`,
+  materializing the `proxy_messages` dataset alongside OTLP signals.
+- Claude Code proxy message rows now include `cwd`, `git_branch`, and
+  `attributes.client.claude_version` when context is available from Collectivus
+  hooks or local transcripts.
+
 ## [2.0.0] — 2026-05-13
 
 ### Changed (breaking)

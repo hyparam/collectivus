@@ -1,6 +1,6 @@
 {
   "name": "collectivus",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "OTLP collector and pass-through LLM proxy",
   "author": "Hyperparam",
   "homepage": "https://hyperparam.app",

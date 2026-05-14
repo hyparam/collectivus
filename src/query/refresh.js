@@ -13,6 +13,7 @@ import {
   cachePartitionForSource,
   datasetsForSource,
   discoverSourceFiles,
+  discoverGascityPartitions as expectedGascityPartitions,
   inspectCachePartition,
   parquetPathFor,
 } from './paths.js'
@@ -44,9 +45,20 @@ export async function refreshQueryCache(args) {
   const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const datasets = requestedDatasets?.filter(isQueryDataset)
+  // The gascity source is owned by the daemon, which writes Parquet directly
+  // to `~/.collectivus/sink/gascity_messages/`. There's no JSONL stage to
+  // materialize, so refresh is a no-op for that dataset — count the existing
+  // part-files as `skipped` so progress output stays consistent.
+  const wantsGascity = !datasets || datasets.includes('gascity_messages')
+  if (wantsGascity) {
+    countGascityPartitions(scope, result, stdout)
+  }
+  const otherDatasets = datasets ? datasets.filter((d) => d !== 'gascity_messages') : undefined
+  const wantsOther = !datasets || (otherDatasets && otherDatasets.length > 0)
+  if (!wantsOther) return result
   const sources = discoverSourceFiles(paths.recordingRoot, scope)
   for (const source of sources) {
-    const sourceDatasets = datasetsForSource(source, datasets)
+    const sourceDatasets = datasetsForSource(source, otherDatasets)
     if (sourceDatasets.length === 0) continue
     if (source.signal === 'proxy') {
       await refreshProxySource(paths.parquetDir, source, sourceDatasets, force, result, stdout)
@@ -55,6 +67,27 @@ export async function refreshQueryCache(args) {
     }
   }
   return result
+}
+
+/**
+ * @param {QueryScope} scope
+ * @param {RefreshResult} result
+ * @param {{ write: (s: string) => void } | undefined} stdout
+ * @returns {void}
+ */
+function countGascityPartitions(scope, result, stdout) {
+  for (const partition of expectedGascityPartitions(scope)) {
+    result.skipped++
+    result.files.push({
+      dataset: 'gascity_messages',
+      gatewayId: partition.gatewayId,
+      date: partition.date,
+      rows: 0,
+      parquetPath: partition.parquetPath,
+      status: 'skipped',
+    })
+    stdout?.write(`fresh gascity_messages/${partition.date}/${partition.parquetPath}\n`)
+  }
 }
 
 /**

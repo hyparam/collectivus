@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { parseQueryArgs, runQuery } from '../../src/cli/query.js'
+import { ParquetWriter } from '../../src/gascity/parquet_writer.js'
+import { GASCITY_GATEWAY_ID, GASCITY_MESSAGES_SCHEMA_VERSION } from '../../src/gascity/schema.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -21,6 +23,8 @@ let tmpDir
 let sinkDir
 /** @type {string} */
 let configPath
+/** @type {string | undefined} */
+let originalHome
 
 beforeEach(function() {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-query-'))
@@ -31,11 +35,135 @@ beforeEach(function() {
     sink: { type: 'file', dir: sinkDir },
     query: { parquet: { enabled: true } },
   }))
+  // Pin `os.homedir()` to the test's tmp dir so `defaultGascityRoot()` lands
+  // under it. The gascity source has no JSONL stage — its sink IS the parquet
+  // store, so query-time discovery reads `<HOME>/.collectivus/sink/gascity_messages/`
+  // directly.
+  originalHome = process.env.HOME
+  process.env.HOME = tmpDir
 })
 
 afterEach(function() {
+  if (originalHome !== undefined) process.env.HOME = originalHome
+  else delete process.env.HOME
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
+
+/**
+ * Resolve the gascity sink root for the current test (mirrors
+ * `defaultGascityRoot()`).
+ *
+ * @returns {string}
+ */
+function gascitySinkRoot() {
+  return path.join(tmpDir, '.collectivus', 'sink', 'gascity_messages')
+}
+
+/**
+ * Write one or more fixture sessions of gascity rows through the real
+ * `ParquetWriter` so the resulting on-disk layout matches what the daemon
+ * produces.
+ *
+ * @param {Array<{
+ *   city: string,
+ *   sessionId: string,
+ *   template?: string,
+ *   rig?: string,
+ *   alias?: string,
+ *   rows: Array<Partial<import('../../src/gascity/normalizers/types.d.ts').NormalizedRow> & { provider_uuid: string }>,
+ * }>} sessions
+ * @returns {Promise<void>}
+ */
+async function writeGascityFixtures(sessions) {
+  const sinkRoot = gascitySinkRoot()
+  fs.mkdirSync(sinkRoot, { recursive: true })
+  const writer = new ParquetWriter({
+    sinkRoot,
+    stderr: { write() {} },
+    flushIntervalMs: 60_000_000,
+  })
+  for (const session of sessions) {
+    /** @type {import('../../src/gascity/types.d.ts').SessionContext} */
+    const ctx = {
+      city: session.city,
+      sessionId: session.sessionId,
+      template: session.template,
+      rig: session.rig,
+      alias: session.alias,
+    }
+    const rows = session.rows.map((overrides) => makeGascityRow({
+      city: session.city,
+      gascity_session_id: session.sessionId,
+      gascity_template: session.template,
+      gascity_rig: session.rig,
+      gascity_alias: session.alias,
+      provider_session_id: session.sessionId,
+      ...overrides,
+    }))
+    await writer.append(ctx, rows)
+  }
+  await writer.flushAll()
+  await writer.stop()
+}
+
+/**
+ * @param {Partial<import('../../src/gascity/normalizers/types.d.ts').NormalizedRow> & { provider_uuid: string, city?: string, gascity_session_id?: string, provider_session_id?: string }} overrides
+ * @returns {import('../../src/gascity/normalizers/types.d.ts').NormalizedRow}
+ */
+function makeGascityRow(overrides) {
+  return /** @type {import('../../src/gascity/normalizers/types.d.ts').NormalizedRow} */ ({
+    schema_version: GASCITY_MESSAGES_SCHEMA_VERSION,
+    city: overrides.city ?? 'hyptown',
+    gascity_session_id: overrides.gascity_session_id ?? 'hy-1',
+    gascity_template: undefined,
+    gascity_rig: undefined,
+    gascity_alias: undefined,
+    gateway_id: GASCITY_GATEWAY_ID,
+    provider: 'claude',
+    provider_session_id: overrides.provider_session_id ?? overrides.gascity_session_id ?? 'hy-1',
+    date: '2026-05-14',
+    message_id: undefined,
+    part_index: 0,
+    part_type: 'text',
+    cwd: undefined,
+    git_branch: undefined,
+    permission_mode: undefined,
+    is_sidechain: undefined,
+    entrypoint: undefined,
+    client_version: undefined,
+    prompt_id: undefined,
+    request_id: undefined,
+    parent_uuid: undefined,
+    source_tool_assistant_uuid: undefined,
+    message_created_at: '2026-05-14T00:00:00Z',
+    conversation_started_at: undefined,
+    model: undefined,
+    stop_reason: undefined,
+    stop_details: undefined,
+    input_tokens: undefined,
+    output_tokens: undefined,
+    cache_creation_input_tokens: undefined,
+    cache_read_input_tokens: undefined,
+    ephemeral_1h_input_tokens: undefined,
+    ephemeral_5m_input_tokens: undefined,
+    service_tier: undefined,
+    inference_geo: undefined,
+    speed: undefined,
+    content_text: undefined,
+    thinking_signature: undefined,
+    tool_name: undefined,
+    tool_call_id: undefined,
+    tool_args: undefined,
+    caller_type: undefined,
+    tool_result_for: undefined,
+    is_error: undefined,
+    attachment_type: undefined,
+    hook_event: undefined,
+    attributes: undefined,
+    raw_frame: undefined,
+    ...overrides,
+  })
+}
 
 /**
  * @param {string} gatewayId
@@ -433,5 +561,225 @@ describe('ctvs query freshness gate', function() {
         }
       })
     }
+  })
+})
+
+describe('ctvs query gascity_messages', function() {
+  it('exposes the dataset in catalog and schema', async function() {
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'hypcity-overrides.mayor',
+        rig: 'collectivus',
+        rows: [
+          { provider_uuid: 'u-1', content_text: 'hi' },
+          { provider_uuid: 'u-2', part_index: 1, part_type: 'text', content_text: 'world' },
+        ],
+      },
+    ])
+
+    const catalogOut = memo()
+    const catalogCode = await runQuery(['catalog', '--config', configPath, '--format', 'json'], { stdout: catalogOut, stderr: memo() })
+    expect(catalogCode).toBe(0)
+    /** @type {Array<{ dataset: string, source_signal: string, columns: number, source_partitions: number }>} */
+    const catalog = JSON.parse(catalogOut.value())
+    const gascity = catalog.find((row) => row.dataset === 'gascity_messages')
+    expect(gascity).toBeDefined()
+    expect(gascity).toMatchObject({ source_signal: 'gascity', source_partitions: 1 })
+    expect(gascity?.columns).toBeGreaterThan(40)
+
+    const schemaOut = memo()
+    const schemaCode = await runQuery(['schema', 'gascity_messages', '--format', 'json'], { stdout: schemaOut, stderr: memo() })
+    expect(schemaCode).toBe(0)
+    /** @type {Array<{ name: string }>} */
+    const schema = JSON.parse(schemaOut.value())
+    const names = schema.map((column) => column.name)
+    for (const required of ['city', 'gascity_session_id', 'gascity_template', 'gascity_rig', 'gateway_id', 'date', 'message_created_at', 'part_type']) {
+      expect(names).toContain(required)
+    }
+  })
+
+  it('runs SELECT count(*) and SELECT * SQL against the parquet sink', async function() {
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'hypcity-overrides.mayor',
+        rig: 'collectivus',
+        rows: [
+          { provider_uuid: 'u-1', part_type: 'text', content_text: 'hi' },
+          { provider_uuid: 'u-2', part_index: 1, part_type: 'tool_use', tool_name: 'Bash', tool_call_id: 'tc-1' },
+        ],
+      },
+      {
+        city: 'hyptown',
+        sessionId: 'hy-2',
+        template: 'hypcity-overrides.refinery',
+        rig: 'collectivus',
+        rows: [
+          { provider_uuid: 'u-3', part_type: 'text', content_text: 'merge' },
+        ],
+      },
+    ])
+
+    const countOut = memo()
+    const countCode = await runQuery(
+      ['sql', 'select count(*) as n from gascity_messages', '--config', configPath, '--format', 'json'],
+      { stdout: countOut, stderr: memo() }
+    )
+    expect(countCode).toBe(0)
+    /** @type {Array<{ n: number }>} */
+    const countRows = JSON.parse(countOut.value())
+    expect(countRows[0].n).toBe(3)
+
+    const filterOut = memo()
+    const filterCode = await runQuery(
+      [
+        'sql',
+        'select gascity_template, count(*) as n from gascity_messages where part_type = \'text\' group by gascity_template order by gascity_template',
+        '--config', configPath,
+        '--format', 'json',
+      ],
+      { stdout: filterOut, stderr: memo() }
+    )
+    expect(filterCode).toBe(0)
+    /** @type {Array<{ gascity_template: string, n: number }>} */
+    const grouped = JSON.parse(filterOut.value())
+    expect(grouped).toEqual([
+      { gascity_template: 'hypcity-overrides.mayor', n: 1 },
+      { gascity_template: 'hypcity-overrides.refinery', n: 1 },
+    ])
+  })
+
+  it('queries gascity_messages even when the parquet cache is disabled', async function() {
+    fs.writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      sink: { type: 'file', dir: sinkDir },
+      query: { parquet: { enabled: false } },
+    }))
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'hypcity-overrides.mayor',
+        rows: [{ provider_uuid: 'u-1', content_text: 'cache-free' }],
+      },
+    ])
+
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(
+      ['sql', 'select count(*) as n from gascity_messages', '--config', configPath, '--format', 'json'],
+      { stdout, stderr }
+    )
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    /** @type {Array<{ n: number }>} */
+    const rows = JSON.parse(stdout.value())
+    expect(rows[0].n).toBe(1)
+  })
+
+  it('refresh treats gascity_messages as already-fresh (no-op)', async function() {
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'mayor',
+        rows: [{ provider_uuid: 'u-1', content_text: 'hi' }],
+      },
+    ])
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(
+      ['refresh', 'gascity_messages', '--config', configPath],
+      { stdout, stderr }
+    )
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    expect(stdout.value()).toMatch(/Done\. 0 file\(s\) written, 1 fresh, 0 row\(s\)\./)
+  })
+
+  it('UNION ALL with proxy_messages selects shared columns from both sources', async function() {
+    // Set up proxy_messages partition so the JSONL → parquet refresh path runs.
+    writeJsonl('gw1', 'proxy', '2026-05-14', [
+      {
+        exchange_id: 'ex-1',
+        kind: 'exchange',
+        ts_start: '2026-05-14T10:00:00.000Z',
+        ts_end: '2026-05-14T10:00:00.250Z',
+        duration_ms: 250,
+        upstream: 'anthropic',
+        request: {
+          method: 'POST',
+          path: '/v1/messages',
+          headers: {},
+          body: JSON.stringify({
+            model: 'claude-opus-4-7',
+            messages: [{ role: 'user', content: 'hello' }],
+          }),
+        },
+        response: { status: 200, headers: {}, body: '{}' },
+        stream_event_count: 0,
+      },
+    ])
+    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'hypcity-overrides.mayor',
+        rows: [{ provider_uuid: 'u-1', content_text: 'gascity says hi' }],
+      },
+    ])
+
+    const stdout = memo()
+    const stderr = memo()
+    // Gascity has `part_type` instead of `role`; this query unions on the
+    // columns both tables actually carry (provider, content_text) — a real
+    // operator question that needs both sources.
+    const code = await runQuery([
+      'sql',
+      `select source, provider, content_text from (
+         select 'proxy' as source, provider, content_text from proxy_messages where role = 'user'
+         union all
+         select 'gascity' as source, provider, content_text from gascity_messages where part_type = 'text'
+       ) order by source, content_text`,
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout, stderr })
+    expect(code).toBe(0)
+    /** @type {Array<{ source: string, provider: string, content_text: string }>} */
+    const rows = JSON.parse(stdout.value())
+    expect(rows.length).toBeGreaterThanOrEqual(2)
+    expect(rows.find((r) => r.source === 'gascity' && r.content_text === 'gascity says hi')).toBeDefined()
+    expect(rows.find((r) => r.source === 'proxy' && r.content_text === 'hello')).toBeDefined()
+  })
+
+  it('--gateway-id only matches the gascity-scribe constant', async function() {
+    await writeGascityFixtures([
+      {
+        city: 'hyptown',
+        sessionId: 'hy-1',
+        template: 'mayor',
+        rows: [{ provider_uuid: 'u-1', content_text: 'hi' }],
+      },
+    ])
+
+    const matchOut = memo()
+    const matchCode = await runQuery(
+      ['sql', 'select count(*) as n from gascity_messages', '--config', configPath, '--gateway-id', GASCITY_GATEWAY_ID, '--format', 'json'],
+      { stdout: matchOut, stderr: memo() }
+    )
+    expect(matchCode).toBe(0)
+    expect(JSON.parse(matchOut.value())[0].n).toBe(1)
+
+    const missOut = memo()
+    const missCode = await runQuery(
+      ['sql', 'select count(*) as n from gascity_messages', '--config', configPath, '--gateway-id', 'nope', '--format', 'json'],
+      { stdout: missOut, stderr: memo() }
+    )
+    expect(missCode).toBe(0)
+    expect(JSON.parse(missOut.value())[0].n).toBe(0)
   })
 })

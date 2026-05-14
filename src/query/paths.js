@@ -2,6 +2,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { defaultSinkDir as defaultServerIngestDir } from '../server/ingest.js'
+import { defaultGascityRoot } from '../gascity/paths.js'
+import { GASCITY_GATEWAY_ID } from '../gascity/schema.js'
 import {
   QUERY_CACHE_SCHEMA_VERSION,
   QUERY_DATASETS,
@@ -25,6 +27,8 @@ import {
 const DATE_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 const GATEWAY_PARTITION_PATTERN = /^gateway_id=(.+)$/
 const DATE_PARTITION_PATTERN = /^date=(\d{4}-\d{2}-\d{2})$/
+const CITY_PARTITION_PATTERN = /^city=(.+)$/
+const GASCITY_PART_FILE_PATTERN = /^part-.+\.parquet$/
 
 /**
  * @param {CollectivusConfig} config
@@ -185,27 +189,97 @@ export function discoverSourceFiles(root, scope) {
  * @returns {CachePartition[]}
  */
 export function expectedCachePartitions(paths, scope) {
-  if (!paths.parquetDir) return []
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const datasets = requestedDatasets?.filter(isQueryDataset)
   if (requestedDatasets && datasets?.length === 0) return []
+
   /** @type {CachePartition[]} */
   const partitions = []
+
+  // Gascity has its own on-disk layout (the daemon writes Parquet directly,
+  // no JSONL stage and no `.meta.json` sidecar). Discover separately so the
+  // existing JSONL-driven discovery doesn't try to scan the gascity sink.
+  const gascityRequested = !datasets || datasets.includes('gascity_messages')
+  if (gascityRequested) {
+    for (const partition of discoverGascityPartitions(scope)) {
+      partitions.push(partition)
+    }
+  }
+
+  // Datasets backed by JSONL sources need a parquet cache directory; gascity
+  // does not.
+  const otherRequested = datasets ? datasets.filter((d) => d !== 'gascity_messages') : undefined
+  const wantsOther = !datasets || (otherRequested && otherRequested.length > 0)
+  if (!wantsOther) return partitions
+  if (!paths.parquetDir) return partitions
+
   /** @type {Set<string>} */
   const seen = new Set()
   for (const source of discoverSourceFiles(paths.recordingRoot, scope)) {
-    for (const dataset of datasetsForSource(source, datasets)) {
+    for (const dataset of datasetsForSource(source, otherRequested)) {
       const partition = cachePartitionForSource(paths.parquetDir, dataset, source)
       seen.add(partitionKey(partition))
       partitions.push(partition)
     }
   }
-  for (const meta of listCacheMetas(paths.parquetDir, scope)) {
+  for (const meta of listCacheMetas(paths.parquetDir, otherRequested ? { ...scope, datasets: otherRequested } : scope)) {
     const key = `${meta.dataset}\0${meta.gateway_id}\0${meta.date}`
     if (seen.has(key)) continue
     partitions.push(cachePartitionFromMeta(paths.parquetDir, meta))
   }
   return partitions
+}
+
+/**
+ * Walk the gascity sink (`~/.collectivus/sink/gascity_messages/`) and yield
+ * one {@link CachePartition} per `part-*.parquet` file. The daemon owns
+ * writes; query-time discovery is read-only.
+ *
+ * The Hive layout is `date=YYYY-MM-DD/city=<name>/part-<sessionId>-<n>.parquet`.
+ * `--gateway-id` is honoured only when it equals `gascity-scribe` (the
+ * constant gateway id stamped onto every gascity row); any other value
+ * filters everything out.
+ *
+ * @param {QueryScope} scope
+ * @returns {CachePartition[]}
+ */
+export function discoverGascityPartitions(scope) {
+  if (scope.gatewayId && scope.gatewayId !== GASCITY_GATEWAY_ID) return []
+  const root = defaultGascityRoot()
+  if (!isDirectory(root)) return []
+  /** @type {CachePartition[]} */
+  const out = []
+  for (const dateEntry of safeReadDir(root)) {
+    const dateMatch = DATE_PARTITION_PATTERN.exec(dateEntry)
+    if (!dateMatch) continue
+    const date = dateMatch[1]
+    if (scope.date && date !== scope.date) continue
+    const dateDir = path.join(root, dateEntry)
+    if (!isDirectory(dateDir)) continue
+    for (const cityEntry of safeReadDir(dateDir)) {
+      const cityMatch = CITY_PARTITION_PATTERN.exec(cityEntry)
+      if (!cityMatch) continue
+      const cityDir = path.join(dateDir, cityEntry)
+      if (!isDirectory(cityDir)) continue
+      for (const file of safeReadDir(cityDir)) {
+        if (!GASCITY_PART_FILE_PATTERN.test(file)) continue
+        const parquetPath = path.join(cityDir, file)
+        const stat = safeStat(parquetPath)
+        if (!stat || !stat.isFile()) continue
+        out.push({
+          dataset: 'gascity_messages',
+          gatewayId: GASCITY_GATEWAY_ID,
+          date,
+          jsonlPath: parquetPath,
+          sourceSize: stat.size,
+          sourceMtimeMs: stat.mtimeMs,
+          parquetPath,
+          metaPath: '',
+        })
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -245,6 +319,15 @@ function cachePartitionFromMeta(parquetDir, meta) {
  * @returns {CachePartitionState}
  */
 export function inspectCachePartition(partition) {
+  // Gascity partitions are the source of truth — the daemon writes Parquet
+  // directly, there's no JSONL stage, and no `.meta.json` sidecar. As long as
+  // the part-file is on disk, the partition is fresh.
+  if (partition.dataset === 'gascity_messages') {
+    if (!isFile(partition.parquetPath)) {
+      return { partition, status: 'missing', reason: 'parquet part file is missing' }
+    }
+    return { partition, status: 'fresh' }
+  }
   const parquetExists = isFile(partition.parquetPath)
   const meta = readCacheMeta(partition.metaPath)
   if (!parquetExists && !meta) {

@@ -53,6 +53,20 @@ export interface HotReloadWiring {
   factoryBuilder: (cfg: CollectivusConfig) => Map<string, ListenerFactory>
 }
 
+/**
+ * SIGHUP-driven local reload wiring for the standalone daemon. Lets the
+ * `ctvs gascity attach/detach` CLI push a config edit live without a full
+ * daemon restart. The handler re-runs the same diff/apply pipeline as the
+ * gateway hot-reload path; gascity gets special-cased so per-city changes
+ * don't take unrelated cities down.
+ */
+export interface LocalReloadWiring {
+  initialConfig: CollectivusConfig
+  factoryBuilder: (cfg: CollectivusConfig) => Map<string, ListenerFactory>
+  /** Re-read the config from its original source and validate it. */
+  reload: () => Promise<CollectivusConfig>
+}
+
 // ---------- CLI export ----------
 
 export interface ExportParseResult {

@@ -6,6 +6,7 @@ import { streamSse } from './sse_client.js'
  * @import { SessionContext } from './types.d.ts'
  * @import { NormalizerDispatcher } from './normalizer_dispatcher.js'
  * @import { ParquetWriter } from './parquet_writer.js'
+ * @import { GascityRuntimeStateWriter } from './runtime_state.js'
  */
 
 /**
@@ -29,6 +30,7 @@ export class SessionWorker {
    *   sinkRoot: string,
    *   dispatcher: NormalizerDispatcher,
    *   writer?: ParquetWriter,
+   *   stateWriter?: GascityRuntimeStateWriter,
    *   stderr?: { write: (s: string) => void },
    *   debug?: boolean,
    *   fetchFn?: typeof fetch,
@@ -54,6 +56,8 @@ export class SessionWorker {
     this.dispatcher = opts.dispatcher
     /** @type {ParquetWriter | undefined} */
     this.writer = opts.writer
+    /** @type {GascityRuntimeStateWriter | undefined} */
+    this.stateWriter = opts.stateWriter
     /** @type {{ write: (s: string) => void }} */
     this.stderr = opts.stderr ?? process.stderr
     /** @type {boolean} */
@@ -192,6 +196,9 @@ export class SessionWorker {
       this.stderr.write(
         `[gascity] frame_normalized city=${this.city} session=${this.sessionId} rows=${rows.length}\n`
       )
+    }
+    if (this.stateWriter !== undefined) {
+      this.stateWriter.recordFrame(this.city, this.sessionId, 1)
     }
     // Bead 3 hooks the parquet writer in here. Until then, rows are discarded
     // after the debug log — the cursor still advances so resume semantics hold.

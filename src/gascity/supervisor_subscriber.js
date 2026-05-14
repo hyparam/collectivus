@@ -8,6 +8,7 @@ import { compileFilter } from './template_filter.js'
  * @import { GascityCityConfig } from './types.d.ts'
  * @import { NormalizerDispatcher } from './normalizer_dispatcher.js'
  * @import { ParquetWriter } from './parquet_writer.js'
+ * @import { GascityRuntimeStateWriter } from './runtime_state.js'
  */
 
 const SPAWN_EVENTS = new Set(['session.created', 'session.woke'])
@@ -32,6 +33,7 @@ export class SupervisorSubscriber {
    *   sinkRoot: string,
    *   dispatcher: NormalizerDispatcher,
    *   writer?: ParquetWriter,
+   *   stateWriter?: GascityRuntimeStateWriter,
    *   stderr?: { write: (s: string) => void },
    *   debug?: boolean,
    *   fetchFn?: typeof fetch,
@@ -47,6 +49,8 @@ export class SupervisorSubscriber {
     this.dispatcher = opts.dispatcher
     /** @type {ParquetWriter | undefined} */
     this.writer = opts.writer
+    /** @type {GascityRuntimeStateWriter | undefined} */
+    this.stateWriter = opts.stateWriter
     /** @type {{ write: (s: string) => void }} */
     this.stderr = opts.stderr ?? process.stderr
     /** @type {boolean} */
@@ -86,18 +90,52 @@ export class SupervisorSubscriber {
    * drain, and wait for them to exit. After `stop` resolves the subscriber
    * holds no live sockets or pending IO.
    *
+   * The active workers' `stop()` retires their session in the writer, which
+   * keeps the daemon-shutdown semantics aligned with the bead-3 contract:
+   * a clean stop flushes pending buffers and stamps `retired=true` on the
+   * cursor. (A subsequent restart picks up state via the lifecycle SSE
+   * resume + backfill of any non-retired sessions still on disk.)
+   *
+   * @param {{ removeFromState?: boolean }} [opts]
+   *   `removeFromState=true` (used by hot-reload city removal) drops this
+   *   city's entry from the runtime-state snapshot after retirement so
+   *   `ctvs gascity list` doesn't continue to show a no-longer-attached
+   *   city. Daemon shutdown leaves the entry in place — the snapshot file
+   *   is overwritten / cleaned up by the next daemon start.
    * @returns {Promise<void>}
    */
-  async stop() {
+  async stop(opts = {}) {
     this.controller.abort()
     /** @type {Promise<void>[]} */
     const stops = []
-    for (const worker of this.workers.values()) {
+    /** @type {string[]} */
+    const sessionsRetired = []
+    for (const [sessionId, worker] of this.workers) {
+      sessionsRetired.push(sessionId)
       stops.push(worker.stop())
     }
     this.workers.clear()
     if (this.runPromise) await this.runPromise
     await Promise.all(stops)
+    if (this.stateWriter !== undefined) {
+      for (const sessionId of sessionsRetired) {
+        this.stateWriter.retireSession(this.city.name, sessionId)
+      }
+      if (opts.removeFromState === true) {
+        this.stateWriter.removeCity(this.city.name)
+      } else {
+        this.stateWriter.setLifecycleConnected(this.city.name, false)
+      }
+      // Make sure the snapshot reflects the retired sessions before any
+      // CLI reader picks up the next file mtime.
+      try {
+        await this.stateWriter.flush()
+      } catch (err) {
+        this.stderr.write(
+          `[gascity] state_flush_failed city=${this.city.name} err=${formatError(err)}\n`
+        )
+      }
+    }
   }
 
   /**
@@ -112,15 +150,26 @@ export class SupervisorSubscriber {
     if (this.debug) {
       this.stderr.write(`[gascity] supervisor_start city=${this.city.name} url=${url}\n`)
     }
+    if (this.stateWriter !== undefined) {
+      this.stateWriter.upsertCity({ name: this.city.name, api_url: this.apiUrl })
+    }
     /** @type {Parameters<typeof streamSse>[0]} */
     const streamOpts = {
       url,
       signal: this.controller.signal,
       onEvent: async (ev) => this.handleLifecycleEvent(ev, cursorPath),
-      onError: (msg) => this.stderr.write(`${msg}\n`),
+      onError: (msg) => {
+        this.stderr.write(`${msg}\n`)
+        if (this.stateWriter !== undefined) {
+          this.stateWriter.setLifecycleConnected(this.city.name, false)
+        }
+      },
       onConnect: () => {
         if (this.debug) {
           this.stderr.write(`[gascity] supervisor_connected city=${this.city.name}\n`)
+        }
+        if (this.stateWriter !== undefined) {
+          this.stateWriter.setLifecycleConnected(this.city.name, true)
         }
       },
       initialLastEventId: initialId,
@@ -128,6 +177,9 @@ export class SupervisorSubscriber {
     if (this.fetchFn) streamOpts.fetchFn = this.fetchFn
     if (this.sleep) streamOpts.sleep = this.sleep
     await streamSse(streamOpts)
+    if (this.stateWriter !== undefined) {
+      this.stateWriter.setLifecycleConnected(this.city.name, false)
+    }
     if (this.debug) {
       this.stderr.write(`[gascity] supervisor_stop city=${this.city.name}\n`)
     }
@@ -205,6 +257,7 @@ export class SupervisorSubscriber {
       debug: this.debug,
     }
     if (this.writer) workerOpts.writer = this.writer
+    if (this.stateWriter) workerOpts.stateWriter = this.stateWriter
     if (template !== undefined) workerOpts.template = template
     if (rig !== undefined) workerOpts.rig = rig
     if (alias !== undefined) workerOpts.alias = alias
@@ -212,6 +265,14 @@ export class SupervisorSubscriber {
     if (this.sleep) workerOpts.sleep = this.sleep
     const worker = new SessionWorker(workerOpts)
     this.workers.set(sessionId, worker)
+    if (this.stateWriter !== undefined) {
+      /** @type {Parameters<GascityRuntimeStateWriter['upsertSession']>[1]} */
+      const info = { sessionId }
+      if (template !== undefined) info.template = template
+      if (rig !== undefined) info.rig = rig
+      if (alias !== undefined) info.alias = alias
+      this.stateWriter.upsertSession(this.city.name, info)
+    }
     if (this.debug) {
       this.stderr.write(
         `[gascity] session_worker_spawned city=${this.city.name} session=${sessionId} template=${template ?? '<none>'}\n`
@@ -229,6 +290,9 @@ export class SupervisorSubscriber {
     const worker = this.workers.get(sessionId)
     if (!worker) return
     this.workers.delete(sessionId)
+    if (this.stateWriter !== undefined) {
+      this.stateWriter.retireSession(this.city.name, sessionId)
+    }
     if (this.debug) {
       this.stderr.write(`[gascity] session_worker_retired city=${this.city.name} session=${sessionId}\n`)
     }

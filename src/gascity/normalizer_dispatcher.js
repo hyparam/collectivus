@@ -1,17 +1,19 @@
 /**
  * @import { NormalizerFn, SessionContext } from './types.d.ts'
+ * @import { NormalizedRow } from './normalizers/types.d.ts'
  */
 
 /**
- * Pluggable provider → normalizer registry. Bead 1 ships stubs for `claude`,
- * `codex`, and the unknown-provider passthrough so the rest of the source can
- * be exercised end-to-end; beads 2 and 4 swap the stubs for the real
- * normalizers via `register('claude', claudeNormalize)` etc.
+ * Pluggable provider → normalizer registry. Bead 1 shipped stubs for
+ * `claude`, `codex`, and the unknown-provider passthrough so the rest of the
+ * source could be exercised end-to-end; bead 2 swaps in the real `claude`
+ * normalizer (via `registerProductionNormalizers`) and bead 4 will do the
+ * same for `codex`.
  *
  * The dispatcher is intentionally small: lookup-by-provider, call the
- * registered fn (or fall through to passthrough), and never throw. A normalizer
- * raising on a single frame is logged and the next frame is processed — one
- * malformed payload must not stop the stream.
+ * registered fn (or fall through to passthrough), and never throw. A
+ * normalizer raising on a single frame is logged and `dispatch` returns an
+ * empty array — one malformed payload must not stop the stream.
  */
 export class NormalizerDispatcher {
   /**
@@ -30,7 +32,8 @@ export class NormalizerDispatcher {
 
   /**
    * Register or replace a normalizer for `provider`. The registered function
-   * is invoked with the raw frame plus a per-session context object.
+   * is invoked with the raw frame plus a per-session context object and is
+   * expected to return the rows produced for that frame.
    *
    * @param {string} provider
    * @param {NormalizerFn} fn
@@ -45,21 +48,24 @@ export class NormalizerDispatcher {
    * `format=raw` envelope wraps each provider frame in `{ provider, frame }`
    * (or similar); we look at common positions and fall through to passthrough
    * when the provider can't be determined. Any normalizer error is caught and
-   * logged so a single bad frame never derails the worker loop.
+   * logged, and an empty row array is returned so a single bad frame never
+   * derails the worker loop.
    *
    * @param {unknown} envelope The full frame envelope as parsed from the SSE `data:` field.
    * @param {SessionContext} ctx
-   * @returns {void}
+   * @returns {NormalizedRow[]}
    */
   dispatch(envelope, ctx) {
     const provider = resolveProvider(envelope) ?? 'unknown'
     const fn = this.registry.get(provider) ?? this.passthrough
     try {
-      fn(envelope, ctx)
+      const rows = fn(envelope, ctx)
+      return Array.isArray(rows) ? rows : []
     } catch (err) {
       this.stderr.write(
         `[gascity] normalizer error provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
       )
+      return []
     }
   }
 }
@@ -89,14 +95,16 @@ export function resolveProvider(envelope) {
 }
 
 /**
- * Bead-2 stub: until `register('claude', ...)` is called, log the dispatch
- * but produce no output. The stub signature is the same as the real
- * normalizer so swapping it in later doesn't change call sites.
+ * Bead-1 stub for the `claude` slot. Bead 2 replaces it via
+ * `registerProductionNormalizers` in `./normalizers/index.js`; until that
+ * runs we emit no rows so callers can still exercise the dispatch path
+ * end-to-end. The stub signature matches `NormalizerFn` so swapping the
+ * production normalizer in doesn't change call sites.
  *
  * @type {NormalizerFn}
  */
 function claudeStub() {
-  // Intentional no-op; real implementation lands in bead 2.
+  return []
 }
 
 /**
@@ -105,7 +113,7 @@ function claudeStub() {
  * @type {NormalizerFn}
  */
 function codexStub() {
-  // Intentional no-op; real implementation lands in bead 4.
+  return []
 }
 
 /**
@@ -116,7 +124,7 @@ function codexStub() {
  * @type {NormalizerFn}
  */
 function passthroughStub() {
-  // Intentional no-op; real passthrough lands with the parquet writer (bead 3).
+  return []
 }
 
 /**

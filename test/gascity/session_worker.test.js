@@ -59,7 +59,7 @@ describe('SessionWorker', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {unknown[]} */
     const dispatched = []
-    dispatcher.register('claude', (frame) => { dispatched.push(frame) })
+    dispatcher.register('claude', (frame) => { dispatched.push(frame); return [] })
     const fetchFn = vi.fn().mockImplementationOnce(async () => sseResponse([
       'id: e1\nevent: frame\ndata: {"provider":"claude","uuid":"u-1","x":1}\n\n',
       'id: e2\nevent: frame\ndata: {"provider":"claude","uuid":"u-2","x":2}\n\n',
@@ -127,7 +127,7 @@ describe('SessionWorker', () => {
     const dispatcher = new NormalizerDispatcher({ stderr: memoStream() })
     /** @type {unknown[]} */
     const dispatched = []
-    dispatcher.register('claude', (frame) => { dispatched.push(frame) })
+    dispatcher.register('claude', (frame) => { dispatched.push(frame); return [] })
     const fetchFn = vi.fn().mockImplementationOnce(async () => sseResponse([
       'event: ping\ndata: \n\n',
       'event: heartbeat\ndata: \n\n',
@@ -155,7 +155,7 @@ describe('SessionWorker', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {unknown[]} */
     const dispatched = []
-    dispatcher.register('claude', (frame) => { dispatched.push(frame) })
+    dispatcher.register('claude', (frame) => { dispatched.push(frame); return [] })
     const fetchFn = vi.fn().mockImplementationOnce(async () => sseResponse([
       'event: frame\ndata: not-json\n\n',
       'event: frame\ndata: {"provider":"claude","uuid":"u-good"}\n\n',

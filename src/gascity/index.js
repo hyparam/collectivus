@@ -1,4 +1,5 @@
 import { NormalizerDispatcher } from './normalizer_dispatcher.js'
+import { registerProductionNormalizers } from './normalizers/index.js'
 import { defaultGascityRoot } from './paths.js'
 import { SupervisorSubscriber } from './supervisor_subscriber.js'
 
@@ -36,6 +37,7 @@ export async function startGascitySource(opts) {
   const stderr = opts.stderr ?? process.stderr
   const sinkRoot = opts.sinkRoot ?? defaultGascityRoot()
   const dispatcher = new NormalizerDispatcher({ stderr })
+  registerProductionNormalizers(dispatcher)
   /** @type {SupervisorSubscriber[]} */
   const subscribers = []
   for (const city of opts.cities) {

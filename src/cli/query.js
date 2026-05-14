@@ -19,6 +19,7 @@ import { refreshQueryCache } from '../query/refresh.js'
 import { executeLogicalSql, prepareReadOnlySql } from '../query/sql.js'
 import {
   collectionMetaPath,
+  readAnyCollectionMeta,
   collectionTablesForQuery,
   expectedCollectionPartitions,
   inspectCollectionCachePartitions,
@@ -346,7 +347,7 @@ function handleCatalog(paths, parsed, stdout) {
   })
   for (const collection of listCollections(paths.recordingRoot)) {
     const status = sourceRows.find((row) => row.dataset === collection.table)
-    const meta = paths.parquetDir ? readCollectionCacheMeta(collectionMetaPath(paths.parquetDir, collection.table)) : undefined
+    const meta = paths.parquetDir ? readAnyCollectionMeta(paths.parquetDir, collection) : undefined
     rows.push({
       dataset: collection.table,
       source_signal: 'collection',
@@ -390,7 +391,7 @@ function handleSchema(paths, parsed, stdout, stderr) {
     stderr.write(`error: unknown dataset "${raw}"\n`)
     return 2
   }
-  const meta = readCollectionCacheMeta(collectionMetaPath(paths.parquetDir, collection.table))
+  const meta = readAnyCollectionMeta(paths.parquetDir, collection)
   if (!meta) {
     stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed)}\n`)
     return 1

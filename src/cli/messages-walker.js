@@ -111,7 +111,12 @@ export async function* walkExchanges(exchanges, opts) {
       const role = typeof m.role === 'string' ? m.role : ''
       if (role.length === 0) continue
 
-      const message_id = computeMessageId(conversation_id, role, m.content)
+      // extractMessageParts normalises content (string → single text block) before
+      // hashing, so the walker must do the same to keep its pre-check in sync
+      // with the message_id that ends up on each emitted row — otherwise a
+      // priorSeen seed loaded from Parquet never matches a string-form history
+      // message and dedup silently breaks across days.
+      const message_id = computeMessageId(conversation_id, role, normalizeContent(m.content))
 
       if (seenMessages.has(message_id)) {
         previous_message_id = message_id
@@ -313,6 +318,23 @@ function resolveProvider(upstream) {
     if (typeof name === 'string' && name.length > 0) return name
   }
   return 'anthropic'
+}
+
+/**
+ * Mirror of `extractMessageParts`' content normalisation. A string body and
+ * a single-text-block array body refer to the same logical content; both
+ * must hash to the same `message_id` so cross-day dedup works regardless of
+ * which shape Anthropic sent the day before.
+ *
+ * @param {unknown} content
+ * @returns {unknown}
+ */
+function normalizeContent(content) {
+  if (typeof content === 'string') {
+    return content.length === 0 ? [] : [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) return content
+  return []
 }
 
 /**

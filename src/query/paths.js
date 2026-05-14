@@ -126,7 +126,7 @@ export function datasetsForSource(source, datasets) {
   /** @type {QueryDataset[]} */
   const out = []
   if (source.signal === 'proxy') {
-    out.push('proxy_exchanges', 'proxy_stream_events')
+    out.push('proxy_messages')
   } else {
     out.push(source.signal)
   }

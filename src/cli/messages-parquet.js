@@ -56,11 +56,153 @@ export const MESSAGES_COLUMNS = [
 
 /**
  * Prepended to the schema when the output partitioning includes
- * `gateway_id`, mirroring `proxy-parquet.js`.
+ * `gateway_id`, mirroring the OTLP writers.
  *
  * @type {ColumnSpec}
  */
 export const GATEWAY_ID_COLUMN = { name: 'gateway_id', type: 'STRING', nullable: false }
+
+/**
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @returns {boolean}
+ */
+function hasGatewayIdColumn(partitionDimensions) {
+  return Array.isArray(partitionDimensions) && partitionDimensions.includes('gateway_id')
+}
+
+/**
+ * Materialised column list for `proxy_messages`. When the writer is told the
+ * partitioning includes `gateway_id`, the partition column is prepended so
+ * the on-disk Parquet always carries it as a typed column (callers source the
+ * value via `row.gateway_id`).
+ *
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @returns {ReadonlyArray<ColumnSpec>}
+ */
+export function columnsForMessages(partitionDimensions) {
+  if (hasGatewayIdColumn(partitionDimensions)) return [GATEWAY_ID_COLUMN, ...MESSAGES_COLUMNS]
+  return MESSAGES_COLUMNS
+}
+
+/**
+ * Convert a list of message part rows to a Parquet buffer. The rows match
+ * the shape emitted by the conversation walker — each property name is a
+ * column from {@link MESSAGES_COLUMNS} plus, when included, `gateway_id`.
+ *
+ * Returns `undefined` for an empty input unless `opts.allowEmpty` is true so
+ * callers can choose between skipping the write or emitting an empty
+ * partition file.
+ *
+ * @param {ReadonlyArray<Record<string, unknown>>} rows
+ * @param {ReadonlyArray<string>} [partitionDimensions]
+ * @param {{ allowEmpty?: boolean }} [opts]
+ * @returns {Promise<Uint8Array | undefined>}
+ */
+export async function messageRowsToParquet(rows, partitionDimensions, opts = {}) {
+  if (rows.length === 0 && !opts.allowEmpty) return undefined
+  const { parquetWriteBuffer } = await import('hyparquet-writer')
+  const columns = columnsForMessages(partitionDimensions)
+  const columnData = columns.map((spec) => ({
+    name: spec.name,
+    type: spec.type,
+    nullable: spec.nullable,
+    data: rows.map((row) => coerceCell(spec, row[spec.name])),
+  }))
+  const arrayBuffer = parquetWriteBuffer({ columnData })
+  return new Uint8Array(arrayBuffer)
+}
+
+/**
+ * @param {ColumnSpec} spec
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function coerceCell(spec, value) {
+  if (value === undefined || value === null) {
+    if (!spec.nullable) {
+      throw new Error(`required column "${spec.name}" got null`)
+    }
+    return undefined
+  }
+  switch (spec.type) {
+  case 'STRING':
+    return typeof value === 'string' ? value : String(value)
+  case 'INT32':
+    return coerceInt32(value, spec.name)
+  case 'INT64':
+    return coerceInt64(value, spec.name)
+  case 'DOUBLE':
+    return coerceDouble(value, spec.name)
+  case 'BOOLEAN':
+    return Boolean(value)
+  case 'TIMESTAMP':
+    return coerceTimestamp(value, spec.name)
+  case 'JSON':
+    return value
+  default:
+    return value
+  }
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {number}
+ */
+function coerceInt32(value, name) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return Math.trunc(n)
+  }
+  throw new Error(`column "${name}" expected INT32, got ${typeof value}`)
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {bigint}
+ */
+function coerceInt64(value, name) {
+  if (typeof value === 'bigint') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.trunc(value))
+  if (typeof value === 'string') {
+    try { return BigInt(value) } catch { /* fall through */ }
+  }
+  throw new Error(`column "${name}" expected INT64, got ${typeof value}`)
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {number}
+ */
+function coerceDouble(value, name) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'string') {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  throw new Error(`column "${name}" expected DOUBLE, got ${typeof value}`)
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} name
+ * @returns {Date}
+ */
+function coerceTimestamp(value, name) {
+  if (value instanceof Date) return value
+  if (typeof value === 'string') {
+    const d = new Date(value)
+    if (!Number.isNaN(d.getTime())) return d
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value)
+  if (typeof value === 'bigint') return new Date(Number(value))
+  throw new Error(`column "${name}" expected TIMESTAMP, got ${typeof value}`)
+}
 
 /**
  * Anthropic content-block `type` → schema `part_type`. Unknown types pass

@@ -148,11 +148,11 @@ export async function runQuery(argv, hooks = {}) {
     case 'proxy':
       return handleProxy(paths, parsed, stdout, stderr)
     case 'activity':
-      return executeGeneratedSql(paths, parsed, stdout, stderr, ['logs', 'traces', 'metrics', 'proxy_exchanges'], activitySql(parsed.limit))
+      return executeGeneratedSql(paths, parsed, stdout, stderr, ['logs', 'traces', 'metrics', 'proxy_messages'], activitySql(parsed.limit))
     case 'service':
       return handleService(paths, parsed, stdout, stderr)
     case 'errors':
-      return executeGeneratedSql(paths, parsed, stdout, stderr, ['logs', 'traces', 'proxy_exchanges'], errorsSql(parsed.limit))
+      return executeGeneratedSql(paths, parsed, stdout, stderr, ['logs', 'traces', 'proxy_messages'], errorsSql(parsed.limit))
     default:
       stderr.write(`error: unknown query command: ${command}\n\n${USAGE}\n`)
       return 2
@@ -618,13 +618,13 @@ async function handleMetrics(paths, parsed, stdout, stderr) {
  */
 async function handleProxy(paths, parsed, stdout, stderr) {
   const sub = parsed.positionals[1]
-  const exchangeId = parsed.positionals[2]
+  const conversationId = parsed.positionals[2]
   if (sub === 'tail') {
-    return renderLiveTail(paths, parsed, stdout, 'proxy_exchanges')
+    return renderLiveTail(paths, parsed, stdout, 'proxy_messages')
   }
   if (sub === 'get') {
-    if (!exchangeId) {
-      stderr.write('error: proxy get requires an exchange id\n')
+    if (!conversationId) {
+      stderr.write('error: proxy get requires a conversation id\n')
       return 2
     }
     return executeGeneratedSql(
@@ -632,23 +632,13 @@ async function handleProxy(paths, parsed, stdout, stderr) {
       parsed,
       stdout,
       stderr,
-      ['proxy_exchanges'],
-      `select * from proxy_exchanges where exchangeId = ${sqlString(exchangeId)} limit ${parsed.limit}`
+      ['proxy_messages'],
+      `select gateway_id, date, message_created_at, conversation_id, message_index, message_id, role, part_index, part_type, content_text, tool_name, tool_call_id, model from proxy_messages where conversation_id = ${sqlString(conversationId)} order by message_index asc, part_index asc limit ${parsed.limit}`
     )
   }
   if (sub === 'events') {
-    if (!exchangeId) {
-      stderr.write('error: proxy events requires an exchange id\n')
-      return 2
-    }
-    return executeGeneratedSql(
-      paths,
-      parsed,
-      stdout,
-      stderr,
-      ['proxy_stream_events'],
-      `select * from proxy_stream_events where exchangeId = ${sqlString(exchangeId)} order by tMs asc limit ${parsed.limit}`
-    )
+    stderr.write('error: proxy events was removed; query proxy_messages directly for streamed assistant content\n')
+    return 2
   }
   if (sub === 'stats') {
     return executeGeneratedSql(
@@ -656,8 +646,8 @@ async function handleProxy(paths, parsed, stdout, stderr) {
       parsed,
       stdout,
       stderr,
-      ['proxy_exchanges'],
-      `select upstream, responseStatus, count(*) as exchanges, avg(durationMs) as avg_duration_ms, max(durationMs) as max_duration_ms from proxy_exchanges group by upstream, responseStatus order by exchanges desc limit ${parsed.limit}`
+      ['proxy_messages'],
+      `select provider, model, count(*) as parts, count(distinct conversation_id) as conversations, count(distinct message_id) as messages from proxy_messages group by provider, model order by parts desc limit ${parsed.limit}`
     )
   }
   if (sub) {
@@ -669,8 +659,8 @@ async function handleProxy(paths, parsed, stdout, stderr) {
     parsed,
     stdout,
     stderr,
-    ['proxy_exchanges'],
-    `select gateway_id, date, tsStart, durationMs, upstream, responseStatus, requestMethod, requestPath, exchangeId, error from proxy_exchanges order by tsStart desc limit ${parsed.limit}`
+    ['proxy_messages'],
+    `select gateway_id, date, message_created_at, conversation_id, role, part_type, model, content_text from proxy_messages order by message_created_at desc limit ${parsed.limit}`
   )
 }
 
@@ -801,8 +791,8 @@ function refreshCommand(parsed) {
 async function renderLiveTail(paths, parsed, stdout, dataset) {
   const rows = await readLiveRows(paths, { ...baseScope(parsed), dataset })
   const selected = rows.slice(-parsed.limit)
-  const columns = dataset === 'proxy_exchanges'
-    ? ['gateway_id', 'date', 'tsStart', 'durationMs', 'upstream', 'responseStatus', 'requestPath', 'exchangeId', 'error']
+  const columns = dataset === 'proxy_messages'
+    ? ['gateway_id', 'date', 'ts_start', 'duration_ms', 'upstream', 'response_status', 'request_path', 'exchange_id', 'error']
     : ['gateway_id', 'date', 'timestamp', 'severityText', 'serviceName', 'body', 'traceId', 'spanId']
   stdout.write(renderResult({ columns, rows: selected }, parsed.format))
   return 0
@@ -819,9 +809,9 @@ async function readLiveRows(paths, scope) {
   const rows = []
   for (const source of sources) {
     for await (const raw of readJsonlRows(source.jsonlPath)) {
-      if (scope.dataset === 'proxy_exchanges') {
+      if (scope.dataset === 'proxy_messages') {
         if (raw.kind !== 'exchange') continue
-        rows.push(logicalProxyExchange(raw, source.gatewayId, source.date))
+        rows.push(liveProxyExchangeRow(raw, source.gatewayId, source.date))
       } else {
         rows.push({ ...raw, gateway_id: source.gatewayId, date: source.date })
       }
@@ -831,24 +821,30 @@ async function readLiveRows(paths, scope) {
 }
 
 /**
+ * Live-tail view of one raw `exchange` JSONL row. The `proxy_messages`
+ * Parquet schema is conversation-grain; for tail we still want the
+ * wire-level "what just flew through" columns, so this projection lifts the
+ * common fields out of the JSONL exchange directly without going through
+ * the conversation walker.
+ *
  * @param {Record<string, unknown>} raw
  * @param {string} gatewayId
  * @param {string} date
  * @returns {Record<string, unknown>}
  */
-function logicalProxyExchange(raw, gatewayId, date) {
+function liveProxyExchangeRow(raw, gatewayId, date) {
   return {
     gateway_id: gatewayId,
     date,
-    exchangeId: raw.exchange_id,
-    tsStart: raw.ts_start,
-    tsEnd: raw.ts_end,
-    durationMs: raw.duration_ms,
+    exchange_id: raw.exchange_id,
+    ts_start: raw.ts_start,
+    ts_end: raw.ts_end,
+    duration_ms: raw.duration_ms,
     upstream: raw.upstream,
-    requestMethod: readPath(raw, ['request', 'method']),
-    requestPath: readPath(raw, ['request', 'path']),
-    responseStatus: readPath(raw, ['response', 'status']),
-    streamEventCount: raw.stream_event_count,
+    request_method: readPath(raw, ['request', 'method']),
+    request_path: readPath(raw, ['request', 'path']),
+    response_status: readPath(raw, ['response', 'status']),
+    stream_event_count: raw.stream_event_count,
     error: raw.error,
   }
 }
@@ -863,7 +859,7 @@ function liveRowMatchesScope(row, scope) {
   if (scope.date && row.date !== scope.date) return false
   if (scope.service && row.serviceName !== scope.service) return false
   if (!scope.from && !scope.to) return true
-  const raw = row.timestamp ?? row.observedTimestamp ?? row.tsStart
+  const raw = row.timestamp ?? row.observedTimestamp ?? row.ts_start
   if (raw === undefined || raw === null) return true
   const ms = Date.parse(String(raw))
   if (!Number.isFinite(ms)) return true
@@ -936,7 +932,7 @@ select 'trace' as signal, startTimestamp as timestamp, gateway_id, serviceName, 
 union all
 select 'metric' as signal, timestamp as timestamp, gateway_id, serviceName, metricName as detail from metrics
 union all
-select 'proxy' as signal, tsStart as timestamp, gateway_id, upstream as serviceName, requestPath as detail from proxy_exchanges
+select 'proxy' as signal, message_created_at as timestamp, gateway_id, provider as serviceName, role as detail from proxy_messages
 order by timestamp desc
 limit ${limit}`
 }
@@ -966,7 +962,7 @@ select 'log' as signal, timestamp as timestamp, gateway_id, serviceName, severit
 union all
 select 'trace' as signal, startTimestamp as timestamp, gateway_id, serviceName, name as detail from traces where JSON_VALUE(status, '$.code') = 2
 union all
-select 'proxy' as signal, tsStart as timestamp, gateway_id, upstream as serviceName, error as detail from proxy_exchanges where responseStatus >= 500 or error is not null
+select 'proxy' as signal, message_created_at as timestamp, gateway_id, provider as serviceName, content_text as detail from proxy_messages where part_type = 'error' or JSON_VALUE(status, '$.tool_status') = 'error'
 order by timestamp desc
 limit ${limit}`
 }

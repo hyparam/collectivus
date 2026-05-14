@@ -5,8 +5,7 @@ export type QueryDataset =
   | 'logs'
   | 'traces'
   | 'metrics'
-  | 'proxy_exchanges'
-  | 'proxy_stream_events'
+  | 'proxy_messages'
 
 export type QueryFormat = 'table' | 'json' | 'jsonl' | 'markdown'
 export type QueryRefreshMode = 'never' | 'always'

@@ -79,7 +79,7 @@ describe('ctvs collect', function() {
 
     const manifestPath = path.join(sinkDir, '.collectivus-query', 'collections.json')
     expect(JSON.parse(fs.readFileSync(manifestPath, 'utf8'))).toMatchObject({
-      version: 1,
+      version: 2,
       collections: {
         random_log: {
           name: 'random-log',
@@ -209,7 +209,7 @@ describe('ctvs collect', function() {
       stderr: memo(),
     })).toBe(0)
     expect(JSON.parse(listOut.value())).toEqual([
-      expect.objectContaining({ name: 'change-me', table: 'change_me', source_path: secondPath }),
+      expect.objectContaining({ name: 'change-me', table: 'change_me', source: secondPath, mode: 'file' }),
     ])
 
     const sqlOut = memo()

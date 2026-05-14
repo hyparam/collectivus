@@ -5,6 +5,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { defaultServerDataDir } from '../server/config_registry.js'
 import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
+import { getInitPreset, isInitPreset, listInitPresets } from './init_presets/index.js'
 
 /**
  * @import { CollectivusConfig, FileSinkConfig, ServerConfig, UploadConfig } from '../types.js'
@@ -762,4 +763,62 @@ function formatUrlHost(host) {
 async function askSavePath(prompt, cwd, defaultPath) {
   const ans = (await prompt(`Save config to [${defaultPath}]: `)).trim()
   return ans === '' ? defaultPath : path.resolve(cwd, ans)
+}
+
+/**
+ * CLI subcommand entry point for `ctvs init [...args]`.
+ *
+ * Routing:
+ * - `ctvs init <preset>` → dispatches to the named preset (e.g. gascity).
+ * - `ctvs init` (no args) → runs the existing interactive walkthrough via `runInit`.
+ * - `ctvs init --help` → prints subcommand usage including available presets.
+ *
+ * @param {string[]} argv
+ * @param {object} [hooks]
+ * @returns {Promise<number>}
+ */
+export async function runInitSubcommand(argv, hooks = {}) {
+  const stdout = /** @type {{ write: (s: string) => void }} */ (
+    /** @type {any} */ (hooks).stdout ?? process.stdout
+  )
+  const stderr = /** @type {{ write: (s: string) => void }} */ (
+    /** @type {any} */ (hooks).stderr ?? process.stderr
+  )
+  const first = argv[0]
+
+  if (first === '--help' || first === '-h') {
+    stdout.write(initSubcommandUsage() + '\n')
+    return 0
+  }
+
+  if (first && !first.startsWith('-')) {
+    if (!isInitPreset(first)) {
+      stderr.write(`error: unknown init preset: ${first}\n\n${initSubcommandUsage()}\n`)
+      return 2
+    }
+    const preset = getInitPreset(first)
+    if (!preset) {
+      stderr.write(`error: unknown init preset: ${first}\n`)
+      return 2
+    }
+    return preset.run(argv.slice(1), hooks)
+  }
+
+  return runInit(hooks)
+}
+
+/**
+ * @returns {string}
+ */
+function initSubcommandUsage() {
+  const presets = listInitPresets()
+    .map((p) => `  ${p.name.padEnd(12)} ${p.description}`)
+    .join('\n')
+  return `Usage:
+  ctvs init                 Interactive Collectivus config walkthrough
+  ctvs init <preset>        Run a named preset scaffolder
+  ctvs init --help          Show this help
+
+Presets:
+${presets}`
 }

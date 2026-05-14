@@ -33,9 +33,10 @@ ctvs query proxy get <conversation-id> --format json
 ctvs query proxy stats --format json
 ctvs query errors --since 24h --format json
 ctvs collect <file.jsonl> --name <name>
+ctvs collect --glob '<pattern>' --name <name>
 ```
 
-`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its Parquet cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`.
+`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its Parquet cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`. Pass `--glob '<pattern>'` instead of a single path to back one logical table with many files; each matched file becomes its own cache partition and `_ctvs_source_path` tells you which file a row came from.
 
 ## Proxy conversation log model
 

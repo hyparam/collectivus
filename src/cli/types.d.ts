@@ -106,6 +106,7 @@ export type CollectParseResult =
     configPath: string
     parquetDir?: string
     filePath?: string
+    glob?: string
     name?: string
     replace: boolean
     timestampColumn?: string

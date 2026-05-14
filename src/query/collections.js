@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
@@ -17,7 +18,8 @@ import { QUERY_CACHE_SCHEMA_VERSION, isQueryDataset } from './schema.js'
  * } from './types.js'
  */
 
-const MANIFEST_VERSION = 1
+const MANIFEST_VERSION = 2
+const SUPPORTED_MANIFEST_VERSIONS = new Set([1, 2])
 /** @type {CollectionColumnMeta[]} */
 const META_COLUMNS = [
   { name: '_ctvs_source_path', type: 'STRING', nullable: false },
@@ -59,8 +61,17 @@ export function collectionsManifestPath(recordingRoot) {
  * @param {string} table
  * @returns {string}
  */
+export function collectionTableDir(parquetDir, table) {
+  return path.join(parquetDir, 'collections', table)
+}
+
+/**
+ * @param {string} parquetDir
+ * @param {string} table
+ * @returns {string}
+ */
 export function collectionParquetPath(parquetDir, table) {
-  return path.join(parquetDir, 'collections', table, 'data.parquet')
+  return path.join(collectionTableDir(parquetDir, table), 'data.parquet')
 }
 
 /**
@@ -70,6 +81,24 @@ export function collectionParquetPath(parquetDir, table) {
  */
 export function collectionMetaPath(parquetDir, table) {
   return `${collectionParquetPath(parquetDir, table)}.meta.json`
+}
+
+/**
+ * @param {string} absSourcePath
+ * @returns {string}
+ */
+function collectionPartitionKey(absSourcePath) {
+  return crypto.createHash('sha256').update(absSourcePath).digest('hex').slice(0, 12)
+}
+
+/**
+ * @param {string} parquetDir
+ * @param {string} table
+ * @param {string} absSourcePath
+ * @returns {string}
+ */
+function collectionGlobParquetPath(parquetDir, table, absSourcePath) {
+  return path.join(collectionTableDir(parquetDir, table), `source=${collectionPartitionKey(absSourcePath)}`, 'data.parquet')
 }
 
 /**
@@ -166,7 +195,8 @@ export function findCollection(manifest, nameOrTable) {
 /**
  * @param {{
  *   recordingRoot: string,
- *   filePath: string,
+ *   filePath?: string,
+ *   glob?: string,
  *   name: string,
  *   timestampColumn?: string,
  *   replace?: boolean,
@@ -175,15 +205,31 @@ export function findCollection(manifest, nameOrTable) {
  */
 export function registerCollection(args) {
   const { recordingRoot, name, timestampColumn, replace = false } = args
-  const sourcePath = path.resolve(args.filePath)
-  const stat = safeStat(sourcePath)
-  if (!stat || !stat.isFile()) {
-    throw new Error(`JSONL file not found: ${sourcePath}`)
+  const hasPath = typeof args.filePath === 'string' && args.filePath.length > 0
+  const hasGlob = typeof args.glob === 'string' && args.glob.length > 0
+  if (hasPath === hasGlob) {
+    throw new Error('registerCollection requires exactly one of filePath or glob')
   }
 
   const table = normalizeTableName(name)
   if (isQueryDataset(table)) {
     throw new Error(`collection table "${table}" conflicts with a built-in query dataset`)
+  }
+
+  /** @type {string | undefined} */
+  let sourcePath
+  /** @type {string | undefined} */
+  let sourceGlob
+  if (hasPath) {
+    sourcePath = path.resolve(/** @type {string} */ (args.filePath))
+    const stat = safeStat(sourcePath)
+    if (!stat || !stat.isFile()) {
+      throw new Error(`JSONL file not found: ${sourcePath}`)
+    }
+  } else {
+    sourceGlob = path.isAbsolute(/** @type {string} */ (args.glob))
+      ? /** @type {string} */ (args.glob)
+      : path.resolve(/** @type {string} */ (args.glob))
   }
 
   const manifest = readCollectionsManifest(recordingRoot)
@@ -193,10 +239,12 @@ export function registerCollection(args) {
   }
 
   const now = new Date().toISOString()
+  /** @type {JsonlCollection} */
   const collection = {
     name,
     table,
-    source_path: sourcePath,
+    ...(sourcePath ? { source_path: sourcePath } : {}),
+    ...(sourceGlob ? { source_glob: sourceGlob } : {}),
     ...(timestampColumn ? { timestamp_column: timestampColumn } : {}),
     created_at: existing?.created_at ?? now,
     updated_at: now,
@@ -229,27 +277,158 @@ export function expectedCollectionPartitions(paths, scope) {
   if (!paths.parquetDir) return []
   const manifest = readCollectionsManifest(paths.recordingRoot)
   const wanted = collectionTablesForScope(manifest, scope)
-  return wanted.map((collection) => collectionPartitionFor(paths.parquetDir, collection))
+  const parquetDir = paths.parquetDir
+  return wanted.flatMap((collection) => collectionPartitionsFor(parquetDir, collection))
 }
 
 /**
  * @param {string} parquetDir
  * @param {JsonlCollection} collection
+ * @returns {CollectionCachePartition[]}
+ */
+export function collectionPartitionsFor(parquetDir, collection) {
+  if (typeof collection.source_glob === 'string') {
+    const matches = resolveGlobMatches(collection.source_glob)
+    if (matches.length === 0) return []
+    return matches.map((absPath) => buildPartition(parquetDir, collection, absPath, true))
+  }
+  if (typeof collection.source_path === 'string') {
+    return [buildPartition(parquetDir, collection, collection.source_path, false)]
+  }
+  return []
+}
+
+/**
+ * Legacy single-partition entry point retained for back-compat with internal
+ * call sites (e.g. tests). New code should use `collectionPartitionsFor`.
+ *
+ * @param {string} parquetDir
+ * @param {JsonlCollection} collection
  * @returns {CollectionCachePartition}
  */
 export function collectionPartitionFor(parquetDir, collection) {
-  const stat = safeStat(collection.source_path)
+  const partitions = collectionPartitionsFor(parquetDir, collection)
+  if (partitions.length === 0) {
+    throw new Error(`collection "${collection.table}" has no resolvable source partitions`)
+  }
+  return partitions[0]
+}
+
+/**
+ * @param {string} parquetDir
+ * @param {JsonlCollection} collection
+ * @param {string} absSourcePath
+ * @param {boolean} globMode
+ * @returns {CollectionCachePartition}
+ */
+function buildPartition(parquetDir, collection, absSourcePath, globMode) {
+  const stat = safeStat(absSourcePath)
+  const parquetPath = globMode
+    ? collectionGlobParquetPath(parquetDir, collection.table, absSourcePath)
+    : collectionParquetPath(parquetDir, collection.table)
   return {
     kind: 'collection',
     dataset: collection.table,
     table: collection.table,
     collection,
-    jsonlPath: collection.source_path,
+    jsonlPath: absSourcePath,
     sourceExists: Boolean(stat?.isFile()),
     sourceSize: stat?.isFile() ? stat.size : -1,
     sourceMtimeMs: stat?.isFile() ? stat.mtimeMs : -1,
-    parquetPath: collectionParquetPath(parquetDir, collection.table),
-    metaPath: collectionMetaPath(parquetDir, collection.table),
+    parquetPath,
+    metaPath: `${parquetPath}.meta.json`,
+  }
+}
+
+/**
+ * Resolve a glob pattern to a sorted, deduplicated list of absolute file
+ * paths. Empty list when nothing matches or the pattern's root does not
+ * exist. Errors during traversal are swallowed — the source is considered
+ * empty rather than refusing to query.
+ *
+ * Supports `**` (any depth, including zero), `*` (anything except `/`),
+ * `?` (single char except `/`), and literal segments. Anchored at the
+ * longest non-glob prefix of the pattern. Rolled by hand so we don't
+ * depend on Node 24's `fs.globSync`.
+ *
+ * @param {string} pattern
+ * @returns {string[]}
+ */
+function resolveGlobMatches(pattern) {
+  const abs = path.isAbsolute(pattern) ? pattern : path.resolve(pattern)
+  const { root, regex } = compileGlobPattern(abs)
+  if (!isDir(root)) return []
+  /** @type {string[]} */
+  const out = []
+  walkDir(root, (filePath) => {
+    if (regex.test(filePath)) out.push(filePath)
+  })
+  out.sort()
+  return out
+}
+
+/**
+ * @param {string} absPattern
+ * @returns {{ root: string, regex: RegExp }}
+ */
+function compileGlobPattern(absPattern) {
+  const segments = absPattern.split('/')
+  /** @type {string[]} */
+  const rootSegments = []
+  let rootDone = false
+  for (const seg of segments) {
+    if (!rootDone && !hasGlobChars(seg)) {
+      rootSegments.push(seg)
+    } else {
+      rootDone = true
+    }
+  }
+  const root = rootSegments.join('/') || '/'
+  /** @type {string[]} */
+  const out = []
+  for (let i = 0; i < absPattern.length; i++) {
+    const ch = absPattern[i]
+    if (ch === '*' && absPattern[i + 1] === '*') {
+      out.push('.*')
+      i++
+      continue
+    }
+    if (ch === '*') { out.push('[^/]*'); continue }
+    if (ch === '?') { out.push('[^/]'); continue }
+    if (/[.+^$(){}|[\]\\]/.test(ch)) { out.push(`\\${ch}`); continue }
+    out.push(ch)
+  }
+  return { root, regex: new RegExp(`^${out.join('')}$`) }
+}
+
+/**
+ * @param {string} seg
+ * @returns {boolean}
+ */
+function hasGlobChars(seg) {
+  return /[*?[\]{}]/.test(seg)
+}
+
+/**
+ * @param {string} dir
+ * @param {(filePath: string) => void} onFile
+ * @returns {void}
+ */
+function walkDir(dir, onFile) {
+  /** @type {fs.Dirent[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      walkDir(full, onFile)
+    } else if (entry.isFile()) {
+      onFile(full)
+    }
   }
 }
 
@@ -293,6 +472,27 @@ export function inspectCollectionCachePartitions(partitions) {
 }
 
 /**
+ * Read any cached meta for the given collection — useful for catalog and
+ * schema commands where any partition's columns describe the table. For
+ * single-file collections this is the canonical meta; for glob collections
+ * it returns the first partition's meta that exists on disk.
+ *
+ * @param {string} parquetDir
+ * @param {JsonlCollection} collection
+ * @returns {CollectionCacheMeta | undefined}
+ */
+export function readAnyCollectionMeta(parquetDir, collection) {
+  if (typeof collection.source_path === 'string') {
+    return readCollectionCacheMeta(collectionMetaPath(parquetDir, collection.table))
+  }
+  for (const partition of collectionPartitionsFor(parquetDir, collection)) {
+    const meta = readCollectionCacheMeta(partition.metaPath)
+    if (meta) return meta
+  }
+  return undefined
+}
+
+/**
  * @param {string} metaPath
  * @returns {CollectionCacheMeta | undefined}
  */
@@ -328,6 +528,51 @@ export function readCollectionCacheMeta(metaPath) {
 }
 
 /**
+ * Delete cached parquet partitions whose source file no longer matches the
+ * collection (file deleted, or glob no longer matches it). Only runs for
+ * glob-mode collections — single-file collections leave their parquet in
+ * place even if the source disappears, matching pre-glob behavior.
+ *
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @param {{ write: (s: string) => void } | undefined} stdout
+ * @returns {void}
+ */
+function pruneOrphanCollectionPartitions(paths, scope, stdout) {
+  if (!paths.parquetDir) return
+  const manifest = readCollectionsManifest(paths.recordingRoot)
+  const wanted = collectionTablesForScope(manifest, scope)
+  for (const collection of wanted) {
+    if (typeof collection.source_glob !== 'string') continue
+    const tableDir = collectionTableDir(paths.parquetDir, collection.table)
+    if (!isDir(tableDir)) continue
+    const live = new Set(resolveGlobMatches(collection.source_glob))
+    /** @type {fs.Dirent[]} */
+    let entries
+    try {
+      entries = fs.readdirSync(tableDir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      if (!entry.name.startsWith('source=')) continue
+      const partitionDir = path.join(tableDir, entry.name)
+      const metaPath = path.join(partitionDir, 'data.parquet.meta.json')
+      const meta = readCollectionCacheMeta(metaPath)
+      const sourcePath = meta?.source_path
+      if (sourcePath && live.has(path.resolve(sourcePath))) continue
+      try {
+        fs.rmSync(partitionDir, { recursive: true, force: true })
+        stdout?.write(`pruned orphan partition ${partitionDir}\n`)
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  }
+}
+
+/**
  * @param {{
  *   paths: QueryPaths,
  *   scope: QueryScope,
@@ -344,6 +589,7 @@ export async function refreshCollectionCache(args) {
 
   /** @type {RefreshResult} */
   const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
+  pruneOrphanCollectionPartitions(paths, scope, stdout)
   const partitions = expectedCollectionPartitions(paths, scope)
   for (const partition of partitions) {
     const state = inspectCollectionCachePartition(partition)
@@ -665,7 +911,7 @@ function normalizeManifest(parsed, manifestPath) {
     throw new Error(`collection manifest ${manifestPath} must be a JSON object`)
   }
   const obj = /** @type {Record<string, unknown>} */ (parsed)
-  if (obj.version !== MANIFEST_VERSION) {
+  if (typeof obj.version !== 'number' || !SUPPORTED_MANIFEST_VERSIONS.has(obj.version)) {
     throw new Error(`collection manifest ${manifestPath} has unsupported version ${JSON.stringify(obj.version)}`)
   }
   if (!obj.collections || typeof obj.collections !== 'object' || Array.isArray(obj.collections)) {
@@ -679,7 +925,9 @@ function normalizeManifest(parsed, manifestPath) {
     if (typeof collection.name !== 'string') continue
     if (typeof collection.table !== 'string') continue
     if (collection.table !== table) continue
-    if (typeof collection.source_path !== 'string') continue
+    const hasPath = typeof collection.source_path === 'string'
+    const hasGlob = typeof collection.source_glob === 'string'
+    if (hasPath === hasGlob) continue
     if (collection.timestamp_column !== undefined && typeof collection.timestamp_column !== 'string') continue
     if (typeof collection.created_at !== 'string') continue
     if (typeof collection.updated_at !== 'string') continue
@@ -810,6 +1058,18 @@ function safeStat(p) {
 function isFile(p) {
   try {
     return fs.statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {string} p
+ * @returns {boolean}
+ */
+function isDir(p) {
+  try {
+    return fs.statSync(p).isDirectory()
   } catch {
     return false
   }

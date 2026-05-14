@@ -64,10 +64,13 @@ Use `ctvs collect` to register arbitrary local JSONL files as dynamic query tabl
 
 ```bash
 ctvs collect random-log.jsonl --name random-log
+ctvs collect --glob '/path/to/segments/**/*.jsonl' --name segments
 ctvs query sql "select * from random_log" --format json
 ```
 
-`ctvs collect` stores the absolute source path and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `--refresh always` refreshes before running the query.
+`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `--refresh always` refreshes before running the query.
+
+With `--glob`, one logical table is backed by many source files: each matched file becomes its own cache partition under `.collectivus-query/parquet/collections/<table>/source=<hash>/data.parquet`, and only files whose mtime/size changed re-materialize on refresh. Files that no longer match the glob are pruned from the cache on the next refresh. Inside SQL, use `_ctvs_source_path` to see which file a row came from.
 
 Collection tables always include `_ctvs_source_path`, `_ctvs_line_number`, and `_ctvs_raw`, plus inferred top-level JSON fields. Use `--timestamp-column <field>` when registering a file if `--from`, `--to`, `--since`, or `--date` should use a specific field.
 

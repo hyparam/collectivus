@@ -113,8 +113,17 @@ export interface JsonlCollection {
   name: string
   /** SQL-safe table name exposed to `ctvs query sql`. */
   table: string
-  /** Absolute path to the external JSONL source file. */
-  source_path: string
+  /**
+   * Absolute path to a single external JSONL source file. Exactly one of
+   * `source_path` or `source_glob` is set on a valid collection.
+   */
+  source_path?: string
+  /**
+   * Absolute glob pattern matching one or more external JSONL source files.
+   * Each matched file becomes its own cache partition under
+   * `collections/<table>/source=<hash>/data.parquet`.
+   */
+  source_glob?: string
   /** Optional source field requested for time filtering. */
   timestamp_column?: string
   created_at: string
@@ -122,7 +131,7 @@ export interface JsonlCollection {
 }
 
 export interface CollectionsManifest {
-  version: 1
+  version: 2
   collections: Record<string, JsonlCollection>
 }
 

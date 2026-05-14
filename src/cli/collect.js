@@ -19,15 +19,18 @@ import {
 
 const USAGE = `Usage:
   ctvs collect <file.jsonl> --name <name> [--replace] [--timestamp-column <field>]
+  ctvs collect --glob <pattern> --name <name> [--replace] [--timestamp-column <field>]
   ctvs collect list
   ctvs collect remove <name-or-table>
 
-Register external JSONL files as dynamic tables for \`ctvs query sql\`.
+Register external JSONL files as dynamic tables for \`ctvs query sql\`. Use --glob to back a
+single logical table with many files (one cache partition per matched file).
 
 Options:
   --config <path|url>            Config path or URL (default: ~/.hyp/collectivus.json)
   --parquet-dir <dir>            Query-cache directory
   --name <name>                  User-facing collection name; normalized to a SQL table name
+  --glob <pattern>               Absolute glob (or one resolved against cwd) matching JSONL files
   --replace                      Replace an existing collection with the same normalized table name
   --timestamp-column <field>     Source field used for --from/--to/--since filtering
   --format <fmt>                 table, json, jsonl, markdown (list only)
@@ -38,7 +41,7 @@ Options:
  * @returns {CollectParseResult}
  */
 export function parseCollectArgs(argv) {
-  /** @type {{ kind: 'add' | 'list' | 'remove', configPath: string, parquetDir?: string, filePath?: string, name?: string, nameOrTable?: string, replace: boolean, timestampColumn?: string, format: QueryFormat }} */
+  /** @type {{ kind: 'add' | 'list' | 'remove', configPath: string, parquetDir?: string, filePath?: string, glob?: string, name?: string, nameOrTable?: string, replace: boolean, timestampColumn?: string, format: QueryFormat }} */
   const out = {
     kind: 'add',
     configPath: defaultConfigPath(),
@@ -91,6 +94,12 @@ export function parseCollectArgs(argv) {
       out.name = name
       continue
     }
+    const glob = readValue('--glob')
+    if (glob !== undefined) {
+      if (!glob) return { kind: 'error', message: '--glob requires a pattern', exitCode: 2 }
+      out.glob = glob
+      continue
+    }
     const timestampColumn = readValue('--timestamp-column')
     if (timestampColumn !== undefined) {
       if (!timestampColumn) return { kind: 'error', message: '--timestamp-column requires a field name', exitCode: 2 }
@@ -116,7 +125,14 @@ export function parseCollectArgs(argv) {
   }
 
   if (out.kind === 'add') {
-    if (!out.filePath) return { kind: 'error', message: 'JSONL file path is required', exitCode: 2 }
+    const hasPath = Boolean(out.filePath)
+    const hasGlob = Boolean(out.glob)
+    if (hasPath && hasGlob) {
+      return { kind: 'error', message: 'pass either a JSONL file path or --glob, not both', exitCode: 2 }
+    }
+    if (!hasPath && !hasGlob) {
+      return { kind: 'error', message: 'JSONL file path or --glob is required', exitCode: 2 }
+    }
     if (!out.name) return { kind: 'error', message: '--name is required', exitCode: 2 }
   }
   if (out.kind === 'remove' && !out.nameOrTable) {
@@ -169,10 +185,11 @@ export async function runCollect(argv, hooks = {}) {
       const rows = listCollections(paths.recordingRoot).map((collection) => ({
         name: collection.name,
         table: collection.table,
-        source_path: collection.source_path,
+        source: collection.source_path ?? collection.source_glob ?? '',
+        mode: collection.source_glob ? 'glob' : 'file',
         timestamp_column: collection.timestamp_column ?? '',
       }))
-      stdout.write(renderResult({ columns: ['name', 'table', 'source_path', 'timestamp_column'], rows }, parsed.format))
+      stdout.write(renderResult({ columns: ['name', 'table', 'source', 'mode', 'timestamp_column'], rows }, parsed.format))
       return 0
     }
     case 'remove': {
@@ -193,6 +210,7 @@ export async function runCollect(argv, hooks = {}) {
       const collection = registerCollection({
         recordingRoot: paths.recordingRoot,
         filePath: parsed.filePath,
+        glob: parsed.glob,
         name: parsed.name,
         timestampColumn: parsed.timestampColumn,
         replace: parsed.replace,

@@ -2,7 +2,7 @@
 
 import process from 'node:process'
 
-const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'admin', 'invite', 'export', 'query', 'collect', 'rendezvous', 'join', 'skills', 'claude-hook'])
+const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'admin', 'invite', 'export', 'query', 'collect', 'rendezvous', 'join', 'skills', 'claude-hook', 'init'])
 
 const argv = process.argv.slice(2)
 const subcommand = argv[0]
@@ -103,6 +103,10 @@ async function loadSubcommand(name) {
   case 'claude-hook': {
     const { runClaudeHook } = await import('../src/cli/claude-hook.js')
     return runClaudeHook
+  }
+  case 'init': {
+    const { runInitSubcommand } = await import('../src/cli/init.js')
+    return runInitSubcommand
   }
   default:
     throw new Error(`unknown subcommand: ${name}`)

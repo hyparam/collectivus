@@ -341,32 +341,94 @@ function buildPartition(parquetDir, collection, absSourcePath, globMode) {
 }
 
 /**
- * Resolve an absolute glob pattern to a sorted, deduplicated list of file
- * paths. Empty list when nothing matches. Errors during glob resolution
- * (e.g. unreadable directory) are swallowed — the source is considered
+ * Resolve a glob pattern to a sorted, deduplicated list of absolute file
+ * paths. Empty list when nothing matches or the pattern's root does not
+ * exist. Errors during traversal are swallowed — the source is considered
  * empty rather than refusing to query.
+ *
+ * Supports `**` (any depth, including zero), `*` (anything except `/`),
+ * `?` (single char except `/`), and literal segments. Anchored at the
+ * longest non-glob prefix of the pattern. Rolled by hand so we don't
+ * depend on Node 24's `fs.globSync`.
  *
  * @param {string} pattern
  * @returns {string[]}
  */
 function resolveGlobMatches(pattern) {
-  try {
-    /** @type {string[]} */
-    const raw = /** @type {string[]} */ (fs.globSync(pattern))
-    const seen = new Set()
-    const out = []
-    for (const match of raw) {
-      const abs = path.resolve(match)
-      if (seen.has(abs)) continue
-      const stat = safeStat(abs)
-      if (!stat || !stat.isFile()) continue
-      seen.add(abs)
-      out.push(abs)
+  const abs = path.isAbsolute(pattern) ? pattern : path.resolve(pattern)
+  const { root, regex } = compileGlobPattern(abs)
+  if (!isDir(root)) return []
+  /** @type {string[]} */
+  const out = []
+  walkDir(root, (filePath) => {
+    if (regex.test(filePath)) out.push(filePath)
+  })
+  out.sort()
+  return out
+}
+
+/**
+ * @param {string} absPattern
+ * @returns {{ root: string, regex: RegExp }}
+ */
+function compileGlobPattern(absPattern) {
+  const segments = absPattern.split('/')
+  /** @type {string[]} */
+  const rootSegments = []
+  let rootDone = false
+  for (const seg of segments) {
+    if (!rootDone && !hasGlobChars(seg)) {
+      rootSegments.push(seg)
+    } else {
+      rootDone = true
     }
-    out.sort()
-    return out
+  }
+  const root = rootSegments.join('/') || '/'
+  /** @type {string[]} */
+  const out = []
+  for (let i = 0; i < absPattern.length; i++) {
+    const ch = absPattern[i]
+    if (ch === '*' && absPattern[i + 1] === '*') {
+      out.push('.*')
+      i++
+      continue
+    }
+    if (ch === '*') { out.push('[^/]*'); continue }
+    if (ch === '?') { out.push('[^/]'); continue }
+    if (/[.+^$(){}|[\]\\]/.test(ch)) { out.push(`\\${ch}`); continue }
+    out.push(ch)
+  }
+  return { root, regex: new RegExp(`^${out.join('')}$`) }
+}
+
+/**
+ * @param {string} seg
+ * @returns {boolean}
+ */
+function hasGlobChars(seg) {
+  return /[*?[\]{}]/.test(seg)
+}
+
+/**
+ * @param {string} dir
+ * @param {(filePath: string) => void} onFile
+ * @returns {void}
+ */
+function walkDir(dir, onFile) {
+  /** @type {fs.Dirent[]} */
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
   } catch {
-    return []
+    return
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      walkDir(full, onFile)
+    } else if (entry.isFile()) {
+      onFile(full)
+    }
   }
 }
 

@@ -18,14 +18,12 @@ import {
 import { refreshQueryCache } from '../query/refresh.js'
 import { executeLogicalSql, prepareReadOnlySql } from '../query/sql.js'
 import {
-  collectionMetaPath,
-  readAnyCollectionMeta,
   collectionTablesForQuery,
   expectedCollectionPartitions,
   inspectCollectionCachePartitions,
   listCollections,
   normalizeTableName,
-  readCollectionCacheMeta,
+  readAnyCollectionMeta,
   refreshCollectionCache,
 } from '../query/collections.js'
 

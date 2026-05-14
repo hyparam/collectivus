@@ -88,7 +88,7 @@ describe('ctvs collect --glob', function() {
     expect(JSON.parse(sqlOut.value())).toEqual([{ c: 3 }])
 
     const filterOut = memo()
-    expect(await runQuery(['sql', "select count(*) as c from segs where actor = 'mayor'", '--config', configPath, '--format', 'json'], {
+    expect(await runQuery(['sql', 'select count(*) as c from segs where actor = \'mayor\'', '--config', configPath, '--format', 'json'], {
       stdout: filterOut,
       stderr: memo(),
     })).toBe(0)

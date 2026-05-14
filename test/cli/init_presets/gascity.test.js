@@ -51,6 +51,10 @@ function writeEvents() {
     ].map((r) => JSON.stringify(r)).join('\n') + '\n')
 }
 
+/**
+ * @param {string} name
+ * @param {Record<string, unknown>[]} rows
+ */
 function writeSegment(name, rows) {
   fs.writeFileSync(
     path.join(gcRoot, '.gc', 'runtime', 'session-reconciler-trace', 'segments', '2026', '05', '14', name),
@@ -93,7 +97,7 @@ describe('ctvs init gascity', function() {
     expect(manifest.collections.session_segments.timestamp_column).toBe('ts')
 
     const sqlOut = memo()
-    expect(await runQuery(['sql', "select actor, count(*) as n from events group by actor order by n desc", '--config', configPath, '--format', 'json'], {
+    expect(await runQuery(['sql', 'select actor, count(*) as n from events group by actor order by n desc', '--config', configPath, '--format', 'json'], {
       stdout: sqlOut,
       stderr: memo(),
     })).toBe(0)
@@ -104,7 +108,7 @@ describe('ctvs init gascity', function() {
     ]))
 
     const segOut = memo()
-    expect(await runQuery(['sql', "select count(*) as n from session_segments where template like '%mayor'", '--config', configPath, '--format', 'json'], {
+    expect(await runQuery(['sql', 'select count(*) as n from session_segments where template like \'%mayor\'', '--config', configPath, '--format', 'json'], {
       stdout: segOut,
       stderr: memo(),
     })).toBe(0)

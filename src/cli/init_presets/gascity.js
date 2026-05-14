@@ -198,10 +198,10 @@ export async function runGascityPreset(argv, hooks = {}) {
     stdout.write(`existing skill differs; wrote new version to ${newPath} (review and merge)\n`)
   }
 
-  stdout.write(`\nSummary:\n`)
+  stdout.write('\nSummary:\n')
   stdout.write(`  events:            ${describeRefresh(refreshResult.files.filter((f) => f.dataset === EVENTS_TABLE))}\n`)
   stdout.write(`  session_segments:  ${describeRefresh(refreshResult.files.filter((f) => f.dataset === SEGMENTS_TABLE))}\n`)
-  stdout.write(`\nQuery with: ctvs query catalog\n`)
+  stdout.write('\nQuery with: ctvs query catalog\n')
   return refreshResult.failures === 0 ? 0 : 1
 }
 

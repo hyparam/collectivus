@@ -5,6 +5,7 @@ cdk.out
 *.tgz
 .DS_Store
 *.jsonl
+!test/fixtures/**/*.jsonl
 .codex
 
 # Beads / Dolt files (added by bd init)

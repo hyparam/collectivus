@@ -167,7 +167,7 @@ export async function runInstall(argv, hooks = {}) {
 
   if (shouldAttach) {
     try {
-      const result = await attachFn({ port, version, settingsPath })
+      const result = await attachFn({ port, version, settingsPath, binPath })
       stdout.write(`✓ Claude Code attached (${settingsPath})\n`)
       if (result.prevValue !== undefined) {
         stdout.write(`  (previous ANTHROPIC_BASE_URL was ${result.prevValue})\n`)

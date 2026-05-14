@@ -48,7 +48,7 @@ const DEFAULT_UPLOAD_REGION = 'us-east-1'
 const DEFAULT_UPLOAD_PREFIX = 'collectivus'
 const DEFAULT_UPLOAD_TIME = '00:10'
 /** @type {readonly import('../types.js').UploadSignal[]} */
-const ALLOWED_UPLOAD_SIGNALS = ['logs', 'traces', 'metrics']
+const ALLOWED_UPLOAD_SIGNALS = ['logs', 'traces', 'metrics', 'proxy']
 const DEFAULT_UPLOAD_SIGNALS_INPUT = ALLOWED_UPLOAD_SIGNALS.join(',')
 // DNS-compatible bucket name: 3–63 chars, lowercase, no underscores. The
 // inner `{1,61}` plus the leading and trailing single-character classes
@@ -339,7 +339,7 @@ async function askUpload(prompt, stdout, stderr) {
       narrowed.push(matched)
     }
     if (!bad && narrowed.length > 0) { signals = narrowed; break }
-    stderr.write('  signals must be a comma-separated subset of: logs, traces, metrics\n')
+    stderr.write('  signals must be a comma-separated subset of: logs, traces, metrics, proxy\n')
   }
 
   /** @type {string | undefined} */

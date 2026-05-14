@@ -49,7 +49,7 @@ const ALLOWED_RENDEZVOUS_KEYS = new Set([
 const ALLOWED_CENTRAL_SERVER_KEYS = new Set(['url', 'identity', 'poll_interval_seconds', 'outbox_dir'])
 const ALLOWED_CENTRAL_IDENTITY_KEYS = new Set(['bootstrap_token', 'persisted_path'])
 const ALLOWED_ROLES = new Set(['server', 'gateway', 'standalone'])
-const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics'])
+const ALLOWED_SIGNALS = new Set(['logs', 'traces', 'metrics', 'proxy'])
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/
 const IDENTITY_SECRET_MIN_LENGTH = 32
 const ADMIN_TOKEN_MIN_LENGTH = 32
@@ -703,7 +703,7 @@ function validateUpload(upload) {
     upload.signals.forEach(function(s, i) {
       if (typeof s !== 'string' || !ALLOWED_SIGNALS.has(s)) {
         throw new ConfigError(
-          'must be one of "logs", "traces", "metrics"',
+          'must be one of "logs", "traces", "metrics", "proxy"',
           { pointer: `/upload/signals/${i}` }
         )
       }

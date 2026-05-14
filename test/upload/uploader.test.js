@@ -40,6 +40,66 @@ function writeJsonl(gatewayId, signal, date, rows) {
   fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
 }
 
+/**
+ * @param {string} gatewayId
+ * @param {string} date
+ * @param {Record<string, unknown>[]} rows
+ * @returns {void}
+ */
+function writeProxyJsonl(gatewayId, date, rows) {
+  const dir = path.join(outputDir, gatewayId, 'proxy')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, `${date}.jsonl`), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+}
+
+/**
+ * @param {Partial<Record<string, unknown>>} [overrides]
+ * @returns {Record<string, unknown>}
+ */
+function proxyExchange(overrides = {}) {
+  return {
+    exchange_id: 'ex-proxy-1',
+    kind: 'exchange',
+    ts_start: `${yesterday}T00:00:00.000Z`,
+    ts_end: `${yesterday}T00:00:00.100Z`,
+    duration_ms: 100,
+    upstream: 'anthropic',
+    client: { ip: '127.0.0.1', user_agent: 'claude-cli/2.1.141' },
+    cwd: '/repo/app',
+    git_branch: 'main',
+    request: {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        messages: [{ role: 'user', content: 'hi' }],
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-upload', account_uuid: 'acct' }) },
+      }),
+    },
+    response: {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'msg-upload',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hello' }],
+        stop_reason: 'end_turn',
+      }),
+    },
+    stream_event_count: 0,
+    ...overrides,
+  }
+}
+
+/**
+ * @returns {undefined}
+ */
+function noClaudeContext() {
+  return undefined
+}
+
 const yesterday = '2026-05-06'
 const today = '2026-05-07'
 
@@ -115,6 +175,37 @@ describe('uploadPending', () => {
     expect([...connector.store.keys()]).toEqual([
       `collectivus/svc-a/logs/date=${yesterday}/data.parquet`,
     ])
+  })
+
+  it('uploads proxy JSONL as proxy_messages parquet with Claude local context', async () => {
+    writeProxyJsonl('gw-proxy', yesterday, [proxyExchange()])
+
+    const connector = memoryConnector()
+    const results = await uploadPending(
+      { bucket: 'b', prefix: 'collectivus', time: '00:10', signals: ['proxy'], catchupDays: 7, region: 'us-east-1' },
+      connector,
+      outputDir,
+      today,
+      /** @type {any} */ ({ claudeContextLookup: noClaudeContext })
+    )
+
+    expect(results).toHaveLength(1)
+    expect(results[0].uploaded).toBe(true)
+    const key = `collectivus/gw-proxy/proxy_messages/date=${yesterday}/data.parquet`
+    expect([...connector.store.keys()]).toEqual([key])
+
+    const buf = connector.store.get(key)
+    expect(buf).toBeDefined()
+    const view = /** @type {Uint8Array} */ (buf)
+    const file = /** @type {ArrayBuffer} */ (view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength))
+    const rows = await parquetReadObjects({ file })
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      gateway_id: 'gw-proxy',
+      cwd: '/repo/app',
+      git_branch: 'main',
+      attributes: { client: { claude_version: '2.1.141' } },
+    })
   })
 
   it('isolates per-job failures so one bad object does not abort the run', async () => {

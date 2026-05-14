@@ -77,6 +77,12 @@ to that origin. The proxy matches on `/v1/messages`, forwards the request to
 `https://api.anthropic.com`, and tees the streaming response back to you while
 recording it.
 
+When Claude Code is configured through `ctvs attach` or the interactive
+installer, Collectivus also installs local hooks that post the Claude session
+id, current working directory, and git branch to the local proxy. That lets
+Gateway/Central server parquet uploads include `cwd` and `git_branch` without
+reading local `.claude` transcripts.
+
 Run any prompt — the streamed response in your terminal is the live, unmodified
 upstream traffic. Collectivus is observational only.
 
@@ -270,7 +276,7 @@ bucket / region / prefix / time / signals (no AWS keys — those are read from
 the environment at daemon start) and writes an `upload` block into the saved
 config. Once configured, collectivus drains each previous day's JSONL into
 Hive-partitioned Parquet under
-`<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` once a day,
+`<prefix>/<gateway_id>/<signal-or-dataset>/date=<YYYY-MM-DD>/data.parquet` once a day,
 leaving the local JSONL untouched. See the
 [S3 upload](../README.md#s3-upload) section of the README for the full
 config schema and credential resolution rules.

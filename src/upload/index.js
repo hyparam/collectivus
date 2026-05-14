@@ -4,14 +4,14 @@ import { createScheduler } from './scheduler.js'
 import { uploadPending } from './uploader.js'
 
 /**
- * @import { ResolvedUploadOptions, Signal, StorageConnector, UploadOptions } from './upload.d.ts'
+ * @import { ResolvedUploadOptions, StorageConnector, UploadOptions, UploadSignal } from './upload.d.ts'
  */
 
 const DEFAULT_TIME = '00:10'
 const DEFAULT_PREFIX = 'collectivus'
 const DEFAULT_CATCHUP_DAYS = 30
-/** @type {ReadonlyArray<Signal>} */
-const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics']
+/** @type {ReadonlyArray<UploadSignal>} */
+const DEFAULT_SIGNALS = ['logs', 'traces', 'metrics', 'proxy']
 /**
  * Standalone and server-mode parquet drains share the same partition
  * layout: `<outputDir>/<gateway_id>/<signal>/<UTC-date>.jsonl`. Standalone

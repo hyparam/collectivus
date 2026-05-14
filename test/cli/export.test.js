@@ -350,6 +350,27 @@ describe('runExport', function() {
     expect(assistant).toMatchObject({ part_type: 'text', content_text: 'streamed-hi', model: 'claude-opus-4-7' })
   })
 
+  it('writes Claude local context columns and nested client metadata for proxy messages', async function() {
+    const row = exchangeRow()
+    row.cwd = '/repo/app'
+    row.git_branch = 'main'
+    writeProxyJsonl([row])
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runExport(['--config', configPath], { stdout, stderr })
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+
+    const outFile = path.join(sinkDir, 'parquet', 'proxy', 'messages.parquet')
+    const buf = fs.readFileSync(outFile)
+    const rows = await parquetReadObjects({ file: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) })
+    expect(rows[0]).toMatchObject({
+      cwd: '/repo/app',
+      git_branch: 'main',
+      attributes: { client: { claude_version: '2.1.133' } },
+    })
+  })
+
   it('drains proxy.jsonl alongside OTLP files in one run', async function() {
     writeProxyJsonl([exchangeRow()])
     writeJsonl('svc-a', 'logs', '2026-05-07', [

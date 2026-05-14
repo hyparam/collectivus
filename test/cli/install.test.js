@@ -236,6 +236,7 @@ describe('runInstall', function() {
       port: 8787,
       version: '9.9.9',
       settingsPath: path.join(tmpDir, 'settings.json'),
+      binPath: '/usr/local/bin/collectivus',
     }])
     expect(stdout.value()).toMatch(/Daemon installed/)
     expect(stdout.value()).toMatch(/Claude Code attached/)

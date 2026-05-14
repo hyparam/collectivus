@@ -110,7 +110,10 @@ describe('runAttach', function() {
     })
     expect(code).toBe(0)
     expect(calls).toEqual([{
-      port: 9090, version: '2.0.0', settingsPath: path.join(tmpDir, 'settings.json'),
+      port: 9090,
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      binPath: process.argv[1],
     }])
     expect(stdout.value()).toMatch(/Claude Code attached/)
     expect(stdout.value()).toMatch(/ANTHROPIC_BASE_URL = http:\/\/127\.0\.0\.1:9090/)

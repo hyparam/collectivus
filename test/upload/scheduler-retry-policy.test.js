@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { memoryConnector } from '../../src/upload/connectors/memory.js'
 import { createUploader } from '../../src/upload/index.js'
 
 /** @type {string} */
@@ -31,7 +32,58 @@ function seed(service, signal, date) {
   )
 }
 
+/**
+ * @param {string} gatewayId
+ * @param {string} date
+ * @returns {void}
+ */
+function seedProxy(gatewayId, date) {
+  const dir = path.join(outputDir, gatewayId, 'proxy')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, `${date}.jsonl`), JSON.stringify({
+    exchange_id: 'ex-default-proxy',
+    kind: 'exchange',
+    ts_start: `${date}T00:00:00.000Z`,
+    ts_end: `${date}T00:00:00.100Z`,
+    duration_ms: 100,
+    upstream: 'anthropic',
+    client: { user_agent: 'claude-cli/2.1.141' },
+    request: {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', messages: [{ role: 'user', content: 'hi' }] }),
+    },
+    response: {
+      status: 200,
+      headers: {},
+      body: JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: 'hello' }], stop_reason: 'end_turn' }),
+    },
+    stream_event_count: 0,
+  }) + '\n')
+}
+
 describe('createUploader', () => {
+  it('includes proxy messages in the default scheduled upload signals', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-05-07T08:00:00Z'))
+    seedProxy('gw-default', '2026-05-06')
+    const connector = memoryConnector()
+
+    const uploader = createUploader({
+      outputDir,
+      connector,
+      options: { bucket: 'b', prefix: 'collectivus', time: '12:00', catchupDays: 7, region: 'us-east-1' },
+    })
+    await uploader.start()
+
+    expect([...connector.store.keys()]).toEqual([
+      'collectivus/gw-default/proxy_messages/date=2026-05-06/data.parquet',
+    ])
+
+    await uploader.stop()
+  })
+
   it('does not schedule a fast retry for permanent upload failures', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-05-07T08:00:00Z'))

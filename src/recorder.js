@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { SseParser, isSseHeaders } from './sse.js'
 
 /**
- * @import { Sink, ClientInfo, ExchangeResponse } from './types.js'
+ * @import { Sink, ClientInfo, ClaudeSessionContext, ExchangeResponse } from './types.js'
  */
 
 export { isSseHeaders }
@@ -47,6 +47,7 @@ export class Recorder {
    *   upstream: string,
    *   client: ClientInfo,
    *   request: { method: string | undefined, path: string | undefined, headers: Record<string, string | string[] | undefined> },
+   *   localContextForRequest?: (body: string) => ClaudeSessionContext | undefined,
    * }} init
    * @returns {Exchange}
    */
@@ -95,6 +96,7 @@ export class Exchange {
    *   upstream: string,
    *   client: ClientInfo,
    *   request: { method: string | undefined, path: string | undefined, headers: Record<string, string | string[] | undefined> },
+   *   localContextForRequest?: (body: string) => ClaudeSessionContext | undefined,
    * }} init
    */
   constructor(recorder, init) {
@@ -118,6 +120,8 @@ export class Exchange {
     this.requestMethod = init.request.method
     /** @type {string | undefined} */
     this.requestPath = init.request.path
+    /** @type {((body: string) => ClaudeSessionContext | undefined) | undefined} */
+    this.localContextForRequest = init.localContextForRequest
     /** @type {ExchangeResponse | undefined} */
     this.response = undefined
     /** @type {Buffer[]} */
@@ -249,6 +253,7 @@ export class Exchange {
     const tsEndMs = Date.now()
     const requestBody = Buffer.concat(this.requestChunks).toString('utf8')
     const response = this.finalizeResponseBody()
+    const localContext = this.localContextForRequest?.(requestBody)
 
     const row = {
       exchange_id: this.id,
@@ -267,6 +272,8 @@ export class Exchange {
       response,
       stream_event_count: this.streamEventCount,
       error: this.error,
+      ...(localContext?.cwd ? { cwd: localContext.cwd } : {}),
+      ...(localContext?.git_branch ? { git_branch: localContext.git_branch } : {}),
     }
     try {
       await this.recorder.sink.writeRow(row)

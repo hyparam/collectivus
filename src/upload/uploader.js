@@ -1,12 +1,19 @@
 import { appendLedger, isCommitted, readLedger } from './ledger.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { loadClaudeContextLookup, sessionIdsFromExchanges } from '../cli/claude-transcripts.js'
+import { messageRowsToParquet } from '../cli/messages-parquet.js'
+import { walkExchanges } from '../cli/messages-walker.js'
+import { reconstructAssistantMessage } from '../cli/stream-reconstruct.js'
 import { rowsToParquet } from './parquet.js'
-import { readPartitionRows, walkPartitionFiles } from './reader.js'
+import { iterExchangesWithStreamEvents, readPartitionRows, walkPartitionFiles } from './reader.js'
 
 /**
  * @import { LedgerEntry, ResolvedUploadOptions, StorageConnector, UploadDeps, UploadJob, UploadResult } from './upload.d.ts'
  */
 
-const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics'])
+const SIGNALS = /** @type {const} */ (['logs', 'traces', 'metrics', 'proxy'])
+const DATE_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
 const DEFAULT_MAX_ATTEMPTS = 3
 const DEFAULT_INITIAL_BACKOFF_MS = 1000
@@ -65,7 +72,7 @@ export function discoverJobs(outputDir, today, options) {
  * @param {StorageConnector} connector
  * @param {string} outputDir
  * @param {Set<string>} committed In-memory ledger snapshot (mutated on success).
- * @param {UploadDeps} [deps]
+ * @param {UploaderDeps} [deps]
  * @returns {Promise<{ uploaded: boolean, key: string, rows: number, size: number }>}
  */
 export async function uploadJob(job, options, connector, outputDir, committed, deps = {}) {
@@ -95,16 +102,11 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
     return { uploaded: false, key, rows: 0, size: head.size }
   }
 
-  /** @type {Record<string, unknown>[]} */
-  const rows = []
-  for await (const row of readPartitionRows(job.jsonlPath, job.partition)) {
-    rows.push(row)
-  }
-  if (rows.length === 0) {
-    return { uploaded: false, key, rows: 0, size: 0 }
-  }
+  const { rows: rowCount, parquet } = job.signal === 'proxy'
+    ? await proxyJobToParquet(job, deps.claudeContextLookup)
+    : await otlpJobToParquet(job, options)
+  if (rowCount === 0) return { uploaded: false, key, rows: 0, size: 0 }
 
-  const parquet = await rowsToParquet(job.signal, rows, options.partitionDimensions)
   await withRetry(() => connector.putObject(key, parquet, 'application/octet-stream'), resolved)
 
   /** @type {LedgerEntry} */
@@ -115,13 +117,13 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
     status: 'committed',
     key,
     size: parquet.byteLength,
-    rows: rows.length,
+    rows: rowCount,
     committedAt: new Date().toISOString(),
   }
   appendLedger(outputDir, entry)
   committed.add(`${job.service} ${job.signal} ${job.date}`)
 
-  return { uploaded: true, key, rows: rows.length, size: parquet.byteLength }
+  return { uploaded: true, key, rows: rowCount, size: parquet.byteLength }
 }
 
 /**
@@ -135,17 +137,18 @@ export async function uploadJob(job, options, connector, outputDir, committed, d
  * @param {StorageConnector} connector
  * @param {string} outputDir
  * @param {string} today YYYY-MM-DD UTC
- * @param {UploadDeps} [deps]
+ * @param {UploaderDeps} [deps]
  * @returns {Promise<UploadResult[]>}
  */
 export async function uploadPending(options, connector, outputDir, today, deps = {}) {
   const committed = readLedger(outputDir)
   const jobs = discoverJobs(outputDir, today, options)
+  const claudeContextLookup = deps.claudeContextLookup
   /** @type {UploadResult[]} */
   const results = []
   for (const job of jobs) {
     try {
-      const result = await uploadJob(job, options, connector, outputDir, committed, deps)
+      const result = await uploadJob(job, options, connector, outputDir, committed, { ...deps, claudeContextLookup })
       results.push({ job, ...result })
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
@@ -155,6 +158,154 @@ export async function uploadPending(options, connector, outputDir, today, deps =
     }
   }
   return results
+}
+
+/**
+ * @param {UploadJob} job
+ * @param {ResolvedUploadOptions} options
+ * @returns {Promise<{ rows: number, parquet: Uint8Array }>}
+ */
+async function otlpJobToParquet(job, options) {
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  for await (const row of readPartitionRows(job.jsonlPath, job.partition)) {
+    rows.push(row)
+  }
+  if (rows.length === 0) return { rows: 0, parquet: new Uint8Array() }
+  const parquet = await rowsToParquet(/** @type {import('./upload.d.ts').Signal} */ (job.signal), rows, options.partitionDimensions)
+  return { rows: rows.length, parquet }
+}
+
+/**
+ * @param {UploadJob} job
+ * @param {ClaudeContextLookup | undefined} contextLookup
+ * @returns {Promise<{ rows: number, parquet: Uint8Array }>}
+ */
+async function proxyJobToParquet(job, contextLookup) {
+  const gatewayId = job.partition.gateway_id ?? job.service
+  const currentBundles = await iterExchangesWithStreamEvents(job.jsonlPath)
+  const exchanges = currentBundles.map((bundle) => bundle.exchange)
+  const jobContextLookup = contextLookup ?? await loadClaudeContextLookup({
+    sessionIds: sessionIdsFromExchanges(exchanges),
+  })
+  const { seen, toolLookup } = await loadPriorProxyState(job, gatewayId)
+  const rows = await materializeProxyBundles(currentBundles, gatewayId, jobContextLookup, seen)
+  backfillToolNames(rows, toolLookup)
+  if (rows.length === 0) return { rows: 0, parquet: new Uint8Array() }
+  const parquet = await messageRowsToParquet(rows, ['gateway_id'])
+  if (!parquet) throw new Error('failed to encode proxy_messages partition')
+  return { rows: rows.length, parquet }
+}
+
+/**
+ * @param {UploadJob} job
+ * @param {string} gatewayId
+ * @returns {Promise<{
+ *   seen: Map<string, { conversation_id: string, message_index: number }>,
+ *   toolLookup: Map<string, string>,
+ * }>}
+ */
+async function loadPriorProxyState(job, gatewayId) {
+  /** @type {Map<string, { conversation_id: string, message_index: number }>} */
+  const seen = new Map()
+  /** @type {Map<string, string>} */
+  const toolLookup = new Map()
+  const dir = path.dirname(job.jsonlPath)
+  /** @type {string[]} */
+  let names
+  try {
+    names = fs.readdirSync(dir)
+  } catch {
+    return { seen, toolLookup }
+  }
+  const priorFiles = names
+    .map((name) => ({ name, match: DATE_FILE_PATTERN.exec(name) }))
+    .filter((entry) => entry.match && entry.match[1] < job.date)
+    .sort((a, b) => /** @type {RegExpExecArray} */ (a.match)[1] < /** @type {RegExpExecArray} */ (b.match)[1] ? -1 : 1)
+
+  for (const entry of priorFiles) {
+    const rows = await materializeProxyFile(path.join(dir, entry.name), gatewayId, undefined, seen)
+    for (const row of rows) {
+      const messageId = row.message_id
+      const conversationId = row.conversation_id
+      const messageIndex = row.message_index
+      if (typeof messageId === 'string' && typeof conversationId === 'string' && typeof messageIndex === 'number') {
+        if (!seen.has(messageId)) seen.set(messageId, { conversation_id: conversationId, message_index: messageIndex })
+      }
+      if (
+        row.part_type === 'tool_call' &&
+        typeof row.tool_call_id === 'string' &&
+        typeof row.tool_name === 'string' &&
+        !toolLookup.has(row.tool_call_id)
+      ) {
+        toolLookup.set(row.tool_call_id, row.tool_name)
+      }
+    }
+  }
+  return { seen, toolLookup }
+}
+
+/**
+ * @param {string} jsonlPath
+ * @param {string} gatewayId
+ * @param {ClaudeContextLookup | undefined} contextLookup
+ * @param {Map<string, { conversation_id: string, message_index: number }>} [priorSeen]
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function materializeProxyFile(jsonlPath, gatewayId, contextLookup, priorSeen) {
+  const bundles = await iterExchangesWithStreamEvents(jsonlPath)
+  return materializeProxyBundles(bundles, gatewayId, contextLookup, priorSeen)
+}
+
+/**
+ * @param {Array<{ exchange: Record<string, unknown>, streamEvents: Record<string, unknown>[] }>} bundles
+ * @param {string} gatewayId
+ * @param {ClaudeContextLookup | undefined} contextLookup
+ * @param {Map<string, { conversation_id: string, message_index: number }>} [priorSeen]
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function materializeProxyBundles(bundles, gatewayId, contextLookup, priorSeen) {
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const streamEventsByExchange = new Map()
+  for (const bundle of bundles) {
+    const exchangeId = bundle.exchange.exchange_id
+    if (typeof exchangeId === 'string') {
+      streamEventsByExchange.set(exchangeId, bundle.streamEvents)
+    }
+  }
+  const walked = walkExchanges(bundles.map((bundle) => bundle.exchange), {
+    priorSeen,
+    gateway_id: gatewayId,
+    contextLookup,
+    reconstructAssistantMessage: (exchange) => {
+      const exchangeId = exchange.exchange_id
+      if (typeof exchangeId !== 'string') return null
+      const events = streamEventsByExchange.get(exchangeId)
+      if (!events) return null
+      return reconstructAssistantMessage(/** @type {import('../cli/stream-reconstruct.js').StreamEventRow[]} */ (events))
+    },
+  })
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  for await (const row of walked) rows.push(row)
+  return rows
+}
+
+/**
+ * @param {Record<string, unknown>[]} rows
+ * @param {Map<string, string>} toolLookup
+ * @returns {void}
+ */
+function backfillToolNames(rows, toolLookup) {
+  if (toolLookup.size === 0) return
+  for (const row of rows) {
+    if (row.part_type !== 'tool_result') continue
+    if (typeof row.tool_name === 'string' && row.tool_name.length > 0) continue
+    const toolCallId = row.tool_call_id
+    if (typeof toolCallId !== 'string') continue
+    const name = toolLookup.get(toolCallId)
+    if (name) row.tool_name = name
+  }
 }
 
 /**
@@ -232,9 +383,18 @@ function resolveDeps(deps) {
  */
 function objectKey(prefix, job) {
   const head = prefix.replace(/^\/+|\/+$/g, '')
-  const segments = [job.service, job.signal, `date=${job.date}`, 'data.parquet']
+  const signalSegment = job.signal === 'proxy' ? 'proxy_messages' : job.signal
+  const segments = [job.service, signalSegment, `date=${job.date}`, 'data.parquet']
   return head ? `${head}/${segments.join('/')}` : segments.join('/')
 }
+
+/**
+ * @typedef {(sessionId: string | undefined, timestamp: unknown) => ({ cwd?: string, git_branch?: string, claude_version?: string } | undefined)} ClaudeContextLookup
+ */
+
+/**
+ * @typedef {UploadDeps & { claudeContextLookup?: ClaudeContextLookup }} UploaderDeps
+ */
 
 /**
  * @param {UploadJob} a

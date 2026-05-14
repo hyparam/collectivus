@@ -4,7 +4,7 @@
  * content-derived `message_id`.
  *
  * This module is the foundational pure-function layer. It declares the
- * 24-column schema and decomposes one (exchange, message) pair into a list
+ * 26-column schema and decomposes one (exchange, message) pair into a list
  * of part rows. No I/O happens on import or during decomposition; callers
  * (the walker in a sibling bead, the refresh pipeline in another) feed in
  * exchanges plus reconstructed assistant messages and pass the
@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
  * @import { ColumnSpec } from '../upload/upload.d.ts'
  */
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 
 /**
  * Parquet schema for `proxy_messages`. Grain is one row per content part.
@@ -37,6 +37,8 @@ export const MESSAGES_COLUMNS = [
   { name: 'tools', type: 'JSON', nullable: true },
   { name: 'conversation_started_at', type: 'TIMESTAMP', nullable: false },
   { name: 'conversation_source', type: 'STRING', nullable: true },
+  { name: 'cwd', type: 'STRING', nullable: true },
+  { name: 'git_branch', type: 'STRING', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
   { name: 'previous_message_id', type: 'STRING', nullable: true },
   { name: 'message_index', type: 'INT32', nullable: false },
@@ -320,6 +322,24 @@ export function extractAttributes(exchange, message) {
 }
 
 /**
+ * @param {Record<string, unknown> | undefined} attributes
+ * @param {string | undefined} claudeVersion
+ * @returns {Record<string, unknown> | undefined}
+ */
+function withClientAttributes(attributes, claudeVersion) {
+  if (!claudeVersion) return attributes
+  /** @type {Record<string, unknown>} */
+  const out = attributes ? { ...attributes } : {}
+  const existing = out.client
+  const client = existing && typeof existing === 'object' && !Array.isArray(existing)
+    ? { .../** @type {Record<string, unknown>} */ (existing) }
+    : {}
+  client.claude_version = claudeVersion
+  out.client = client
+  return out
+}
+
+/**
  * Decompose one message into ordered part rows. Pure — no I/O, no shared
  * state. All conversation-scoped context (ids, indices, lookups) comes in
  * via `ctx`; the walker is responsible for keeping that state coherent
@@ -341,7 +361,7 @@ export function extractMessageParts(exchange, message, ctx) {
   if (content.length === 0) return []
 
   const message_id = computeMessageId(ctx.conversation_id, role, content)
-  const attributes = extractAttributes(exchange, message)
+  const attributes = withClientAttributes(extractAttributes(exchange, message), ctx.claude_version)
   const stopReason = readKey(message, 'stop_reason')
   const finishReason = typeof stopReason === 'string' ? mapFinishReason(stopReason) : undefined
 
@@ -356,6 +376,8 @@ export function extractMessageParts(exchange, message, ctx) {
     tools: ctx.tools,
     conversation_started_at: ctx.conversation_started_at,
     conversation_source: ctx.conversation_source,
+    cwd: ctx.cwd,
+    git_branch: ctx.git_branch,
     message_id,
     previous_message_id: ctx.previous_message_id,
     message_index: ctx.message_index,
@@ -612,6 +634,9 @@ function copyIfPresent(src, dst, key) {
  * @property {string} conversation_id
  * @property {Date | string | number} conversation_started_at
  * @property {string | undefined} [conversation_source]
+ * @property {string | undefined} [cwd]
+ * @property {string | undefined} [git_branch]
+ * @property {string | undefined} [claude_version]
  * @property {string | undefined} [user_id]
  * @property {string} provider
  * @property {string | undefined} [model]

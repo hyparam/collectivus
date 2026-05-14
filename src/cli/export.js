@@ -4,6 +4,7 @@ import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { rowsToParquet } from '../upload/parquet.js'
 import { iterExchangesWithStreamEvents, readJsonlRows } from '../upload/reader.js'
+import { loadClaudeContextLookup, sessionIdsFromExchanges } from './claude-transcripts.js'
 import { messageRowsToParquet } from './messages-parquet.js'
 import { walkExchanges } from './messages-walker.js'
 import { reconstructAssistantMessage } from './stream-reconstruct.js'
@@ -240,9 +241,10 @@ export function discoverProxyJsonlFiles(sinkDir) {
  *
  * @param {Array<{ gatewayId: string, date: string, jsonlPath: string }>} jsonlFiles
  * @param {string} outDir
+ * @param {{ contextLookup?: (sessionId: string | undefined, timestamp: unknown) => ({ cwd?: string, git_branch?: string, claude_version?: string } | undefined) }} [opts]
  * @returns {Promise<ProxyExportResult>}
  */
-export async function exportProxy(jsonlFiles, outDir) {
+export async function exportProxy(jsonlFiles, outDir, opts = {}) {
   /** @type {Map<string, Array<{ date: string, jsonlPath: string }>>} */
   const byGateway = new Map()
   for (const file of jsonlFiles) {
@@ -272,8 +274,12 @@ export async function exportProxy(jsonlFiles, outDir) {
         exchanges.push(bundle.exchange)
       }
     }
+    const contextLookup = opts.contextLookup ?? await loadClaudeContextLookup({
+      sessionIds: sessionIdsFromExchanges(exchanges),
+    })
     const walked = walkExchanges(exchanges, {
       gateway_id: gatewayId,
+      contextLookup,
       reconstructAssistantMessage: (exchange) => {
         const exchangeId = exchange.exchange_id
         if (typeof exchangeId !== 'string') return null

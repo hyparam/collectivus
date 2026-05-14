@@ -331,7 +331,7 @@ describe('loadConfig - upload section', () => {
         prefix: 'logs',
         region: 'us-west-2',
         time: '02:30',
-        signals: ['logs', 'traces'],
+        signals: ['logs', 'traces', 'proxy'],
         catchupDays: 7,
         endpoint: 'http://minio:9000',
       },

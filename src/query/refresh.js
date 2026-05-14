@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
+import { loadClaudeContextLookup, sessionIdsFromExchanges } from '../cli/claude-transcripts.js'
 import { messageRowsToParquet } from '../cli/messages-parquet.js'
 import { walkExchanges } from '../cli/messages-walker.js'
 import { reconstructAssistantMessage } from '../cli/stream-reconstruct.js'
@@ -166,9 +167,13 @@ async function refreshProxySource(parquetDir, source, datasets, force, result, s
       }
     }
     const exchanges = bundles.map((bundle) => bundle.exchange)
+    const contextLookup = await loadClaudeContextLookup({
+      sessionIds: sessionIdsFromExchanges(exchanges),
+    })
     const walked = walkExchanges(exchanges, {
       priorSeen: seen,
       gateway_id: source.gatewayId,
+      contextLookup,
       reconstructAssistantMessage: (exchange) => {
         const exchangeId = exchange.exchange_id
         if (typeof exchangeId !== 'string') return null

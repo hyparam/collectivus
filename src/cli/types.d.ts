@@ -12,8 +12,8 @@ import type {
   IsAttachedOptions,
   ListenerFactory,
   ServerConfig,
-  UploadSignal,
 } from '../types.js'
+import type { Signal } from '../upload/upload.js'
 import type { DaemonInstallOptions, DaemonUninstallOptions, MacosStatusOptions } from '../daemon/types.d.ts'
 import type { ConfigClient } from '../gateway/config_client.js'
 import type { EnrollmentStore } from '../server/enrollment.d.ts'
@@ -62,7 +62,7 @@ export interface ExportParseResult {
   outDir?: string
   date?: string
   gatewayId?: string
-  signal?: UploadSignal
+  signal?: Signal
 }
 
 export interface ExportHooks {
@@ -91,7 +91,7 @@ export interface ProxyExportResult {
 export interface ExportJob {
   /** First-level partition value: `gateway_id` under the unified layout. */
   gatewayId: string
-  signal: UploadSignal
+  signal: Signal
   date: string
   jsonlPath: string
 }
@@ -258,6 +258,8 @@ export interface AttachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
   version?: string
+  /** CLI path written into managed Claude Code hooks. */
+  binPath?: string
   /** Override for `~/.claude/settings.json`. */
   settingsPath?: string
   /** Override for `~/.codex/config.toml`. */

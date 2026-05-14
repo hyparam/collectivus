@@ -3,7 +3,7 @@ import path from 'node:path'
 import readline from 'node:readline'
 
 /**
- * @import { PartitionFile, Signal } from './upload.d.ts'
+ * @import { PartitionFile, UploadSignal } from './upload.d.ts'
  */
 
 const DATE_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -226,7 +226,7 @@ function* readDateFiles(dir, accumulated) {
     yield {
       filePath: path.join(dir, entry.name),
       partition,
-      signal: /** @type {Signal} */ (partition.signal),
+      signal: /** @type {UploadSignal} */ (partition.signal),
       date: match[1],
     }
   }

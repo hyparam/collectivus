@@ -673,7 +673,7 @@ async function handleProxy(paths, parsed, stdout, stderr) {
       stdout,
       stderr,
       ['proxy_messages'],
-      `select gateway_id, date, message_created_at, conversation_id, message_index, message_id, role, part_index, part_type, content_text, tool_name, tool_call_id, model from proxy_messages where conversation_id = ${sqlString(conversationId)} order by message_index asc, part_index asc limit ${parsed.limit}`
+      `select gateway_id, date, cwd, git_branch, message_created_at, conversation_id, message_index, message_id, role, part_index, part_type, content_text, tool_name, tool_call_id, model from proxy_messages where conversation_id = ${sqlString(conversationId)} order by message_index asc, part_index asc limit ${parsed.limit}`
     )
   }
   if (sub === 'events') {
@@ -700,7 +700,7 @@ async function handleProxy(paths, parsed, stdout, stderr) {
     stdout,
     stderr,
     ['proxy_messages'],
-    `select gateway_id, date, message_created_at, conversation_id, role, part_type, model, content_text from proxy_messages order by message_created_at desc limit ${parsed.limit}`
+    `select gateway_id, date, cwd, git_branch, message_created_at, conversation_id, role, part_type, model, content_text from proxy_messages order by message_created_at desc limit ${parsed.limit}`
   )
 }
 

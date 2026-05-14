@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 /**
- * @import { LedgerEntry, Signal } from './upload.d.ts'
+ * @import { LedgerEntry, UploadSignal } from './upload.d.ts'
  */
 
 const LEDGER_FILENAME = '.upload-ledger.jsonl'
@@ -11,7 +11,7 @@ const LEDGER_FILENAME = '.upload-ledger.jsonl'
  * Build the ledger key for a (service, signal, date) triple.
  *
  * @param {string} service
- * @param {Signal} signal
+ * @param {UploadSignal} signal
  * @param {string} date YYYY-MM-DD UTC
  * @returns {string}
  */
@@ -74,7 +74,7 @@ export function appendLedger(outputDir, entry) {
 /**
  * @param {Set<string>} committed
  * @param {string} service
- * @param {Signal} signal
+ * @param {UploadSignal} signal
  * @param {string} date
  * @returns {boolean}
  */

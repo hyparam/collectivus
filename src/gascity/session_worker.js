@@ -1,18 +1,21 @@
-import { readCursor, writeCursor } from './cursor.js'
+import { readCursor } from './cursor.js'
 import { sessionCursorPath } from './paths.js'
 import { streamSse } from './sse_client.js'
 
 /**
  * @import { SessionContext } from './types.d.ts'
  * @import { NormalizerDispatcher } from './normalizer_dispatcher.js'
+ * @import { ParquetWriter } from './parquet_writer.js'
  */
 
 /**
  * Per-session frame consumer. Owns one SSE connection to
  * `/v0/city/{city}/session/{id}/stream?format=raw`, parses each `data:`
  * payload as the supervisor's `format=raw` envelope, and hands it to the
- * normalizer dispatcher. Reconnect / cursor persistence are delegated to
- * `streamSse` and `cursor.js` respectively so this class stays small.
+ * normalizer dispatcher. Reconnect is delegated to `streamSse`; cursor
+ * persistence is owned by the `ParquetWriter` (bead 3) so the cursor only
+ * advances after a successful flush. The worker still reads the cursor at
+ * startup to compose the SSE `?after=<uuid>` resume query.
  */
 export class SessionWorker {
   /**
@@ -25,6 +28,7 @@ export class SessionWorker {
    *   alias?: string,
    *   sinkRoot: string,
    *   dispatcher: NormalizerDispatcher,
+   *   writer?: ParquetWriter,
    *   stderr?: { write: (s: string) => void },
    *   debug?: boolean,
    *   fetchFn?: typeof fetch,
@@ -48,6 +52,8 @@ export class SessionWorker {
     this.sinkRoot = opts.sinkRoot
     /** @type {NormalizerDispatcher} */
     this.dispatcher = opts.dispatcher
+    /** @type {ParquetWriter | undefined} */
+    this.writer = opts.writer
     /** @type {{ write: (s: string) => void }} */
     this.stderr = opts.stderr ?? process.stderr
     /** @type {boolean} */
@@ -60,7 +66,7 @@ export class SessionWorker {
     this.controller = new AbortController()
     /** @type {Promise<void> | undefined} */
     this.runPromise = undefined
-    /** @type {string | undefined} Last frame uuid we successfully dispatched. */
+    /** @type {string | undefined} Last frame uuid dispatched in-memory (not yet flushed; informational). */
     this.lastUuid = undefined
     /** @type {boolean} */
     this.draining = false
@@ -83,8 +89,14 @@ export class SessionWorker {
   /**
    * Mark the worker as draining (no more frames expected) and wait for the
    * SSE loop to exit. Called by the supervisor on `session.draining` /
-   * `session.stopped` lifecycle events. The cursor file is left intact so a
-   * subsequent restart can resume from `last_uuid`.
+   * `session.stopped` lifecycle events.
+   *
+   * Bead 3 hooks the writer's `retireSession` into the drain path so the
+   * session's pending buffer flushes and the cursor is marked
+   * `retired=true` — a subsequent daemon start then skips this session
+   * during backfill. When `writer` is undefined (legacy tests) the worker
+   * still aborts cleanly; the next start just resumes from the last
+   * flushed cursor.
    *
    * @returns {Promise<void>}
    */
@@ -92,6 +104,15 @@ export class SessionWorker {
     this.draining = true
     this.controller.abort()
     if (this.runPromise) await this.runPromise
+    if (this.writer) {
+      try {
+        await this.writer.retireSession(this.city, this.sessionId)
+      } catch (err) {
+        this.stderr.write(
+          `[gascity] session_retire_failed city=${this.city} session=${this.sessionId} err=${formatError(err)}\n`
+        )
+      }
+    }
   }
 
   /**
@@ -121,7 +142,7 @@ export class SessionWorker {
     const streamOpts = {
       url,
       signal: this.controller.signal,
-      onEvent: async (ev) => this.handleEvent(ev, cursorPath, ctx),
+      onEvent: (ev) => this.handleEvent(ev, ctx),
       onError: (msg) => this.stderr.write(`${msg}\n`),
       onConnect: () => {
         if (this.debug) {
@@ -140,17 +161,17 @@ export class SessionWorker {
 
   /**
    * Parse one SSE event as a supervisor frame envelope and route to the
-   * dispatcher. Updates the in-memory `lastUuid` and persists the cursor on
-   * every successfully-parsed frame so a crash mid-session loses at most one
-   * already-dispatched frame.
+   * dispatcher. Bead 3 moved cursor ownership to the writer, so this handler
+   * no longer persists a cursor per frame — the writer writes the cursor
+   * after each successful parquet flush. `lastUuid` is still tracked in
+   * memory for observability (debug logs, tests) but is informational only.
    *
    * @param {import('../types.js').SseEvent} ev
-   * @param {string} cursorPath
    * @param {SessionContext} ctx
-   * @returns {Promise<void>}
+   * @returns {void}
    * @private
    */
-  async handleEvent(ev, cursorPath, ctx) {
+  handleEvent(ev, ctx) {
     if (ev.event === 'ping' || ev.event === 'heartbeat') return
     if (ev.data.length === 0) return
     /** @type {unknown} */
@@ -175,16 +196,7 @@ export class SessionWorker {
     // Bead 3 hooks the parquet writer in here. Until then, rows are discarded
     // after the debug log — the cursor still advances so resume semantics hold.
     const uuid = extractUuid(envelope)
-    if (uuid !== undefined && uuid !== this.lastUuid) {
-      this.lastUuid = uuid
-      try {
-        await writeCursor(cursorPath, { last_uuid: uuid })
-      } catch (err) {
-        this.stderr.write(
-          `[gascity] cursor_write_failed city=${this.city} session=${this.sessionId} err=${formatError(err)}\n`
-        )
-      }
-    }
+    if (uuid !== undefined) this.lastUuid = uuid
   }
 }
 

@@ -1,0 +1,78 @@
+import { NormalizerDispatcher } from './normalizer_dispatcher.js'
+import { defaultGascityRoot } from './paths.js'
+import { SupervisorSubscriber } from './supervisor_subscriber.js'
+
+/**
+ * @import { GascityCityConfig } from './types.d.ts'
+ * @import { StartedListener } from '../types.js'
+ */
+
+/**
+ * Stand the gascity source up. Returns a `StartedListener` that fits straight
+ * into `runLifecycle`'s registry — `description` for the boot log, `stop` for
+ * graceful shutdown that drains every active session worker.
+ *
+ * The factory takes the array of configured cities so the daemon can run
+ * multiple supervisors concurrently. Each city gets its own
+ * `SupervisorSubscriber`; they share the dispatcher (provider normalizers are
+ * a process-wide registry).
+ *
+ * Empty `cities` is a documented no-op: the listener starts cleanly so a
+ * config that only enables the gascity section without attaching cities yet
+ * still satisfies `factories.size > 0` if the operator has otherwise wired
+ * other listeners.
+ *
+ * @param {{
+ *   cities: GascityCityConfig[],
+ *   sinkRoot?: string,
+ *   stderr?: { write: (s: string) => void },
+ *   debug?: boolean,
+ *   fetchFn?: typeof fetch,
+ *   sleep?: (ms: number, signal: AbortSignal) => Promise<void>,
+ * }} opts
+ * @returns {Promise<StartedListener>}
+ */
+export async function startGascitySource(opts) {
+  const stderr = opts.stderr ?? process.stderr
+  const sinkRoot = opts.sinkRoot ?? defaultGascityRoot()
+  const dispatcher = new NormalizerDispatcher({ stderr })
+  /** @type {SupervisorSubscriber[]} */
+  const subscribers = []
+  for (const city of opts.cities) {
+    /** @type {ConstructorParameters<typeof SupervisorSubscriber>[0]} */
+    const subOpts = {
+      city,
+      sinkRoot,
+      dispatcher,
+      stderr,
+      debug: opts.debug ?? isDebugEnabled(),
+    }
+    if (opts.fetchFn) subOpts.fetchFn = opts.fetchFn
+    if (opts.sleep) subOpts.sleep = opts.sleep
+    const subscriber = new SupervisorSubscriber(subOpts)
+    subscriber.start()
+    subscribers.push(subscriber)
+  }
+  const description = opts.cities.length === 0
+    ? 'Gascity source: no cities attached'
+    : `Gascity source attached to ${opts.cities.length} ${opts.cities.length === 1 ? 'city' : 'cities'} (${opts.cities.map((c) => c.name).join(', ')}); sink ${sinkRoot}`
+  return {
+    description,
+    stop: async () => {
+      await Promise.all(subscribers.map((s) => s.stop()))
+    },
+  }
+}
+
+/**
+ * Whether `[gascity]` debug log lines should land on stderr. Off by default
+ * to keep the daemon's log volume in line with the proxy/OTLP sources;
+ * operators flip `COLLECTIVUS_DEBUG_GASCITY=1` when iterating on integration
+ * with a new supervisor.
+ *
+ * @returns {boolean}
+ */
+function isDebugEnabled() {
+  const value = process.env.COLLECTIVUS_DEBUG_GASCITY
+  return typeof value === 'string' && value.length > 0 && value !== '0'
+}

@@ -107,7 +107,7 @@ export async function backfillCity(opts) {
  * }} args
  * @returns {Promise<number>} number of frames dispatched
  */
-async function backfillSession(args) {
+export async function backfillSession(args) {
   const url = buildTranscriptUrl(args.city.api_url, args.city.name, args.sessionId, args.afterUuid)
   /** @type {SessionContext} */
   const ctx = {

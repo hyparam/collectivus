@@ -135,3 +135,63 @@ export interface SessionCursor {
    */
   schema_version?: number
 }
+
+// ---------- Gascity source: runtime state snapshot ----------
+
+/**
+ * One session entry in the runtime-state snapshot the daemon writes for
+ * `ctvs gascity list / status`. Mirrors fields the supervisor surfaces
+ * plus the writer's frame counter.
+ */
+export interface GascityRuntimeSession {
+  /** Provider-side session id (`hy-jw8sm`). */
+  sessionId: string
+  /** Optional template path captured from the lifecycle event. */
+  template?: string
+  /** Optional rig label. */
+  rig?: string
+  /** Optional alias label. */
+  alias?: string
+  /** Worker state. `active` for live capture; `retired` for one waiting on cleanup. */
+  state: 'active' | 'retired'
+  /** Total frames the session worker has dispatched into the writer. */
+  frames: number
+  /** ISO timestamp of the most recent frame, when one has been seen. */
+  last_frame_at?: string
+  /** ISO timestamp the worker spawned. */
+  started_at: string
+  /** ISO timestamp the worker entered the `retired` state, when applicable. */
+  retired_at?: string
+}
+
+/**
+ * One city entry in the runtime-state snapshot.
+ */
+export interface GascityRuntimeCity {
+  /** Configured city name (matches the `name` field in `[[gascity]]`). */
+  name: string
+  /** Configured supervisor base URL. */
+  api_url: string
+  /** Whether the lifecycle SSE has an open socket. */
+  lifecycle_connected: boolean
+  /** ISO timestamp of the most recent lifecycle event observed. */
+  lifecycle_last_event_at?: string
+  /** Active and recently-retired sessions. */
+  sessions: GascityRuntimeSession[]
+  /** Cumulative frames the writer has accepted across all sessions for this city. */
+  frames_total: number
+}
+
+/**
+ * Top-level shape the gascity source flushes to
+ * `~/.collectivus/runtime/gascity-state.json`. Versioned so a future
+ * schema migration can fail fast if a new CLI reads an older snapshot.
+ */
+export interface GascityRuntimeState {
+  /** Schema version; bumped on incompatible changes. */
+  schema_version: number
+  /** ISO timestamp the snapshot was rendered. */
+  updated_at: string
+  /** Configured cities and their per-session state. */
+  cities: GascityRuntimeCity[]
+}

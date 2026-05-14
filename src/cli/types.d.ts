@@ -79,7 +79,13 @@ export interface ExportFileResult {
 
 export interface ProxyExportResult {
   files: ExportFileResult[]
-  skipped: Array<'exchange' | 'stream_event'>
+  /**
+   * `'messages'` is emitted when the proxy JSONL contained no messages the
+   * walker could extract (request bodies without `messages` and no streamed
+   * assistant content). Surfaces the same "nothing to write" signal the old
+   * exchange/stream-event split used to.
+   */
+  skipped: Array<'messages'>
 }
 
 export interface ExportJob {

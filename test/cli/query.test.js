@@ -1,4 +1,3 @@
-import { parquetReadObjects } from 'hyparquet'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -115,22 +114,20 @@ describe('ctvs query', function() {
     const code = await runQuery(['refresh', '--config', configPath], { stdout, stderr })
     expect(code).toBe(0)
     expect(stderr.value()).toBe('')
-    expect(stdout.value()).toMatch(/Done\. 5 file\(s\) written/)
+    // proxy now materialises a single `proxy_messages` partition (was
+    // proxy_exchanges + proxy_stream_events) so the per-source partition count
+    // drops from 5 to 4 for the same JSONL fixtures.
+    expect(stdout.value()).toMatch(/Done\. 4 file\(s\) written/)
 
-    const parquetPath = path.join(sinkDir, '.collectivus-query', 'parquet', 'proxy_exchanges', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet')
+    const parquetPath = path.join(sinkDir, '.collectivus-query', 'parquet', 'proxy_messages', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet')
     const metaPath = `${parquetPath}.meta.json`
     expect(fs.existsSync(parquetPath)).toBe(true)
     expect(JSON.parse(fs.readFileSync(metaPath, 'utf8'))).toMatchObject({
-      cache_schema_version: 1,
-      dataset: 'proxy_exchanges',
+      cache_schema_version: 2,
+      dataset: 'proxy_messages',
       gateway_id: 'gw1',
       date: '2026-05-11',
-      row_count: 1,
     })
-
-    const buf = fs.readFileSync(parquetPath)
-    const rows = await parquetReadObjects({ file: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) })
-    expect(rows[0]).toMatchObject({ gateway_id: 'gw1', exchangeId: 'ex-1', responseStatus: 500 })
   })
 
   it('does not auto-refresh by default and prints the refresh command', async function() {
@@ -187,8 +184,11 @@ describe('ctvs query', function() {
     expect(await runQuery(['status', '--config', configPath, '--format', 'json'], { stdout: statusOut, stderr: memo() })).toBe(0)
     /** @type {Array<{ dataset: string, sources: number, fresh: number, stale: number, rows: number }>} */
     const statusRows = JSON.parse(statusOut.value())
-    const proxyExch = statusRows.find((r) => r.dataset === 'proxy_exchanges')
-    expect(proxyExch).toMatchObject({ sources: 0, fresh: 1, stale: 0, rows: 1 })
+    const proxyMessages = statusRows.find((r) => r.dataset === 'proxy_messages')
+    // The test JSONL has no extractable assistant messages (request.body is
+    // `{}`), so the cached `proxy_messages` partition has zero data rows. The
+    // partition itself is still fresh and present, which is what we assert.
+    expect(proxyMessages).toMatchObject({ sources: 0, fresh: 1, stale: 0 })
     const logsRow = statusRows.find((r) => r.dataset === 'logs')
     expect(logsRow).toMatchObject({ sources: 0, fresh: 1, stale: 0, rows: 1 })
 
@@ -197,8 +197,8 @@ describe('ctvs query', function() {
     expect(await runQuery(['catalog', '--config', configPath, '--format', 'json'], { stdout: catalogOut, stderr: memo() })).toBe(0)
     /** @type {Array<{ dataset: string, cached_rows: number, source_partitions: number }>} */
     const catalog = JSON.parse(catalogOut.value())
-    const catalogProxy = catalog.find((r) => r.dataset === 'proxy_exchanges')
-    expect(catalogProxy).toMatchObject({ cached_rows: 1, source_partitions: 0 })
+    const catalogProxy = catalog.find((r) => r.dataset === 'proxy_messages')
+    expect(catalogProxy).toMatchObject({ source_partitions: 0 })
 
     // sql: the drained logs partition is queryable.
     const sqlOut = memo()
@@ -250,10 +250,13 @@ describe('ctvs query', function() {
     expect(await runQuery(['metrics', 'list', '--config', configPath], { stdout: metricsOut, stderr: memo() })).toBe(0)
     expect(metricsOut.value()).toMatch(/latency\.ms/)
 
+    // `proxy_messages` is empty for this fixture (no extractable assistant
+    // content) so we just check the command returns a clean exit with the
+    // expected header row. Bead 5 will swap in a fixture that produces real
+    // message rows and assert against `proxy get <conversation-id>` output.
     const proxyOut = memo()
-    expect(await runQuery(['proxy', 'get', 'ex-1', '--config', configPath], { stdout: proxyOut, stderr: memo() })).toBe(0)
-    expect(proxyOut.value()).toMatch(/ex-1/)
-    expect(proxyOut.value()).toMatch(/anthropic/)
+    expect(await runQuery(['proxy', '--config', configPath], { stdout: proxyOut, stderr: memo() })).toBe(0)
+    expect(proxyOut.value()).toMatch(/conversation_id/)
 
     const tailOut = memo()
     expect(await runQuery(['logs', 'tail', '--config', configPath], { stdout: tailOut, stderr: memo() })).toBe(0)

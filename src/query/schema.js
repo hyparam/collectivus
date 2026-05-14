@@ -1,20 +1,25 @@
 import { columnsForSignal } from '../upload/schema.js'
-import { columnsForProxyKind } from '../cli/proxy-parquet.js'
+import { columnsForMessages } from '../cli/messages-parquet.js'
 
 /**
  * @import { ColumnSpec } from '../upload/upload.d.ts'
  * @import { QueryDataset, DatasetSchema } from './types.js'
  */
 
-export const QUERY_CACHE_SCHEMA_VERSION = 1
+/**
+ * Bumped to 2 when the proxy dataset was replaced by `proxy_messages` so any
+ * Parquet partition written under the old schema is treated as stale by the
+ * freshness check (and refresh skips it rather than regenerating the
+ * retired `proxy_exchanges` / `proxy_stream_events` layout).
+ */
+export const QUERY_CACHE_SCHEMA_VERSION = 2
 
 /** @type {readonly QueryDataset[]} */
 export const QUERY_DATASETS = [
   'logs',
   'traces',
   'metrics',
-  'proxy_exchanges',
-  'proxy_stream_events',
+  'proxy_messages',
 ]
 
 /** @type {ColumnSpec} */
@@ -45,15 +50,10 @@ const SCHEMAS = {
     sourceSignal: 'metrics',
     columns: withDateColumn(columnsForSignal('metrics', ['gateway_id'])),
   },
-  proxy_exchanges: {
-    dataset: 'proxy_exchanges',
+  proxy_messages: {
+    dataset: 'proxy_messages',
     sourceSignal: 'proxy',
-    columns: withDateColumn(columnsForProxyKind('exchange', ['gateway_id'])),
-  },
-  proxy_stream_events: {
-    dataset: 'proxy_stream_events',
-    sourceSignal: 'proxy',
-    columns: withDateColumn(columnsForProxyKind('stream_event', ['gateway_id'])),
+    columns: withDateColumn(columnsForMessages(['gateway_id'])),
   },
 }
 
@@ -107,8 +107,7 @@ export function primaryTimestampColumn(dataset) {
   case 'logs': return 'timestamp'
   case 'traces': return 'startTimestamp'
   case 'metrics': return 'timestamp'
-  case 'proxy_exchanges': return 'tsStart'
-  case 'proxy_stream_events': return undefined
+  case 'proxy_messages': return 'message_created_at'
   default: return undefined
   }
 }
@@ -122,8 +121,7 @@ export function fallbackTimestampColumns(dataset) {
   case 'logs': return ['timestamp', 'observedTimestamp']
   case 'traces': return ['startTimestamp', 'endTimestamp']
   case 'metrics': return ['timestamp', 'startTimestamp']
-  case 'proxy_exchanges': return ['tsStart', 'tsEnd']
-  case 'proxy_stream_events': return []
+  case 'proxy_messages': return ['message_created_at', 'conversation_started_at']
   default: return []
   }
 }

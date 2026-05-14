@@ -81,6 +81,10 @@ function writeProxyJsonl(rows, opts = {}) {
  * @returns {Record<string, unknown>}
  */
 function exchangeRow(overrides = {}) {
+  // Request/response bodies are real Anthropic-shape payloads with one user
+  // turn and one assistant turn so the conversation walker emits exactly two
+  // part rows per exchange (one per role). This keeps the fixtures small but
+  // exercises the full extractor end-to-end.
   return {
     exchange_id: 'abc123',
     kind: 'exchange',
@@ -93,12 +97,21 @@ function exchangeRow(overrides = {}) {
       method: 'POST',
       path: '/v1/messages',
       headers: { 'content-type': 'application/json', authorization: 'REDACTED:PQAA' },
-      body: '{"model":"claude-opus-4-7"}',
+      body: JSON.stringify({
+        model: 'claude-opus-4-7',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
     },
     response: {
       status: 200,
       headers: { 'content-type': 'application/json' },
-      body: '{"id":"msg_xxx"}',
+      body: JSON.stringify({
+        id: 'msg_xxx',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'hello' }],
+        stop_reason: 'end_turn',
+      }),
     },
     stream_event_count: 0,
     error: undefined,
@@ -276,39 +289,53 @@ describe('runExport', function() {
     expect(stderr.value()).toMatch(/--config is required/)
   })
 
-  it('drains proxy.jsonl to <out>/proxy/exchanges.parquet', async function() {
+  it('drains proxy.jsonl to <out>/proxy/messages.parquet', async function() {
     writeProxyJsonl([exchangeRow(), exchangeRow({ exchange_id: 'def456' })])
     const stdout = memo()
     const stderr = memo()
     const code = await runExport(['--config', configPath], { stdout, stderr })
     expect(stderr.value()).toBe('')
     expect(code).toBe(0)
-    const outFile = path.join(sinkDir, 'parquet', 'proxy', 'exchanges.parquet')
+    const outFile = path.join(sinkDir, 'parquet', 'proxy', 'messages.parquet')
     expect(fs.existsSync(outFile)).toBe(true)
-    expect(stdout.value()).toMatch(/wrote .*exchanges\.parquet \(2 rows/)
-    expect(stdout.value()).toMatch(/skip proxy\/stream_event: 0 rows/)
+    // Both exchanges carry identical user content and identical assistant
+    // content. The walker derives a content-hashed `conversation_id` (no
+    // session_id metadata in this fixture) and `message_id`, so both
+    // exchanges collapse into one user row + one assistant row.
+    expect(stdout.value()).toMatch(/wrote .*messages\.parquet \(2 rows/)
 
     const buf = fs.readFileSync(outFile)
     const rows = await parquetReadObjects({ file: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) })
     expect(rows).toHaveLength(2)
-    expect(rows[0].exchangeId).toBe('abc123')
-    expect(rows[0].upstream).toBe('anthropic')
-    expect(rows[0].requestMethod).toBe('POST')
-    expect(rows[0].requestPath).toBe('/v1/messages')
-    expect(rows[0].responseStatus).toBe(200)
-    expect(rows[0].clientIp).toBe('127.0.0.1')
-    // Header maps come back as JSON objects.
-    expect(typeof rows[0].requestHeaders).toBe('object')
-    expect(rows[0].requestHeaders.authorization).toBe('REDACTED:PQAA')
-    // Bodies preserved verbatim.
-    expect(rows[0].requestBody).toBe('{"model":"claude-opus-4-7"}')
+    const userRow = rows.find((row) => row.role === 'user')
+    expect(userRow).toMatchObject({
+      gateway_id: PROXY_GATEWAY_ID,
+      provider: 'anthropic',
+      part_type: 'text',
+      content_text: 'hi',
+    })
+    const assistantRow = rows.find((row) => row.role === 'assistant')
+    expect(assistantRow).toMatchObject({
+      gateway_id: PROXY_GATEWAY_ID,
+      provider: 'anthropic',
+      part_type: 'text',
+      content_text: 'hello',
+    })
   })
 
-  it('writes both kinds when proxy.jsonl has exchange + stream_event rows', async function() {
+  it('reconstructs streamed assistant responses', async function() {
+    // No `response.body` on a streamed exchange — the walker rebuilds it
+    // from the SSE rows the recorder captured alongside.
     writeProxyJsonl([
-      exchangeRow({ stream_event_count: 2 }),
-      { exchange_id: 'abc123', kind: 'stream_event', t_ms: 12, event: 'message_start', data: '{"type":"message_start"}' },
-      { exchange_id: 'abc123', kind: 'stream_event', t_ms: 45, event: 'content_block_delta', data: '{"delta":{"text":"hi"}}' },
+      exchangeRow({
+        exchange_id: 'stream-1',
+        stream_event_count: 4,
+        response: { status: 200, headers: { 'content-type': 'text/event-stream' }, body: undefined },
+      }),
+      { exchange_id: 'stream-1', kind: 'stream_event', t_ms: 1, event: 'message_start', data: JSON.stringify({ type: 'message_start', message: { id: 'msg_s', role: 'assistant', model: 'claude-opus-4-7', content: [] } }) },
+      { exchange_id: 'stream-1', kind: 'stream_event', t_ms: 2, event: 'content_block_start', data: JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }) },
+      { exchange_id: 'stream-1', kind: 'stream_event', t_ms: 3, event: 'content_block_delta', data: JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'streamed-hi' } }) },
+      { exchange_id: 'stream-1', kind: 'stream_event', t_ms: 4, event: 'message_stop', data: JSON.stringify({ type: 'message_stop' }) },
     ])
     const stdout = memo()
     const stderr = memo()
@@ -316,20 +343,11 @@ describe('runExport', function() {
     expect(code).toBe(0)
     expect(stderr.value()).toBe('')
 
-    const exchanges = path.join(sinkDir, 'parquet', 'proxy', 'exchanges.parquet')
-    const events = path.join(sinkDir, 'parquet', 'proxy', 'stream_events.parquet')
-    expect(fs.existsSync(exchanges)).toBe(true)
-    expect(fs.existsSync(events)).toBe(true)
-
-    const eventBuf = fs.readFileSync(events)
-    const eventRows = await parquetReadObjects({ file: eventBuf.buffer.slice(eventBuf.byteOffset, eventBuf.byteOffset + eventBuf.byteLength) })
-    expect(eventRows).toHaveLength(2)
-    expect(eventRows[0]).toMatchObject({
-      exchangeId: 'abc123',
-      tMs: 12,
-      event: 'message_start',
-      data: '{"type":"message_start"}',
-    })
+    const outFile = path.join(sinkDir, 'parquet', 'proxy', 'messages.parquet')
+    const buf = fs.readFileSync(outFile)
+    const rows = await parquetReadObjects({ file: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) })
+    const assistant = rows.find((row) => row.role === 'assistant')
+    expect(assistant).toMatchObject({ part_type: 'text', content_text: 'streamed-hi', model: 'claude-opus-4-7' })
   })
 
   it('drains proxy.jsonl alongside OTLP files in one run', async function() {
@@ -341,7 +359,7 @@ describe('runExport', function() {
     const stderr = memo()
     const code = await runExport(['--config', configPath], { stdout, stderr })
     expect(code).toBe(0)
-    expect(fs.existsSync(path.join(sinkDir, 'parquet', 'proxy', 'exchanges.parquet'))).toBe(true)
+    expect(fs.existsSync(path.join(sinkDir, 'parquet', 'proxy', 'messages.parquet'))).toBe(true)
     expect(fs.existsSync(path.join(sinkDir, 'parquet', 'svc-a', 'logs', 'date=2026-05-07', 'data.parquet'))).toBe(true)
     expect(stdout.value()).toMatch(/2 file\(s\)/)
   })
@@ -350,25 +368,37 @@ describe('runExport', function() {
 describe('exportProxy', function() {
   it('returns empty result when proxy JSONL has no rows', async function() {
     const file = writeProxyJsonl([])
-    const result = await exportProxy([file], path.join(tmpDir, 'out'))
+    const result = await exportProxy(
+      [{ gatewayId: PROXY_GATEWAY_ID, date: PROXY_DATE, jsonlPath: file }],
+      path.join(tmpDir, 'out')
+    )
     expect(result.files).toEqual([])
-    expect(result.skipped).toEqual(['exchange', 'stream_event'])
+    expect(result.skipped).toEqual(['messages'])
   })
 
   it('skips kinds that have zero rows', async function() {
     const file = writeProxyJsonl([exchangeRow()])
     const out = path.join(tmpDir, 'out')
-    const result = await exportProxy([file], out)
+    const result = await exportProxy(
+      [{ gatewayId: PROXY_GATEWAY_ID, date: PROXY_DATE, jsonlPath: file }],
+      out
+    )
     expect(result.files).toHaveLength(1)
-    expect(result.skipped).toEqual(['stream_event'])
-    expect(fs.existsSync(path.join(out, 'proxy', 'stream_events.parquet'))).toBe(false)
+    expect(result.skipped).toEqual([])
+    expect(fs.existsSync(path.join(out, 'proxy', 'messages.parquet'))).toBe(true)
   })
 
   it('concatenates rows across multiple per-day proxy files', async function() {
     const f1 = writeProxyJsonl([exchangeRow({ exchange_id: 'd1' })], { date: '2026-05-10' })
     const f2 = writeProxyJsonl([exchangeRow({ exchange_id: 'd2' })], { date: '2026-05-11' })
     const out = path.join(tmpDir, 'out')
-    const result = await exportProxy([f1, f2], out)
+    const result = await exportProxy(
+      [
+        { gatewayId: PROXY_GATEWAY_ID, date: '2026-05-10', jsonlPath: f1 },
+        { gatewayId: PROXY_GATEWAY_ID, date: '2026-05-11', jsonlPath: f2 },
+      ],
+      out
+    )
     expect(result.files).toHaveLength(1)
     expect(result.files[0].rows).toBe(2)
   })

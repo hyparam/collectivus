@@ -55,6 +55,87 @@ export async function* readPartitionRows(filePath, partition) {
 }
 
 /**
+ * Read a proxy JSONL file and yield one bundle per exchange. Each bundle is
+ * `{ exchange, streamEvents }`, where `streamEvents` is the in-file list of
+ * matching `stream_event` rows sorted by `t_ms` ascending. Bundles are
+ * emitted in `exchange.ts_start` ascending order so downstream walkers can
+ * trust chronological ordering without re-sorting.
+ *
+ * The file is read once and fully buffered before bundles are emitted — proxy
+ * JSONL is append-only and a single day's file fits in memory at recorder
+ * scales. Streaming bundles would force a two-pass design that pays the same
+ * cost twice over with no upside.
+ *
+ * Rows whose `kind` is neither `exchange` nor `stream_event` are skipped.
+ * Orphan stream events (no matching exchange) are dropped: a stream event
+ * with no anchor exchange has no chronology to sit in.
+ *
+ * @param {string} filePath
+ * @returns {Promise<Array<{ exchange: Record<string, unknown>, streamEvents: Record<string, unknown>[] }>>}
+ */
+export async function iterExchangesWithStreamEvents(filePath) {
+  /** @type {Map<string, Record<string, unknown>>} */
+  const exchangeById = new Map()
+  /** @type {Map<string, Record<string, unknown>[]>} */
+  const eventsById = new Map()
+  for await (const row of readJsonlRows(filePath)) {
+    const kind = row.kind
+    const exchangeId = row.exchange_id
+    if (typeof exchangeId !== 'string' || exchangeId.length === 0) continue
+    if (kind === 'exchange') {
+      exchangeById.set(exchangeId, row)
+    } else if (kind === 'stream_event') {
+      let list = eventsById.get(exchangeId)
+      if (!list) {
+        list = []
+        eventsById.set(exchangeId, list)
+      }
+      list.push(row)
+    }
+  }
+  /** @type {Array<{ exchange: Record<string, unknown>, streamEvents: Record<string, unknown>[] }>} */
+  const bundles = []
+  for (const [id, exchange] of exchangeById) {
+    const events = eventsById.get(id) ?? []
+    events.sort(compareStreamEvents)
+    bundles.push({ exchange, streamEvents: events })
+  }
+  bundles.sort(compareExchangeBundles)
+  return bundles
+}
+
+/**
+ * @param {Record<string, unknown>} a
+ * @param {Record<string, unknown>} b
+ * @returns {number}
+ */
+function compareStreamEvents(a, b) {
+  const aMs = typeof a.t_ms === 'number' ? a.t_ms : Number.POSITIVE_INFINITY
+  const bMs = typeof b.t_ms === 'number' ? b.t_ms : Number.POSITIVE_INFINITY
+  return aMs - bMs
+}
+
+/**
+ * @param {{ exchange: Record<string, unknown> }} a
+ * @param {{ exchange: Record<string, unknown> }} b
+ * @returns {number}
+ */
+function compareExchangeBundles(a, b) {
+  const aStart = stringOrEmpty(a.exchange.ts_start)
+  const bStart = stringOrEmpty(b.exchange.ts_start)
+  if (aStart === bStart) return 0
+  return aStart < bStart ? -1 : 1
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function stringOrEmpty(value) {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
  * Walk a partitioned directory tree under `outputDir` and yield every
  * `<YYYY-MM-DD>.jsonl` leaf paired with its partition values. Each
  * directory level corresponds to one entry in `partitionDimensions`

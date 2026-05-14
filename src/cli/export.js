@@ -3,8 +3,10 @@ import path from 'node:path'
 import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { rowsToParquet } from '../upload/parquet.js'
-import { readJsonlRows } from '../upload/reader.js'
-import { proxyRowsToParquet } from './proxy-parquet.js'
+import { iterExchangesWithStreamEvents, readJsonlRows } from '../upload/reader.js'
+import { messageRowsToParquet } from './messages-parquet.js'
+import { walkExchanges } from './messages-walker.js'
+import { reconstructAssistantMessage } from './stream-reconstruct.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
@@ -19,8 +21,7 @@ Convert recorded JSONL under the configured sink dir into local Parquet files.
 Runs once and exits. Does not invoke the daily upload pipeline.
 
 Drains both:
-  - <id>/proxy/<date>.jsonl     → <out>/proxy/exchanges.parquet
-                                  <out>/proxy/stream_events.parquet
+  - <id>/proxy/<date>.jsonl     → <out>/proxy/messages.parquet
   - <id>/<signal>/<date>.jsonl  → <out>/<id>/<signal>/date=<date>/data.parquet
 
 Options:
@@ -197,13 +198,18 @@ export async function runExport(argv, hooks = {}) {
 
 /**
  * Discover every per-day proxy JSONL file under `<sinkDir>/<id>/proxy/`.
- * Sorted by full path so multi-id, multi-day fixtures land in stable order.
+ * Each entry includes the gateway_id parsed from the directory path so the
+ * caller can group files per-gateway before walking — conversations live
+ * within one gateway, never across.
+ *
+ * Sorted by gateway_id then date so multi-id, multi-day fixtures land in
+ * stable, chronological order per gateway.
  *
  * @param {string} sinkDir
- * @returns {string[]}
+ * @returns {Array<{ gatewayId: string, date: string, jsonlPath: string }>}
  */
 export function discoverProxyJsonlFiles(sinkDir) {
-  /** @type {string[]} */
+  /** @type {Array<{ gatewayId: string, date: string, jsonlPath: string }>} */
   const out = []
   for (const id of safeReadDir(sinkDir)) {
     const proxyDir = path.join(sinkDir, id, 'proxy')
@@ -215,65 +221,102 @@ export function discoverProxyJsonlFiles(sinkDir) {
     }
     if (!stat.isDirectory()) continue
     for (const name of safeReadDir(proxyDir)) {
-      if (!name.endsWith('.jsonl')) continue
-      out.push(path.join(proxyDir, name))
+      const match = DATE_FILE_PATTERN.exec(name)
+      if (!match) continue
+      out.push({ gatewayId: id, date: match[1], jsonlPath: path.join(proxyDir, name) })
     }
   }
-  out.sort()
+  out.sort(compareProxyFiles)
   return out
 }
 
 /**
- * Read every per-day proxy JSONL file in `jsonlPaths`, partition rows by
- * `kind`, and write one parquet file per non-empty kind. Reads each file
- * fully into memory: proxy JSONL is append-only and typically modest;
- * streaming directly into a writer would only matter at multi-GB scale.
+ * Drain every per-day proxy JSONL into a single `proxy_messages` Parquet
+ * file. Walks each gateway's days chronologically so the conversation walker
+ * can dedupe message ids across the day boundary, then concatenates all
+ * gateways into the same output. Returns the input as "skipped: messages"
+ * when the walker produces zero rows so callers print the same "0 rows"
+ * signal the old exchange/stream_event split surfaced.
  *
- * @param {string[]} jsonlPaths
+ * @param {Array<{ gatewayId: string, date: string, jsonlPath: string }>} jsonlFiles
  * @param {string} outDir
  * @returns {Promise<ProxyExportResult>}
  */
-export async function exportProxy(jsonlPaths, outDir) {
+export async function exportProxy(jsonlFiles, outDir) {
+  /** @type {Map<string, Array<{ date: string, jsonlPath: string }>>} */
+  const byGateway = new Map()
+  for (const file of jsonlFiles) {
+    let list = byGateway.get(file.gatewayId)
+    if (!list) {
+      list = []
+      byGateway.set(file.gatewayId, list)
+    }
+    list.push({ date: file.date, jsonlPath: file.jsonlPath })
+  }
+
   /** @type {Record<string, unknown>[]} */
-  const exchanges = []
-  /** @type {Record<string, unknown>[]} */
-  const streamEvents = []
-  for (const jsonlPath of jsonlPaths) {
-    for await (const row of readJsonlRows(jsonlPath)) {
-      if (row.kind === 'exchange') exchanges.push(row)
-      else if (row.kind === 'stream_event') streamEvents.push(row)
+  const allRows = []
+  for (const [gatewayId, files] of byGateway) {
+    files.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    /** @type {Map<string, Record<string, unknown>[]>} */
+    const streamEventsByExchange = new Map()
+    /** @type {Record<string, unknown>[]} */
+    const exchanges = []
+    for (const file of files) {
+      const bundles = await iterExchangesWithStreamEvents(file.jsonlPath)
+      for (const bundle of bundles) {
+        const exchangeId = bundle.exchange.exchange_id
+        if (typeof exchangeId === 'string') {
+          streamEventsByExchange.set(exchangeId, bundle.streamEvents)
+        }
+        exchanges.push(bundle.exchange)
+      }
+    }
+    const walked = walkExchanges(exchanges, {
+      gateway_id: gatewayId,
+      reconstructAssistantMessage: (exchange) => {
+        const exchangeId = exchange.exchange_id
+        if (typeof exchangeId !== 'string') return null
+        const events = streamEventsByExchange.get(exchangeId)
+        if (!events) return null
+        return reconstructAssistantMessage(/** @type {import('./stream-reconstruct.js').StreamEventRow[]} */ (events))
+      },
+    })
+    for await (const row of walked) {
+      allRows.push(row)
     }
   }
 
   const proxyDir = path.join(outDir, 'proxy')
   /** @type {ExportFileResult[]} */
   const files = []
-  /** @type {Array<'exchange' | 'stream_event'>} */
+  /** @type {Array<'messages'>} */
   const skipped = []
-
-  /** @type {Array<['exchange' | 'stream_event', Record<string, unknown>[], string]>} */
-  const proxyKinds = [
-    ['exchange', exchanges, 'exchanges.parquet'],
-    ['stream_event', streamEvents, 'stream_events.parquet'],
-  ]
-
-  for (const [kind, rows, fileName] of proxyKinds) {
-    if (rows.length === 0) {
-      skipped.push(kind)
-      continue
-    }
-    const buf = await proxyRowsToParquet(kind, rows)
-    if (!buf) {
-      skipped.push(kind)
-      continue
-    }
-    fs.mkdirSync(proxyDir, { recursive: true })
-    const outPath = path.join(proxyDir, fileName)
-    fs.writeFileSync(outPath, buf)
-    files.push({ rows: rows.length, bytes: buf.byteLength, outPath })
+  if (allRows.length === 0) {
+    skipped.push('messages')
+    return { files, skipped }
   }
-
+  const buf = await messageRowsToParquet(allRows, ['gateway_id'])
+  if (!buf) {
+    skipped.push('messages')
+    return { files, skipped }
+  }
+  fs.mkdirSync(proxyDir, { recursive: true })
+  const outPath = path.join(proxyDir, 'messages.parquet')
+  fs.writeFileSync(outPath, buf)
+  files.push({ rows: allRows.length, bytes: buf.byteLength, outPath })
   return { files, skipped }
+}
+
+/**
+ * @param {{ gatewayId: string, date: string }} a
+ * @param {{ gatewayId: string, date: string }} b
+ * @returns {number}
+ */
+function compareProxyFiles(a, b) {
+  if (a.gatewayId !== b.gatewayId) return a.gatewayId < b.gatewayId ? -1 : 1
+  if (a.date !== b.date) return a.date < b.date ? -1 : 1
+  return 0
 }
 
 /**

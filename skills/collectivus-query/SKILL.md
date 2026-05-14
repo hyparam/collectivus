@@ -29,10 +29,72 @@ ctvs query logs --since 1h --format json
 ctvs query traces slow --limit 20 --format json
 ctvs query metrics list --format json
 ctvs query metrics series <metric-name> --format json
-ctvs query proxy get <exchange-id> --format json
-ctvs query proxy events <exchange-id> --format json
+ctvs query proxy get <conversation-id> --format json
+ctvs query proxy stats --format json
 ctvs query errors --since 24h --format json
 ```
+
+## Proxy conversation log model
+
+Recorded LLM proxy traffic is exposed through one logical dataset: `proxy_messages`. Each row is a single content part (text block, tool call, tool result, etc.); rows are globally deduplicated by a content-derived `message_id`, so identical history blocks shared across exchanges are represented once.
+
+Key columns:
+
+- `conversation_id` — stable conversation grouping (Claude Code session id when present, hashed first-user-message content otherwise).
+- `message_id` — 16-char hex prefix of `sha256(conversation_id:role:canonical(content))`. Same content in the same conversation always produces the same id.
+- `message_index`, `part_index` — message order inside the conversation; part order inside that message. `part_id = <message_id>#<part_index>`.
+- `role` — `system`, `user`, `assistant`, or `tool`.
+- `part_type` — `text`, `reasoning`, `tool_call`, `tool_result`, `image`, `file`, `error`, or a passed-through provider type.
+- `content_text` — extracted text payload for text / reasoning / tool_result / error parts; null otherwise.
+- `tool_name`, `tool_call_id`, `tool_args` — populated on `tool_call` parts; `tool_result` parts carry the matching `tool_call_id` and a `status.tool_status` of `success` or `error`.
+- `attributes` (JSON) — request settings, per-message `usage` (assistant only), and exchange-level `timing`.
+- `status` (JSON) — sparse; carries `finish_reason` on the last assistant part, `tool_status` on tool results, and `error_code` / `error_message` on error parts.
+
+Run `ctvs query schema proxy_messages --format markdown` for the full 24-column reference (plus `gateway_id` and `date` partition columns).
+
+## Example SQL
+
+```sql
+-- Find all assistant text in a conversation
+SELECT message_index, content_text
+FROM proxy_messages
+WHERE conversation_id = '<id>' AND role = 'assistant' AND part_type = 'text'
+ORDER BY message_index, part_index;
+
+-- Tool calls paired with their results
+SELECT
+  c.tool_name,
+  c.tool_args,
+  r.content_text AS result,
+  JSON_VALUE(r.status, '$.tool_status') AS tool_status
+FROM proxy_messages c
+LEFT JOIN proxy_messages r
+  ON c.tool_call_id = r.tool_call_id AND r.part_type = 'tool_result'
+WHERE c.part_type = 'tool_call';
+
+-- Token usage by model (one assistant message can have many parts;
+-- dedupe by message_id so we sum each message's usage once)
+SELECT
+  model,
+  SUM(CAST(JSON_VALUE(attributes, '$.usage.input_tokens') AS BIGINT)) AS input_tokens,
+  SUM(CAST(JSON_VALUE(attributes, '$.usage.output_tokens') AS BIGINT)) AS output_tokens
+FROM (
+  SELECT DISTINCT message_id, model, attributes
+  FROM proxy_messages
+  WHERE role = 'assistant'
+)
+GROUP BY model
+ORDER BY input_tokens DESC;
+
+-- Largest conversations by part count
+SELECT conversation_id, MAX(message_index) + 1 AS turns, COUNT(*) AS parts
+FROM proxy_messages
+GROUP BY conversation_id
+ORDER BY turns DESC
+LIMIT 20;
+```
+
+Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `status` / `tools` / `tool_args` JSON columns. The `--format json` renderer parses these columns back into structured objects on the way out, so a `SELECT attributes FROM proxy_messages` returns a nested object rather than a JSON string.
 
 ## Guardrails
 
@@ -40,7 +102,7 @@ ctvs query errors --since 24h --format json
 - Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated Parquet, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
-- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_exchanges`, and `proxy_stream_events`.
+- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, and `proxy_messages`.
 - Use UTC dates with `--date YYYY-MM-DD`.
 - Use `--service`, `--gateway-id`, `--from`, `--to`, or `--since` to narrow broad investigations.
 

@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-05-14
+
+### Added
+
+- `ctvs collect --glob '<pattern>'` backs one logical table with many JSONL
+  files. Each matched file becomes its own cache partition under
+  `collections/<table>/source=<sha256>/data.parquet`; only files whose
+  mtime/size changed re-materialize on refresh, and files that drop out of the
+  glob are pruned on the next refresh. `_ctvs_source_path` identifies the
+  origin file per row.
+- `ctvs init` is now a real subcommand. With no arg it runs the existing
+  interactive walkthrough; with a preset name it scaffolds a workspace. First
+  preset `gascity` registers `.gc/events.jsonl` (single-file) and
+  `.gc/runtime/session-reconciler-trace/segments/**/*.jsonl` (glob), and
+  writes `.claude/skills/ctvs-gascity/SKILL.md`. Re-runs are idempotent;
+  divergent existing skills are preserved and the new version is written to
+  `SKILL.md.new`.
+- Catalog and schema read meta from any partition, so glob-backed collections
+  show correct column counts.
+
+### Changed
+
+- Collection manifest bumped to v2; v1 manifests continue to load.
+
+## [2.1.0] — 2026-05-13
+
+### Added
+
+- `ctvs collect <file.jsonl> --name <name>` registers external JSONL files as
+  dynamic query tables with inferred top-level fields and an explicit Parquet
+  cache.
+- S3 uploads can include proxy traffic with `upload.signals: ["proxy"]`,
+  materializing the `proxy_messages` dataset alongside OTLP signals.
+- Claude Code proxy message rows now include `cwd`, `git_branch`, and
+  `attributes.client.claude_version` when context is available from Collectivus
+  hooks or local transcripts.
+
 ## [2.0.0] — 2026-05-13
 
 ### Changed (breaking)

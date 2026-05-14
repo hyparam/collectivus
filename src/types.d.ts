@@ -10,6 +10,8 @@ export interface SseEvent {
   event: string
   /** Event data; multiple `data:` lines are joined with `\n`. */
   data: string
+  /** SSE `id:` value when present; used for `Last-Event-ID` resume. */
+  id?: string
 }
 
 // ---------- Recorder / proxy exchange ----------
@@ -359,6 +361,12 @@ export interface CollectivusConfig {
   server?: ServerConfig
   /** Gateway-mode central-server settings. Required iff `role === 'gateway'`. */
   central_server?: CentralServerConfig
+  /**
+   * Gascity supervisor capture cities. Each entry attaches the daemon to one
+   * supervisor and produces rows in `gascity_messages`. Empty array is
+   * permitted (the source is wired but captures nothing).
+   */
+  gascity?: import('./gascity/types.d.ts').GascityCityConfig[]
 }
 
 // ---------- Collector / OTLP normalization ----------

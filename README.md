@@ -105,6 +105,16 @@ tail -f "collectivus-data/$USER/proxy/$(date -u +%F).jsonl"
 
 Full step-by-step: [`docs/walkthrough-claude-code.md`](docs/walkthrough-claude-code.md).
 
+To capture agent-attributed transcripts from a gascity supervisor (separate
+from the proxy capture above), attach a city to the same daemon:
+
+```bash
+ctvs gascity attach hyptown --api-url http://127.0.0.1:8372
+ctvs query sql "select gascity_template, count(*) as parts from gascity_messages group by 1 order by parts desc"
+```
+
+See [Gascity source (`gascity_messages`)](#gascity-source-gascity_messages) below.
+
 ## Configuration
 
 Pass a JSON config with `--config <path>` (a local path or url). The schema:
@@ -552,7 +562,7 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, and `proxy_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
 
 ### Conversation log model
 
@@ -565,6 +575,36 @@ Rows are globally deduplicated by `message_id` — a 16-character hex prefix of 
 JSON columns (`attributes`, `status`, `tools`, `tool_args`) carry sparse structured data; scalars are accessed with `JSON_VALUE(<col>, '$.path')`. `attributes` holds request settings, per-message `usage` (assistant only), `timing.latency_ms`, and `client.claude_version` when available; `status` holds `tool_status` on tool results, `finish_reason` on the last assistant part, and `error_code` / `error_message` on error parts.
 
 For the full per-column derivation table see [skills/collectivus-query/references/query-cli.md](skills/collectivus-query/references/query-cli.md).
+
+### Gascity source (`gascity_messages`)
+
+`ctvs gascity` is a separate listener that subscribes to a gascity supervisor's
+REST API, normalizes provider frames (Claude / Codex), and writes one row per
+content block (text / thinking / tool_use / tool_result / attachment) directly
+to Parquet at `~/.collectivus/sink/gascity_messages/date=<YYYY-MM-DD>/city=<name>/`.
+There is no JSONL stage and no `.meta.json` sidecar: the sink IS the queryable
+store, so `ctvs query gascity_messages` is always reading what the daemon has
+flushed up to the moment of the call.
+
+```bash
+ctvs gascity attach hyptown --api-url http://127.0.0.1:8372
+ctvs gascity list
+ctvs query schema gascity_messages --format markdown
+ctvs query sql "select gascity_template, count(*) from gascity_messages group by 1"
+```
+
+`gascity_messages` carries agent-identity columns the proxy can't see —
+`gascity_template`, `gascity_rig`, `gascity_alias` — plus per-frame token usage
+with cache breakdown (`input_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens`). Use it when you need agent-attributed cost
+analysis or tool-call inspection; use `proxy_messages` for HTTP-level retry
+visibility and request timing. They UNION cleanly via `gateway_id` (a constant
+`gascity-scribe` on every gascity row tags the source).
+
+The bundled [`ctvs-gascity` skill](src/cli/init_presets/gascity_skill.md) — installed per-workspace by
+`ctvs init gascity` — teaches Claude Code and Codex how to query all three
+gascity-aware tables (`events`, `session_segments`, `gascity_messages`) and
+their cross-source joins with `proxy_messages`.
 
 ### LLM skill
 

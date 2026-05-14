@@ -8,8 +8,10 @@ import {
   QUERY_DATASETS,
   columnsForDataset,
   isQueryDataset,
+  sourceSignalForDataset,
 } from '../query/schema.js'
 import {
+  discoverGascityPartitions,
   discoverSourceFiles,
   expectedCachePartitions,
   inspectCachePartitions,
@@ -337,7 +339,7 @@ function handleCatalog(paths, parsed, stdout) {
     const status = sourceRows.find((row) => row.dataset === dataset)
     return {
       dataset,
-      source_signal: dataset.startsWith('proxy_') ? 'proxy' : dataset,
+      source_signal: sourceSignalForDataset(dataset),
       columns: columnsForDataset(dataset).length,
       source_partitions: status?.sources ?? 0,
       cached_rows: status?.rows ?? 0,
@@ -765,7 +767,15 @@ async function executePrepared(paths, parsed, stdout, stderr, datasets, statemen
  * @returns {Promise<{ ok: true, warnings?: string[] } | { ok: false, message: string }>}
  */
 async function ensureCacheReady(paths, scope, parsed) {
-  if (!paths.parquetEnabled || !paths.parquetDir) {
+  // The gascity sink is the source of truth — the parquet cache is irrelevant
+  // for `gascity_messages`-only queries. Only block on the cache-disabled
+  // setting when the query touches a dataset that actually needs it.
+  const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const cacheBackedDatasets = requestedDatasets
+    ? requestedDatasets.filter((dataset) => dataset !== 'gascity_messages')
+    : QUERY_DATASETS.filter((dataset) => dataset !== 'gascity_messages')
+  const needsCache = cacheBackedDatasets.length > 0
+  if (needsCache && (!paths.parquetEnabled || !paths.parquetDir)) {
     return { ok: false, message: 'error: query parquet cache is disabled; pass --parquet-dir or set query.parquet.enabled: true' }
   }
   if (parsed.refresh === 'always') {
@@ -939,10 +949,13 @@ function inspectAllCachePartitions(paths, scope) {
  */
 function allSourceCount(paths, scope) {
   const builtinSources = discoverSourceFiles(paths.recordingRoot, scopeForBuiltins(scope) ?? { ...scope, datasets: [] }).length
+  const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const wantsGascity = !requested || requested.includes('gascity_messages')
+  const gascitySources = wantsGascity ? discoverGascityPartitions(scope).length : 0
   const collectionSources = expectedCollectionPartitions(paths, scopeForCollections(scope) ?? { ...scope, datasets: [] })
     .filter((partition) => partition.sourceExists)
     .length
-  return builtinSources + collectionSources
+  return builtinSources + gascitySources + collectionSources
 }
 
 /**
@@ -1004,6 +1017,24 @@ function statusRows(paths, scope) {
   const rows = []
   for (const dataset of datasets) {
     const datasetScope = { ...scope, datasets: [dataset] }
+    if (dataset === 'gascity_messages') {
+      // The gascity sink IS the cache (no JSONL stage, no `.meta.json`).
+      // Each part-file counts as both a "source partition" and a fresh
+      // cache partition. `cached_rows` stays 0 unless we want to peek at
+      // every Parquet footer — leave that off the hot path of `status` /
+      // `catalog` and let users run `select count(*)` for the real number.
+      const partitions = expectedCachePartitions(paths, datasetScope)
+      const states = inspectCachePartitions(partitions)
+      rows.push({
+        dataset,
+        sources: partitions.length,
+        fresh: states.filter((state) => state.status === 'fresh').length,
+        stale: 0,
+        missing: states.filter((state) => state.status === 'missing').length,
+        rows: 0,
+      })
+      continue
+    }
     const sources = discoverSourceFiles(paths.recordingRoot, datasetScope)
     const states = paths.parquetEnabled && paths.parquetDir
       ? inspectCachePartitions(expectedCachePartitions(paths, datasetScope))

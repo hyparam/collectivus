@@ -117,10 +117,16 @@ export function buildTables(paths, scope) {
  */
 export function parquetDataSource(dataset, partitions, scope) {
   const columns = columnsForDataset(dataset).map((column) => column.name)
-  const numRows = partitions.reduce((sum, partition) => sum + readRowCountHint(partition), 0)
-  return {
+  // Gascity partitions don't carry a row-count sidecar (the daemon writes
+  // Parquet directly without `.meta.json`). Skipping the hint forces
+  // squirreling to fall back to scan-based COUNT(*) for `gascity_messages`,
+  // which is correct rather than silently optimised down to zero.
+  const numRows = dataset === 'gascity_messages'
+    ? undefined
+    : partitions.reduce((sum, partition) => sum + readRowCountHint(partition), 0)
+  /** @type {AsyncDataSource} */
+  const source = {
     columns,
-    numRows,
     scan(options) {
       return {
         rows: () => scanRows(dataset, partitions, scope, options),
@@ -129,6 +135,8 @@ export function parquetDataSource(dataset, partitions, scope) {
       }
     },
   }
+  if (numRows !== undefined) source.numRows = numRows
+  return source
 }
 
 /**

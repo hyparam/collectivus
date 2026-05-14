@@ -7,9 +7,11 @@ import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
 import { OutboxSink, defaultOutboxDir } from './gateway/outbox_sink.js'
+import { IgnoreFilter } from './ignore.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
-import { IgnoreFilter } from './ignore.js'
+import { defaultPidFilePath } from './runtime/paths.js'
+import { removePidFile, writePidFile } from './runtime/pid_file.js'
 import { ControlPlane } from './server/control_plane.js'
 import { defaultSinkDir as defaultIngestSinkDir } from './server/ingest.js'
 import { FileSink } from './sinks/file.js'
@@ -30,7 +32,7 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
 /**
  * @import { Server } from 'node:http'
  * @import { CollectivusConfig, ListenerFactory, StartedListener } from './types.js'
- * @import { ConfigResult, ErrorResult, HotReloadWiring, ParseResult } from './cli/types.d.ts'
+ * @import { ConfigResult, ErrorResult, HotReloadWiring, LocalReloadWiring, ParseResult } from './cli/types.d.ts'
  * @import { ConfigChangedEvent } from './gateway/types.d.ts'
  * @import { IngestSignal } from './server/types.d.ts'
  */
@@ -53,6 +55,7 @@ Commands:
   ctvs detach [--client claude|codex|all]
                                                Restore Claude Code and/or Codex config
   ctvs status                                  Report daemon, config, recordings, attach state
+  ctvs gascity <subcommand> [...]              Manage gascity supervisor capture sources
   ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
   ctvs query <command> [...]                   Query local recordings through Parquet cache
   ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
@@ -179,9 +182,11 @@ function isHttpUrl(value) {
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
  *   onShutdownRequested?: (handler: (signal: string) => void) => void,
+ *   onSighupRequested?: (handler: () => void) => void,
  *   isTTY?: boolean,
  *   runInit?: () => Promise<number>,
  *   identityPersistedPath?: string,
+ *   pidFilePath?: string,
  * }} [hooks]
  * @returns {Promise<number>}
  */
@@ -237,12 +242,23 @@ export async function run(argv, env, hooks = {}) {
     return 0
   }
 
-  return runWithConfig(config, env, {
+  /** @type {Parameters<typeof runWithConfig>[2]} */
+  const childHooks = {
     stdout,
     stderr,
     onShutdownRequested,
     identityPersistedPath: hooks.identityPersistedPath,
-  })
+  }
+  if (hooks.onSighupRequested !== undefined) childHooks.onSighupRequested = hooks.onSighupRequested
+  if (hooks.pidFilePath !== undefined) childHooks.pidFilePath = hooks.pidFilePath
+  // Only wire SIGHUP-driven reload when the daemon was started from a
+  // re-readable config source. `--config-env` configs live in process env,
+  // so a SIGHUP can't pick up new values without a restart anyway; the
+  // gateway-mode reload path (configClient) covers `--config-endpoint`.
+  if (parsed.configPath !== undefined && !isHttpUrl(parsed.configPath)) {
+    childHooks.localConfigPath = parsed.configPath
+  }
+  return runWithConfig(config, env, childHooks)
 }
 
 /**
@@ -268,8 +284,18 @@ function loadConfigFromEnv(envName, env, opts) {
  *   stdout?: { write: (s: string) => void },
  *   stderr?: { write: (s: string) => void },
  *   onShutdownRequested?: (handler: (signal: string) => void) => void,
+ *   onSighupRequested?: (handler: () => void) => void,
  *   identityPersistedPath?: string,
+ *   localConfigPath?: string,
+ *   pidFilePath?: string,
  * }} [hooks]
+ *   `localConfigPath` (when set) enables SIGHUP-driven re-read of the local
+ *   config file — the standard Unix "reload without restart" pattern. Used
+ *   by `ctvs gascity attach/detach` to push a config edit live without
+ *   bouncing the whole daemon.
+ *   `pidFilePath` overrides where the daemon writes its PID; the default is
+ *   `~/.collectivus/runtime/collectivus.pid`. The CLI reads it to find a
+ *   live daemon for SIGHUP.
  * @returns {Promise<number>}
  */
 export async function runWithConfig(config, env, hooks = {}) {
@@ -356,7 +382,31 @@ export async function runWithConfig(config, env, hooks = {}) {
   const hotReload = configClient
     ? { initialConfig: config, configClient, factoryBuilder }
     : undefined
-  return runLifecycle(factoryBuilder(config), stdout, stderr, onShutdownRequested, hotReload)
+
+  /** @type {Parameters<typeof runLifecycle>[5]} */
+  const extras = {}
+  if (hooks.localConfigPath !== undefined && !hotReload) {
+    const { localConfigPath } = hooks
+    /** @type {LocalReloadWiring} */
+    const localReload = {
+      initialConfig: config,
+      factoryBuilder,
+      reload: async () => {
+        const reloaded = await loadConfigAsync(localConfigPath, { stderr })
+        return resolveRuntimeSecrets(reloaded, env ?? {})
+      },
+    }
+    extras.localReload = localReload
+    if (hooks.onSighupRequested !== undefined) extras.onSighupRequested = hooks.onSighupRequested
+  }
+  // Only the standalone daemon writes a PID file. Gateway/server roles
+  // typically run under a supervisor that already tracks PIDs (launchd,
+  // systemd, k8s) and an out-of-band PID file would just go stale.
+  if (config.role !== 'gateway' && config.role !== 'server') {
+    extras.pidFile = { path: hooks.pidFilePath ?? defaultPidFilePath() }
+  }
+
+  return runLifecycle(factoryBuilder(config), stdout, stderr, onShutdownRequested, hotReload, extras)
 }
 
 /**
@@ -381,9 +431,9 @@ export async function runWithConfig(config, env, hooks = {}) {
  *   gateway/server roles take it from the JWT subject.
  * @returns {Map<string, ListenerFactory>} Section-keyed factory map.
  *   Section names: `otel`, `proxy`, `upload`, `server`, `configPoll`,
- *   `selfUpdate`. Insertion order is preserved by `Map`, which `runLifecycle`
- *   relies on to start listeners in dependency order (sink-owners before
- *   config-poll, config-poll before self-update).
+ *   `gascity`, `selfUpdate`. Insertion order is preserved by `Map`, which
+ *   `runLifecycle` relies on to start listeners in dependency order
+ *   (sink-owners before config-poll, config-poll before self-update).
  */
 function buildConfigListeners(config, ctx) {
   /** @type {Map<string, ListenerFactory>} */
@@ -560,6 +610,20 @@ function buildConfigListeners(config, ctx) {
     })
   }
 
+  // Gascity supervisor capture. Wired in standalone and server modes — it
+  // reads from a remote supervisor and writes to its own sink root, so it
+  // does not depend on `config.sink` like the proxy/otel sources do.
+  // Disabled in gateway mode for now: a gateway with a remote supervisor
+  // would need to flow gascity rows through the central-server outbox,
+  // which is out of scope for the bead-1 skeleton.
+  if (config.gascity !== undefined && config.role !== 'gateway') {
+    const cities = config.gascity
+    factories.set('gascity', async () => {
+      const { startGascitySource } = await import('./gascity/index.js')
+      return startGascitySource({ cities, stderr: ctx.stderr })
+    })
+  }
+
   // Only schedule the self-update tick when we have a real listener to keep
   // alive; an empty config should still surface "no listeners configured".
   if (factories.size > 0) {
@@ -660,9 +724,24 @@ function buildSelfUpdateFactory(ctx) {
  * @param {HotReloadWiring} [hotReload] When supplied, subscribe to
  *   `configClient.on('config-changed')` and route each event through
  *   `applyDiff`, mutating the running registry in place.
+ * @param {{
+ *   localReload?: LocalReloadWiring,
+ *   pidFile?: { path: string },
+ *   onSighupRequested?: (handler: () => void) => void,
+ * }} [extras]
+ *   `localReload` enables SIGHUP-driven config reread for the standalone
+ *   daemon (used by `ctvs gascity attach/detach`). The handler re-reads the
+ *   config from disk via the supplied callback, then runs the same diff/apply
+ *   chain as the gateway hot-reload path. Gascity is special-cased to mutate
+ *   its existing listener in place via `applyCityDiff` rather than tearing
+ *   the whole source down.
+ *   `pidFile` writes the daemon's PID at startup and removes it on shutdown
+ *   so the CLI can find a live daemon for SIGHUP.
+ *   `onSighupRequested` is overridable for tests; production wires
+ *   `process.on('SIGHUP')`.
  * @returns {Promise<number>}
  */
-async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotReload) {
+async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotReload, extras = {}) {
   if (factories.size === 0) {
     stderr.write('error: no listeners configured\n')
     return 1
@@ -691,22 +770,58 @@ async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotR
     }
   }
 
+  if (extras.pidFile) {
+    try {
+      await writePidFile(extras.pidFile.path)
+    } catch (err) {
+      stderr.write(`warning: failed to write pid file ${extras.pidFile.path}: ${formatError(err)}\n`)
+    }
+  }
+
   // Serialize hot-reload applications onto a single chain so concurrent
   // `'config-changed'` emits (in practice the ConfigClient ticks
   // sequentially, but defensive serialization keeps the invariant local)
   // can't interleave their stop/start operations and leak a listener.
   /** @type {Promise<void>} */
   let reloadChain = Promise.resolve()
+  /** @type {CollectivusConfig | undefined} */
+  let currentCfg = hotReload ? hotReload.initialConfig : extras.localReload?.initialConfig
   if (hotReload) {
-    let currentCfg = hotReload.initialConfig
     hotReload.configClient.on('config-changed', (/** @type {ConfigChangedEvent} */ event) => {
       reloadChain = reloadChain.then(async () => {
         const newCfg = event.newConfig
+        if (currentCfg === undefined) currentCfg = newCfg
         const diff = diffConfig(currentCfg, newCfg)
         await applyDiff(diff, currentCfg, newCfg, started, hotReload.factoryBuilder, { stdout, stderr })
+        await applyGascitySectionDiff(currentCfg, newCfg, started, hotReload.factoryBuilder, { stdout, stderr })
         currentCfg = newCfg
       }).catch((err) => {
         stderr.write(`hot reload: unexpected error: ${formatError(err)}\n`)
+      })
+    })
+  }
+
+  if (extras.localReload) {
+    const { localReload } = extras
+    const onSighupRequested = extras.onSighupRequested ?? defaultSighupWiring
+    onSighupRequested(() => {
+      reloadChain = reloadChain.then(async () => {
+        /** @type {CollectivusConfig} */
+        let newCfg
+        try {
+          newCfg = await localReload.reload()
+        } catch (err) {
+          stderr.write(`local reload: failed to re-read config: ${formatError(err)}\n`)
+          return
+        }
+        if (currentCfg === undefined) currentCfg = newCfg
+        stdout.write('local reload: applying config\n')
+        const diff = diffConfig(currentCfg, newCfg)
+        await applyDiff(diff, currentCfg, newCfg, started, localReload.factoryBuilder, { stdout, stderr })
+        await applyGascitySectionDiff(currentCfg, newCfg, started, localReload.factoryBuilder, { stdout, stderr })
+        currentCfg = newCfg
+      }).catch((err) => {
+        stderr.write(`local reload: unexpected error: ${formatError(err)}\n`)
       })
     })
   }
@@ -716,8 +831,129 @@ async function runLifecycle(factories, stdout, stderr, onShutdownRequested, hotR
   // it. The chain only does start/stop work, bounded and short.
   await reloadChain
   await stopAll(started, stderr)
+  if (extras.pidFile) {
+    try {
+      await removePidFile(extras.pidFile.path)
+    } catch (err) {
+      stderr.write(`warning: failed to remove pid file ${extras.pidFile.path}: ${formatError(err)}\n`)
+    }
+  }
   stdout.write('Shutdown complete.\n')
   return 0
+}
+
+/**
+ * Reload-time gascity diff.
+ *
+ * The standard `applyDiff` only handles otel/proxy/sink/upload — those
+ * sections share a "stop the old, start the new" pattern. The gascity
+ * source is different: each city carries an SSE connection plus a set of
+ * active session workers, and we don't want a config edit that touches
+ * one city (e.g. `ctvs gascity attach city2`) to retire the live workers
+ * for unchanged cities. Instead we mutate the listener in place by
+ * calling `applyCityDiff(newCities)` on the existing instance.
+ *
+ * Three transitions to handle:
+ *   - oldGascity defined, newGascity defined → applyCityDiff
+ *   - oldGascity undefined, newGascity defined → spin up via factory
+ *   - oldGascity defined, newGascity undefined → stop and remove
+ *
+ * @param {CollectivusConfig} oldCfg
+ * @param {CollectivusConfig} newCfg
+ * @param {Map<string, StartedListener>} registry
+ * @param {(cfg: CollectivusConfig) => Map<string, ListenerFactory>} factoryBuilder
+ * @param {{ stdout: { write(s: string): void }, stderr: { write(s: string): void } }} log
+ * @returns {Promise<void>}
+ */
+async function applyGascitySectionDiff(oldCfg, newCfg, registry, factoryBuilder, log) {
+  const oldGascity = oldCfg.gascity
+  const newGascity = newCfg.gascity
+  if (oldGascity === undefined && newGascity === undefined) return
+  if (gascityArraysEqual(oldGascity ?? [], newGascity ?? [])) return
+  const existing = /** @type {(import('./types.js').StartedListener & { applyCityDiff?: (c: import('./gascity/types.d.ts').GascityCityConfig[]) => Promise<void> }) | undefined} */ (
+    registry.get('gascity')
+  )
+
+  if (existing && newGascity !== undefined && typeof existing.applyCityDiff === 'function') {
+    try {
+      await existing.applyCityDiff(newGascity)
+      log.stdout.write(`local reload: gascity diff applied (${newGascity.length} ${newGascity.length === 1 ? 'city' : 'cities'})\n`)
+    } catch (err) {
+      log.stderr.write(`local reload: gascity applyCityDiff failed: ${formatError(err)}\n`)
+    }
+    return
+  }
+  if (!existing && newGascity !== undefined) {
+    const factory = factoryBuilder(newCfg).get('gascity')
+    if (!factory) return
+    try {
+      const listener = await factory()
+      registry.set('gascity', listener)
+      log.stdout.write(`local reload: gascity started — ${listener.description}\n`)
+    } catch (err) {
+      log.stderr.write(`local reload: failed to start gascity: ${formatError(err)}\n`)
+    }
+    return
+  }
+  if (existing && newGascity === undefined) {
+    try {
+      await existing.stop()
+      registry.delete('gascity')
+      log.stdout.write('local reload: gascity stopped\n')
+    } catch (err) {
+      log.stderr.write(`local reload: failed to stop gascity: ${formatError(err)}\n`)
+    }
+  }
+}
+
+/**
+ * Deep equality on two `gascity` arrays. Order matters because `[[gascity]]`
+ * entries are compared positionally — a swap is a config-level change
+ * intentionally, even when the set of names is identical.
+ *
+ * @param {readonly import('./gascity/types.d.ts').GascityCityConfig[]} a
+ * @param {readonly import('./gascity/types.d.ts').GascityCityConfig[]} b
+ * @returns {boolean}
+ */
+function gascityArraysEqual(a, b) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const ca = a[i]
+    const cb = b[i]
+    if (ca.name !== cb.name) return false
+    if (ca.api_url !== cb.api_url) return false
+    if (!stringListEqual(ca.include_templates, cb.include_templates)) return false
+    if (!stringListEqual(ca.exclude_templates, cb.exclude_templates)) return false
+  }
+  return true
+}
+
+/**
+ * @param {string[] | undefined} a
+ * @param {string[] | undefined} b
+ * @returns {boolean}
+ */
+function stringListEqual(a, b) {
+  if (a === undefined && b === undefined) return true
+  if (a === undefined || b === undefined) return false
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+/**
+ * Wire SIGHUP to the supplied handler. SIGHUP is the standard Unix signal
+ * for "re-read config without restarting" — using it here means the
+ * `ctvs gascity attach/detach` CLI just sends one signal and the daemon
+ * handles the rest.
+ *
+ * @param {() => void} handler
+ * @returns {void}
+ */
+function defaultSighupWiring(handler) {
+  process.on('SIGHUP', handler)
 }
 
 /**

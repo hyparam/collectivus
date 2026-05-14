@@ -156,7 +156,25 @@ describe('SseParser — id and retry fields', () => {
   it('recognises id-only events as dispatchable with default event/data', () => {
     const p = new SseParser()
     const events = p.feed('id: 42\n\n')
-    expect(events).toEqual([{ event: 'message', data: '' }])
+    expect(events).toEqual([{ event: 'message', data: '', id: '42' }])
+  })
+
+  it('round-trips the id field on the dispatched event', () => {
+    const p = new SseParser()
+    const events = p.feed('id: abc-1\nevent: lifecycle\ndata: {"k":"v"}\n\n')
+    expect(events).toEqual([{ event: 'lifecycle', data: '{"k":"v"}', id: 'abc-1' }])
+  })
+
+  it('omits the id field when the block has no id line', () => {
+    const p = new SseParser()
+    const events = p.feed('event: ping\ndata: x\n\n')
+    expect(events).toEqual([{ event: 'ping', data: 'x' }])
+  })
+
+  it('treats an empty id value as a present-but-empty id (per WHATWG)', () => {
+    const p = new SseParser()
+    const events = p.feed('id: \nevent: x\ndata: y\n\n')
+    expect(events).toEqual([{ event: 'x', data: 'y', id: '' }])
   })
 
   it('does not let unknown fields confuse the parser', () => {

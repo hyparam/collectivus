@@ -3,11 +3,12 @@
  */
 
 import { claudeNormalize } from './claude.js'
+import { codexNormalize } from './codex.js'
 
 /**
- * Wire production normalizers onto a dispatcher. Bead 2 ships `claude`;
- * bead 4 will add `codex`. The unknown-provider passthrough is left to the
- * dispatcher's own default — bead 3 replaces it with a `raw_frame`-only row.
+ * Wire production normalizers onto a dispatcher. Beads 2 + 4 ship `claude`
+ * and `codex`; the unknown-provider passthrough stays the dispatcher's own
+ * default (bead 3's `raw_frame`-only row).
  *
  * Exposed as a function (rather than registered at module load) so test
  * doubles can build a dispatcher with hand-rolled stubs and bypass real
@@ -18,6 +19,8 @@ import { claudeNormalize } from './claude.js'
  */
 export function registerProductionNormalizers(dispatcher) {
   dispatcher.register('claude', claudeNormalize)
+  dispatcher.register('codex', codexNormalize)
 }
 
 export { claudeNormalize } from './claude.js'
+export { codexNormalize } from './codex.js'

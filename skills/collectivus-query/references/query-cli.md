@@ -6,6 +6,14 @@
 <recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet
 ```
 
+External JSONL collections registered with `ctvs collect <file.jsonl> --name <name>` are recorded in:
+
+```text
+<recording-root>/.collectivus-query/collections.json
+```
+
+Their Parquet cache lives under `<recording-root>/.collectivus-query/parquet/collections/<table>/data.parquet`. Names are normalized for SQL, so `--name random-log` exposes table `random_log`.
+
 The cache is explicit. Query commands do not refresh it unless `--refresh always` is passed.
 
 Freshness is asymmetric (since v1.7.0):
@@ -49,6 +57,19 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `ctvs query activity`: Combined recent activity from logs, traces, metrics, and proxy messages.
 - `ctvs query service <service-name>`: Service-focused summary across logs, traces, and metrics.
 - `ctvs query errors`: Recent log, trace, and proxy errors.
+
+## External JSONL collections
+
+Use `ctvs collect` to register arbitrary local JSONL files as dynamic query tables:
+
+```bash
+ctvs collect random-log.jsonl --name random-log
+ctvs query sql "select * from random_log" --format json
+```
+
+`ctvs collect` stores the absolute source path and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `--refresh always` refreshes before running the query.
+
+Collection tables always include `_ctvs_source_path`, `_ctvs_line_number`, and `_ctvs_raw`, plus inferred top-level JSON fields. Use `--timestamp-column <field>` when registering a file if `--from`, `--to`, `--since`, or `--date` should use a specific field.
 
 ## Logical Datasets
 
@@ -107,4 +128,4 @@ For JSON columns (`attributes`, `status`, `tools`, `tool_args`), extract scalars
 ctvs query sql "select model, sum(cast(JSON_VALUE(attributes, '\$.usage.input_tokens') as bigint)) as input_tokens from (select distinct message_id, model, attributes from proxy_messages where role = 'assistant') group by model order by input_tokens desc" --format markdown
 ```
 
-SQL must be a read-only `select` over the logical datasets above.
+SQL must be a read-only `select` over the logical datasets above or registered collection tables.

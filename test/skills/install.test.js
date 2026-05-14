@@ -67,6 +67,23 @@ describe('installSkill', function() {
     }
   })
 
+  it('installs the packaged skill with JSONL collection guidance', async function() {
+    const homeDir = path.join(tmpDir, 'home')
+    const codexHome = path.join(tmpDir, 'codex-home')
+
+    const result = await installSkill({ client: 'all', homeDir, codexHome })
+
+    expect(result.destinations.map((d) => d.action)).toEqual(['installed', 'installed', 'installed'])
+    for (const destination of result.destinations) {
+      const skill = fs.readFileSync(path.join(destination.path, 'SKILL.md'), 'utf8')
+      const reference = fs.readFileSync(path.join(destination.path, 'references', 'query-cli.md'), 'utf8')
+      expect(skill).toMatch(/ctvs collect <file\.jsonl> --name <name>/)
+      expect(skill).toMatch(/registered collection tables/)
+      expect(reference).toMatch(/External JSONL collections/)
+      expect(reference).toMatch(/ctvs query sql "select \* from random_log"/)
+    }
+  })
+
   it('updates managed existing installs', async function() {
     const homeDir = path.join(tmpDir, 'home')
     await installSkill({ client: 'claude', homeDir, sourceDir })

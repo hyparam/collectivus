@@ -9,6 +9,10 @@ import {
   isQueryDataset,
 } from './schema.js'
 import { expectedCachePartitions } from './paths.js'
+import {
+  expectedCollectionPartitions,
+  readCollectionCacheMeta,
+} from './collections.js'
 
 /**
  * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
@@ -18,9 +22,10 @@ import { expectedCachePartitions } from './paths.js'
 /**
  * @param {string} sql
  * @param {number} defaultLimit
- * @returns {{ statement: Statement, datasets: QueryDataset[] }}
+ * @param {string[]} [collectionTables]
+ * @returns {{ statement: Statement, datasets: string[] }}
  */
-export function prepareReadOnlySql(sql, defaultLimit) {
+export function prepareReadOnlySql(sql, defaultLimit, collectionTables = []) {
   const trimmed = sql.trim()
   if (trimmed.length === 0) throw new Error('SQL query is required')
   /** @type {Statement} */
@@ -31,11 +36,13 @@ export function prepareReadOnlySql(sql, defaultLimit) {
     throw new Error(`SQL must be a single read-only SELECT statement: ${formatError(err)}`)
   }
   const tables = extractTables(statement)
-  /** @type {QueryDataset[]} */
+  /** @type {string[]} */
   const datasets = []
+  const allowedCollectionTables = new Set(collectionTables)
   for (const table of tables) {
-    if (!isQueryDataset(table)) {
-      throw new Error(`SQL can only reference logical query tables (${QUERY_DATASETS.join(', ')}); got "${table}"`)
+    if (!isQueryDataset(table) && !allowedCollectionTables.has(table)) {
+      const allowed = [...QUERY_DATASETS, ...collectionTables].join(', ')
+      throw new Error(`SQL can only reference logical query tables (${allowed}); got "${table}"`)
     }
     if (!datasets.includes(table)) datasets.push(table)
   }
@@ -48,14 +55,14 @@ export function prepareReadOnlySql(sql, defaultLimit) {
  *   paths: QueryPaths,
  *   scope: QueryScope,
  *   statement: Statement,
- *   datasets: QueryDataset[],
+ *   datasets: string[],
  * }} args
  * @returns {Promise<QueryResultSet>}
  */
 export async function executeLogicalSql(args) {
   const tables = buildTables(args.paths, {
     ...args.scope,
-    datasets: args.datasets.length === 0 ? [...QUERY_DATASETS] : args.datasets,
+    ...(args.datasets.length === 0 ? {} : { datasets: args.datasets }),
   })
   const results = executeSql({ tables, query: args.statement })
   const rows = await collect(results)
@@ -68,19 +75,36 @@ export async function executeLogicalSql(args) {
  * @returns {Record<string, AsyncDataSource>}
  */
 export function buildTables(paths, scope) {
+  const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const builtinDatasets = requested ? requested.filter(isQueryDataset) : [...QUERY_DATASETS]
+  const collectionDatasets = requested
+    ? requested.filter((dataset) => !isQueryDataset(dataset))
+    : expectedCollectionPartitions(paths, scope).map((partition) => partition.table)
+
   /** @type {Record<string, CachePartition[]>} */
   const byDataset = {}
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : [...QUERY_DATASETS])
-  for (const dataset of datasets) byDataset[dataset] = []
-  for (const partition of expectedCachePartitions(paths, scope)) {
-    if (!byDataset[partition.dataset]) byDataset[partition.dataset] = []
-    byDataset[partition.dataset].push(partition)
+  for (const dataset of builtinDatasets) byDataset[dataset] = []
+  if (builtinDatasets.length > 0) {
+    for (const partition of expectedCachePartitions(paths, { ...scope, datasets: builtinDatasets })) {
+      if (!byDataset[partition.dataset]) byDataset[partition.dataset] = []
+      byDataset[partition.dataset].push(partition)
+    }
   }
 
   /** @type {Record<string, AsyncDataSource>} */
   const tables = {}
-  for (const dataset of datasets) {
+  for (const dataset of builtinDatasets) {
     tables[dataset] = parquetDataSource(dataset, byDataset[dataset] ?? [], scope)
+  }
+  /** @type {Record<string, import('./types.js').CollectionCachePartition[]>} */
+  const byCollection = {}
+  for (const dataset of collectionDatasets) byCollection[dataset] = []
+  for (const partition of expectedCollectionPartitions(paths, { ...scope, datasets: collectionDatasets })) {
+    if (!byCollection[partition.table]) byCollection[partition.table] = []
+    byCollection[partition.table].push(partition)
+  }
+  for (const dataset of collectionDatasets) {
+    tables[dataset] = collectionDataSource(dataset, byCollection[dataset] ?? [], scope)
   }
   return tables
 }
@@ -100,6 +124,28 @@ export function parquetDataSource(dataset, partitions, scope) {
     scan(options) {
       return {
         rows: () => scanRows(dataset, partitions, scope, options),
+        appliedWhere: false,
+        appliedLimitOffset: false,
+      }
+    },
+  }
+}
+
+/**
+ * @param {string} table
+ * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @returns {AsyncDataSource}
+ */
+export function collectionDataSource(table, partitions, scope) {
+  const columns = collectionColumns(partitions)
+  const numRows = partitions.reduce((sum, partition) => sum + readCollectionRowCountHint(partition), 0)
+  return {
+    columns,
+    numRows,
+    scan(options) {
+      return {
+        rows: () => scanCollectionRows(table, partitions, scope, options),
         appliedWhere: false,
         appliedLimitOffset: false,
       }
@@ -131,7 +177,31 @@ async function* scanRows(dataset, partitions, scope, options) {
 }
 
 /**
- * @param {CachePartition} partition
+ * @param {string} table
+ * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @param {ScanOptions} options
+ * @returns {AsyncGenerator<AsyncRow>}
+ */
+async function* scanCollectionRows(table, partitions, scope, options) {
+  const requestedColumns = options.columns && options.columns.length > 0
+    ? options.columns
+    : collectionColumns(partitions)
+  for (const partition of partitions) {
+    if (options.signal?.aborted) return
+    const meta = readCollectionCacheMeta(partition.metaPath)
+    const rows = await readParquetRows(partition)
+    for (const row of rows) {
+      if (options.signal?.aborted) return
+      const logical = normalizePlainRow(row)
+      if (!collectionRowMatchesScope(table, logical, scope, meta)) continue
+      yield asyncRow(projectRow(logical, requestedColumns), requestedColumns)
+    }
+  }
+}
+
+/**
+ * @param {{ parquetPath: string }} partition
  * @returns {Promise<Record<string, unknown>[]>}
  */
 async function readParquetRows(partition) {
@@ -146,13 +216,22 @@ async function readParquetRows(partition) {
  * @returns {Record<string, import('squirreling').SqlPrimitive>}
  */
 function normalizeLogicalRow(row, partition) {
+  const out = normalizePlainRow(row)
+  out.gateway_id = typeof out.gateway_id === 'string' ? out.gateway_id : partition.gatewayId
+  out.date = partition.date
+  return out
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @returns {Record<string, import('squirreling').SqlPrimitive>}
+ */
+function normalizePlainRow(row) {
   /** @type {Record<string, import('squirreling').SqlPrimitive>} */
   const out = {}
   for (const [key, value] of Object.entries(row)) {
     out[key] = normalizeCell(value)
   }
-  out.gateway_id = typeof out.gateway_id === 'string' ? out.gateway_id : partition.gatewayId
-  out.date = partition.date
   return out
 }
 
@@ -204,12 +283,50 @@ function rowMatchesScope(dataset, row, scope) {
 }
 
 /**
+ * @param {string} _table
+ * @param {Record<string, import('squirreling').SqlPrimitive>} row
+ * @param {QueryScope} scope
+ * @param {import('./types.js').CollectionCacheMeta | undefined} meta
+ * @returns {boolean}
+ */
+function collectionRowMatchesScope(_table, row, scope, meta) {
+  if (scope.gatewayId && 'gateway_id' in row && row.gateway_id !== scope.gatewayId) return false
+  if (scope.service) {
+    if ('serviceName' in row && row.serviceName !== scope.service) return false
+    if ('service_name' in row && row.service_name !== scope.service) return false
+  }
+  if (!scope.date && !scope.from && !scope.to) return true
+  const timestampMs = collectionRowTimestampMs(row, meta)
+  if (timestampMs === undefined) return true
+  if (scope.date && new Date(timestampMs).toISOString().slice(0, 10) !== scope.date) return false
+  if (scope.from && timestampMs < Date.parse(scope.from)) return false
+  if (scope.to && timestampMs > Date.parse(scope.to)) return false
+  return true
+}
+
+/**
  * @param {QueryDataset} dataset
  * @param {Record<string, import('squirreling').SqlPrimitive>} row
  * @returns {number | undefined}
  */
 function rowTimestampMs(dataset, row) {
   for (const column of fallbackTimestampColumns(dataset)) {
+    const ms = timestampMs(row[column])
+    if (ms !== undefined) return ms
+  }
+}
+
+/**
+ * @param {Record<string, import('squirreling').SqlPrimitive>} row
+ * @param {import('./types.js').CollectionCacheMeta | undefined} meta
+ * @returns {number | undefined}
+ */
+function collectionRowTimestampMs(row, meta) {
+  if (meta?.timestamp_column) {
+    const ms = timestampMs(row[meta.timestamp_column])
+    if (ms !== undefined) return ms
+  }
+  for (const column of ['timestamp', 'time', 'ts', 'created_at', 'createdat', 'date']) {
     const ms = timestampMs(row[column])
     if (ms !== undefined) return ms
   }
@@ -239,6 +356,27 @@ function readRowCountHint(partition) {
   } catch {
     return 0
   }
+}
+
+/**
+ * @param {import('./types.js').CollectionCachePartition} partition
+ * @returns {number}
+ */
+function readCollectionRowCountHint(partition) {
+  const meta = readCollectionCacheMeta(partition.metaPath)
+  return meta?.row_count ?? 0
+}
+
+/**
+ * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @returns {string[]}
+ */
+function collectionColumns(partitions) {
+  for (const partition of partitions) {
+    const meta = readCollectionCacheMeta(partition.metaPath)
+    if (meta) return meta.columns.map((column) => column.name)
+  }
+  return ['_ctvs_source_path', '_ctvs_line_number', '_ctvs_raw']
 }
 
 /**

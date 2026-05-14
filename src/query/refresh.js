@@ -15,6 +15,7 @@ import {
   inspectCachePartition,
   parquetPathFor,
 } from './paths.js'
+import { isQueryDataset } from './schema.js'
 
 /**
  * @import { CachePartition, QueryDataset, QueryPaths, QueryScope, RefreshResult, SourceFile } from './types.js'
@@ -40,7 +41,8 @@ export async function refreshQueryCache(args) {
 
   /** @type {RefreshResult} */
   const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const datasets = requestedDatasets?.filter(isQueryDataset)
   const sources = discoverSourceFiles(paths.recordingRoot, scope)
   for (const source of sources) {
     const sourceDatasets = datasetsForSource(source, datasets)

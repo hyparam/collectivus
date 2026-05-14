@@ -140,7 +140,9 @@ export function datasetsForSource(source, datasets) {
  * @returns {SourceFile[]}
  */
 export function discoverSourceFiles(root, scope) {
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const datasets = requestedDatasets?.filter(isQueryDataset)
+  if (requestedDatasets && datasets?.length === 0) return []
   const wantedSignals = datasets
     ? new Set(datasets.map((dataset) => sourceSignalForDataset(dataset)))
     : new Set(['logs', 'traces', 'metrics', 'proxy'])
@@ -184,7 +186,9 @@ export function discoverSourceFiles(root, scope) {
  */
 export function expectedCachePartitions(paths, scope) {
   if (!paths.parquetDir) return []
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const datasets = requestedDatasets?.filter(isQueryDataset)
+  if (requestedDatasets && datasets?.length === 0) return []
   /** @type {CachePartition[]} */
   const partitions = []
   /** @type {Set<string>} */
@@ -341,7 +345,8 @@ function staleReason(partition, meta) {
  * @returns {CacheMeta[]}
  */
 export function listCacheMetas(parquetDir, scope) {
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : QUERY_DATASETS)
+  const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const datasets = requestedDatasets ? requestedDatasets.filter(isQueryDataset) : QUERY_DATASETS
   /** @type {CacheMeta[]} */
   const out = []
   for (const dataset of datasets) {

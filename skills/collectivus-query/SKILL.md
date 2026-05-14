@@ -32,7 +32,10 @@ ctvs query metrics series <metric-name> --format json
 ctvs query proxy get <conversation-id> --format json
 ctvs query proxy stats --format json
 ctvs query errors --since 24h --format json
+ctvs collect <file.jsonl> --name <name>
 ```
+
+`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its Parquet cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`.
 
 ## Proxy conversation log model
 
@@ -102,7 +105,7 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 - Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated Parquet, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
-- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, and `proxy_messages`.
+- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, and registered collection tables from `ctvs query catalog`.
 - Use UTC dates with `--date YYYY-MM-DD`.
 - Use `--service`, `--gateway-id`, `--from`, `--to`, or `--since` to narrow broad investigations.
 

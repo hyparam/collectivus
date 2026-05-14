@@ -522,6 +522,8 @@ ctvs query traces slow --config collectivus.json --limit 20
 ctvs query metrics series latency.ms --config collectivus.json
 ctvs query proxy get <conversation-id> --config collectivus.json --format json
 ctvs query sql "select serviceName, count(*) as logs from logs group by serviceName"
+ctvs collect random-log.jsonl --name random-log --config collectivus.json
+ctvs query sql "select * from random_log" --config collectivus.json
 ```
 
 Cache files are written under
@@ -547,7 +549,7 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, and `proxy_messages`. `ctvs query schema <dataset>` prints the static schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, and `proxy_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
 
 ### Conversation log model
 
@@ -579,6 +581,7 @@ discovers a non-default service config from `ctvs status` or the service unit.
 ctvs --config <path>                         Run with config file
 ctvs --config <path> --print-config          Validate + print resolved config
 ctvs query <command> [...]                   Query local recordings
+ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
 ctvs export --config <path> [...]            Convert recorded JSONL to local Parquet (one-shot)
 ctvs --help                                  Show usage
 ```
@@ -705,6 +708,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 | `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
+| `ctvs collect <file.jsonl> --name <name>` | Register external JSONL as a dynamic query table |
 | `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach

@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { SseParser, isSseHeaders } from './sse.js'
 
 /**
- * @import { Sink, ClientInfo, ClaudeSessionContext, ExchangeResponse } from './types.js'
+ * @import { Sink, ClientInfo, ClaudeSessionContext, ExchangeResponse, ShouldDropPredicate } from './types.js'
  */
 
 export { isSseHeaders }
@@ -27,7 +27,11 @@ const DEFAULT_REDACT_HEADERS = [
  */
 export class Recorder {
   /**
-   * @param {{ sink: Sink, redactHeaders?: readonly string[] | undefined }} options
+   * @param {{
+   *   sink: Sink,
+   *   redactHeaders?: readonly string[] | undefined,
+   *   shouldDrop?: ShouldDropPredicate,
+   * }} options
    */
   constructor(options) {
     if (!options || !options.sink) throw new Error('Recorder: sink is required')
@@ -37,17 +41,25 @@ export class Recorder {
     this.redactSet = buildRedactSet(options.redactHeaders)
     /** @type {Set<Exchange>} */
     this.active = new Set()
+    /** @type {ShouldDropPredicate | undefined} */
+    this.shouldDrop = options.shouldDrop
   }
 
   /**
    * Begin recording a new exchange. The returned object collects state and
    * writes the final `exchange` row when {@link Exchange#finish} is called.
    *
+   * `shouldDrop` lets the caller (typically the proxy) attach a per-exchange
+   * filter predicate that is consulted before any `sink.writeRow` call. When
+   * absent, the recorder's constructor-level predicate is used instead, and
+   * when both are absent, every exchange is recorded.
+   *
    * @param {{
    *   upstream: string,
    *   client: ClientInfo,
    *   request: { method: string | undefined, path: string | undefined, headers: Record<string, string | string[] | undefined> },
    *   localContextForRequest?: (body: string) => ClaudeSessionContext | undefined,
+   *   shouldDrop?: ShouldDropPredicate,
    * }} init
    * @returns {Exchange}
    */
@@ -97,6 +109,7 @@ export class Exchange {
    *   client: ClientInfo,
    *   request: { method: string | undefined, path: string | undefined, headers: Record<string, string | string[] | undefined> },
    *   localContextForRequest?: (body: string) => ClaudeSessionContext | undefined,
+   *   shouldDrop?: ShouldDropPredicate,
    * }} init
    */
   constructor(recorder, init) {
@@ -116,12 +129,22 @@ export class Exchange {
     this.requestChunks = []
     /** @type {Record<string, string | string[] | undefined>} */
     this.requestHeaders = redactHeaders(init.request.headers, recorder.redactSet)
+    /**
+     * Pre-redaction request headers, kept in memory only for the lifetime
+     * of the exchange so the ignore filter can inspect provider session
+     * tokens that the persisted record would otherwise redact away. Never
+     * written to a sink.
+     * @type {Record<string, string | string[] | undefined>}
+     */
+    this._filterHeaders = init.request.headers
     /** @type {string | undefined} */
     this.requestMethod = init.request.method
     /** @type {string | undefined} */
     this.requestPath = init.request.path
     /** @type {((body: string) => ClaudeSessionContext | undefined) | undefined} */
     this.localContextForRequest = init.localContextForRequest
+    /** @type {ShouldDropPredicate | undefined} */
+    this.shouldDrop = init.shouldDrop
     /** @type {ExchangeResponse | undefined} */
     this.response = undefined
     /** @type {Buffer[]} */
@@ -134,6 +157,13 @@ export class Exchange {
     this.finished = false
     /** @type {SseParser} */
     this.sseParser = new SseParser()
+    /**
+     * Cached result of {@link Exchange#_shouldDropExchange}. Set on the
+     * first filter evaluation so the second checkpoint (stream-chunk vs.
+     * finish) doesn't re-decode the request body or re-walk the filesystem.
+     * @type {boolean | undefined}
+     */
+    this._dropDecision = undefined
     /** @type {() => void} */
     this._resolveFinished = () => {}
     /** @type {Promise<void>} */
@@ -205,10 +235,15 @@ export class Exchange {
    */
   async consumeStreamChunk(chunk) {
     const events = this.sseParser.feed(chunk)
+    if (events.length === 0) return
+    // We still increment the event count for the final exchange row so a
+    // dropped recording reports the same "streaming, N events" shape to any
+    // consumer that asks. The actual JSONL writes are suppressed below.
+    this.streamEventCount += events.length
+    if (this._shouldDropExchange()) return
     /** @type {Promise<void>[]} */
     const writes = []
     for (const ev of events) {
-      this.streamEventCount += 1
       writes.push(this.recorder.sink.writeRow({
         exchange_id: this.id,
         kind: 'stream_event',
@@ -255,6 +290,11 @@ export class Exchange {
     const response = this.finalizeResponseBody()
     const localContext = this.localContextForRequest?.(requestBody)
 
+    if (this._shouldDropExchange(requestBody)) {
+      this._resolveFinished()
+      return
+    }
+
     const row = {
       exchange_id: this.id,
       kind: 'exchange',
@@ -280,6 +320,45 @@ export class Exchange {
     } finally {
       this._resolveFinished()
     }
+  }
+
+  /**
+   * Ask the recorder's filter whether this exchange should be suppressed.
+   * The decision is cached on first call so streaming exchanges don't re-run
+   * the body-decode + filesystem walk for every event. The cached value is
+   * also reused by `finish()` so the precedence-matched answer is consistent
+   * between checkpoints.
+   *
+   * The filter receives the accumulated request body so it can extract the
+   * provider session id; for streaming responses the request body is fully
+   * received before the first SSE event is forwarded, so the body is
+   * complete by the time `consumeStreamChunk` first asks.
+   *
+   * @param {string} [precomputedBody] Reuse the body decode already done by
+   *   `finish()` so we don't pay the UTF-8 cost twice.
+   * @returns {boolean}
+   */
+  _shouldDropExchange(precomputedBody) {
+    if (this._dropDecision !== undefined) return this._dropDecision
+    const predicate = this.shouldDrop ?? this.recorder.shouldDrop
+    if (!predicate) {
+      this._dropDecision = false
+      return false
+    }
+    const body = precomputedBody ?? Buffer.concat(this.requestChunks).toString('utf8')
+    /** @type {boolean} */
+    let drop = false
+    try {
+      drop = Boolean(predicate({
+        requestHeaders: this._filterHeaders,
+        requestBody: body,
+      }))
+    } catch {
+      // Filter errors must never break recording — fall back to "record".
+      drop = false
+    }
+    this._dropDecision = drop
+    return drop
   }
 
   /**

@@ -48,6 +48,41 @@ export interface ClaudeSessionContext {
   git_branch?: string
 }
 
+// ---------- Ignore filter (recording opt-out) ----------
+
+/**
+ * On-disk shape of the user-persistent ignore state living alongside the rest
+ * of `~/.hyp/collectivus.json`. Schema is intentionally open — the file is
+ * shared with the proxy config and may grow new top-level keys.
+ */
+export interface CollectivusIgnoreConfig {
+  /** Normalized absolute paths whose Claude requests must not be recorded. */
+  ignored_paths: string[]
+  /**
+   * Snapshot of the in-memory temporary session set. Returned by
+   * `IgnoreFilter.snapshot()` for status output; never persisted to disk.
+   */
+  ignored_sessions?: string[]
+}
+
+/** Reason the filter dropped a row, alongside the matching key. */
+export type IgnoreEvaluation =
+  | { drop: false }
+  | { drop: true, reason: 'session', match: string }
+  | { drop: true, reason: 'path', match: string }
+  | { drop: true, reason: 'ctvsignore', match: string }
+
+/**
+ * Closure handed to {@link Recorder.startExchange} so each Exchange can ask
+ * whether it should suppress its JSONL writes. The proxy wires this to an
+ * {@link import('./ignore.js').IgnoreFilter} instance, providing the
+ * session-id extraction logic since the recorder is provider-agnostic.
+ */
+export type ShouldDropPredicate = (input: {
+  requestHeaders: Record<string, string | string[] | undefined>
+  requestBody: string
+}) => boolean
+
 // ---------- File sink ----------
 
 export interface Sink {

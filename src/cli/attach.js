@@ -1,9 +1,11 @@
+import path from 'node:path'
 import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttachClaude, defaultSettingsPath } from '../claude-code/settings.js'
 import { attach as defaultAttachCodex, defaultConfigPath as defaultCodexConfigPath } from '../codex/settings.js'
 import { parseListenPort, readPackageVersion } from './common.js'
 import { pathMatchesPrefix } from '../proxy.js'
+import { installSkillBundle as defaultInstallSkillBundle } from '../skills/install.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
@@ -93,6 +95,17 @@ export async function runAttach(argv, hooks = {}) {
   const settingsPath = hooks.settingsPath ?? defaultSettingsPath()
   const codexConfigPath = hooks.codexConfigPath ?? defaultCodexConfigPath()
   const binPath = hooks.binPath ?? process.argv[1] ?? 'ctvs'
+  // Auto-install Claude helper skills after a successful Claude attach. Tests
+  // that mock `attach` / `attachClaude` to avoid touching real settings.json
+  // should similarly not have skills materialized into `~/.claude/skills/` —
+  // so when those hooks are overridden but `installSkillBundle` isn't, we
+  // short-circuit to a noop. Tests that DO want to verify the auto-install
+  // can opt in by passing their own `installSkillBundle` spy.
+  /** @type {((opts: import('../skills/types.d.ts').SkillInstallOptions) => Promise<import('../skills/types.d.ts').SkillInstallResult>) | null} */
+  const installSkillBundle = hooks.installSkillBundle
+    ?? (hooks.attach || hooks.attachClaude
+      ? null
+      : defaultInstallSkillBundle)
 
   const parsed = parseAttachArgs(argv)
   if (parsed.help) {
@@ -160,6 +173,25 @@ export async function runAttach(argv, hooks = {}) {
     stdout.write(`  ANTHROPIC_BASE_URL = http://127.0.0.1:${port}\n`)
     if (result.prevValue !== undefined) {
       stdout.write(`  (previous ANTHROPIC_BASE_URL was ${result.prevValue})\n`)
+    }
+
+    // Auto-install the Claude-targeted helper skills so the user gets
+    // `/ctvs-ignore`, `/ctvs-unignore`, and `collectivus-query` without a
+    // second command. Failure is a warning, not an error, so a transient
+    // filesystem problem doesn't undo a successful Claude attach.
+    if (installSkillBundle) {
+      try {
+        const skillResult = await installSkillBundle({ client: 'claude' })
+        for (const destination of skillResult.destinations) {
+          const verb = destination.action === 'updated' ? 'Updated' : 'Installed'
+          stdout.write(`  ${verb} Claude skill ${path.basename(destination.path)} (${destination.path})\n`)
+        }
+      } catch (err) {
+        stderr.write(
+          `warning: failed to install Claude helper skills: ${err instanceof Error ? err.message : String(err)}\n` +
+          '  run \'ctvs skills install --client claude\' to retry\n'
+        )
+      }
     }
   }
 

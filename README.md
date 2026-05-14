@@ -520,7 +520,7 @@ ctvs query refresh --config collectivus.json
 ctvs query logs --config collectivus.json --since 1h
 ctvs query traces slow --config collectivus.json --limit 20
 ctvs query metrics series latency.ms --config collectivus.json
-ctvs query proxy get <exchange-id> --config collectivus.json --format json
+ctvs query proxy get <conversation-id> --config collectivus.json --format json
 ctvs query sql "select serviceName, count(*) as logs from logs group by serviceName"
 ```
 
@@ -547,9 +547,19 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, `proxy_exchanges`, and
-`proxy_stream_events`. `ctvs query schema <dataset>` prints the static schema,
-and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, and `proxy_messages`. `ctvs query schema <dataset>` prints the static schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+
+### Conversation log model
+
+Recorded LLM proxy traffic is exposed as a single logical dataset, `proxy_messages`. Each row is one content part — a text block, reasoning block, tool call, tool result, image, file, or error — so a single assistant turn that contains text + a tool call + more text becomes three rows. The grain is per-part on purpose: callers can filter, count, and join parts without unpacking nested JSON, and downstream analytics (`SUM(usage)`, conversation walks, tool-call/result joins) become single-table SQL.
+
+Rows are globally deduplicated by `message_id` — a 16-character hex prefix of `sha256(conversation_id : role : canonicalJson(content))`. Identical content in the same conversation always produces the same id, so the user-history blocks that Anthropic replays on every request are written once. The walker also tracks `previous_message_id` across exchanges so callers can reconstruct conversation order even after dedup.
+
+`conversation_id` is resolved tiered — Claude Code's `metadata.user_id.session_id` when present, otherwise a stable 16-hex hash of the first user message's content, otherwise a hash of `exchange_id` (so even single-shot malformed exchanges get a deterministic id). `conversation_source` is `claude_code` when the recorded user-agent starts with `claude-cli/`, else `api`.
+
+JSON columns (`attributes`, `status`, `tools`, `tool_args`) carry sparse structured data; scalars are accessed with `JSON_VALUE(<col>, '$.path')`. `attributes` holds request settings, per-message `usage` (assistant only) and `timing.latency_ms`; `status` holds `tool_status` on tool results, `finish_reason` on the last assistant part, and `error_code` / `error_message` on error parts. JSONL capture is unchanged — the dataset is purely a derived projection over the recorded `exchange` and `stream_event` rows.
+
+For the full per-column derivation table see [skills/collectivus-query/references/query-cli.md](skills/collectivus-query/references/query-cli.md).
 
 ### LLM skill
 
@@ -587,11 +597,14 @@ Two sinks are drained:
 
 | Source | Destination |
 | --- | --- |
-| `<sink.dir>/<gateway_id>/proxy/<date>.jsonl` (proxy recorder) | `<out>/proxy/exchanges.parquet`, `<out>/proxy/stream_events.parquet` |
+| `<sink.dir>/<gateway_id>/proxy/<date>.jsonl` (proxy recorder) | `<out>/proxy/messages.parquet` |
 | `<sink.dir>/<gateway_id>/<signal>/<date>.jsonl` (OTLP) | `<out>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet` |
 
-The two proxy row kinds (`exchange` and `stream_event`) get their own typed
-schemas. Headers are JSON columns; bodies are preserved as strings.
+Proxy export walks each gateway's days chronologically so the conversation
+walker can dedupe `message_id`s across day boundaries, then concatenates the
+result into a single `messages.parquet` file. The per-day `kind: "exchange"` /
+`kind: "stream_event"` JSONL rows on disk are unchanged — only the Parquet
+projection was reshaped.
 
 ```text
 ctvs export --config <path> [--out <dir>] [--date YYYY-MM-DD]

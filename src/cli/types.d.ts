@@ -284,6 +284,8 @@ export interface AttachHooks {
   attachClaude?: (opts: AttachOptions) => Promise<AttachResult>
   attachCodex?: (opts: CodexAttachOptions) => Promise<CodexAttachResult>
   loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+  /** Inject a fake skill installer in tests. */
+  installSkillBundle?: (opts: SkillInstallOptions) => Promise<SkillInstallResult>
 }
 
 export interface DetachHooks {
@@ -402,6 +404,26 @@ export interface SkillsHooks {
   codexHome?: string
   sourceDir?: string
   installSkill?: (opts: SkillInstallOptions) => Promise<SkillInstallResult>
+}
+
+export type IgnoreParseResult =
+  | { help: true, error?: undefined, command?: undefined, path?: undefined }
+  | { help?: undefined, error: string, command?: undefined, path?: undefined }
+  | { help?: undefined, error?: undefined, command: 'list', path?: undefined }
+  | { help?: undefined, error?: undefined, command: 'add', path: string }
+  | { help?: undefined, error?: undefined, command: 'remove', path: string }
+
+export interface IgnoreCliHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  /** Override for `process.cwd()`. */
+  cwd?: string
+  /** Override for `os.homedir()` when resolving the default config path. */
+  homeDir?: string
+  /** Override the config file path entirely (takes precedence over homeDir). */
+  configPath?: string
+  /** Inject a pre-built filter for tests. */
+  filter?: import('../ignore.js').IgnoreFilter
 }
 
 // ---------- CLI admin ----------

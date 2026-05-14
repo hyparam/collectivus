@@ -168,3 +168,13 @@ ORDER BY source, idx;
 `gascity_messages` is **always fresh** — the daemon writes Parquet directly into the sink (no JSONL stage, no `.meta.json` sidecar), so query-time discovery picks up every part-file the writer has flushed. `ctvs query refresh gascity_messages` is a documented no-op (it lists existing partitions as already-fresh). To pull in newly-flushed rows simply rerun the query.
 
 Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema session_segments --format markdown`, `ctvs query schema gascity_messages --format markdown`. Catalog: `ctvs query catalog --format markdown`.
+
+## Refresh cost
+
+Refreshing isn't free. `events.jsonl` and the `session_segments/**/*.jsonl` files registered by `ctvs collect` can be large — gascity ships hundreds of decision/mutation tracepoints per agent per hour — and re-materializing the Parquet partitions reads every byte that changed since the last refresh. On a busy workspace, a full refresh of `session_segments` can take tens of seconds and write tens of megabytes.
+
+Recommended workflow:
+
+1. Run `ctvs query status` first. The summary shows which date ranges are already cached and which are stale; cheap queries against a covered range never need a refresh.
+2. Only invoke `--refresh always` or `ctvs query refresh <dataset>` when a needed date range is missing or `status` reports staleness in the window you care about.
+3. Do not reflexively pass `--refresh always` "just in case". Stale-data queries print a warning to stderr (the default behavior); reading that warning is cheaper than re-materializing the cache. Treat refresh as a deliberate step, not a default.

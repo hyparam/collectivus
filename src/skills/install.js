@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 /**
  * @import {
+ *   SkillInstallClient,
  *   SkillInstallDestination,
  *   SkillInstallDestinationResult,
  *   SkillInstallOptions,
@@ -16,6 +17,20 @@ import { fileURLToPath } from 'node:url'
 export const COLLECTIVUS_QUERY_SKILL = 'collectivus-query'
 const MANAGED_MARKER = '.collectivus-skill.json'
 const DEFAULT_SKILL_SOURCE = fileURLToPath(new URL('../../skills/collectivus-query', import.meta.url))
+const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
+
+/**
+ * Skills shipped in this package. Each entry declares which clients it
+ * targets — `ctvs-ignore` / `ctvs-unignore` rely on `$CLAUDE_CODE_SESSION_ID`
+ * which is Claude-Code-specific, so they are not installed under Codex.
+ *
+ * @type {ReadonlyArray<{ name: string, clients: ReadonlyArray<'claude' | 'codex'> }>}
+ */
+export const BUNDLED_SKILLS = Object.freeze([
+  { name: 'collectivus-query', clients: ['claude', 'codex'] },
+  { name: 'ctvs-ignore', clients: ['claude'] },
+  { name: 'ctvs-unignore', clients: ['claude'] },
+])
 
 export class SkillInstallError extends Error {
   /**
@@ -61,6 +76,64 @@ export async function installSkill(opts) {
     }))
   }
   return { destinations: results }
+}
+
+/**
+ * Install every entry in {@link BUNDLED_SKILLS} that is compatible with the
+ * requested `client`. The bundle is the surface that `ctvs skills install`
+ * and `ctvs attach --client claude` rely on so new skills can be added in
+ * one place. Each skill's source directory is resolved beneath the package
+ * `skills/` root unless overridden via the `skillsRoot` option (tests use it
+ * to point at a temporary fixture).
+ *
+ * @param {SkillInstallOptions & { skillsRoot?: string }} opts
+ * @returns {Promise<SkillInstallResult>}
+ */
+export async function installSkillBundle(opts) {
+  const { client } = opts
+  if (client !== 'claude' && client !== 'codex' && client !== 'all') {
+    throw new SkillInstallError(`invalid client: ${String(client)}`, { code: 'INVALID_CLIENT' })
+  }
+  const root = opts.skillsRoot ?? SKILLS_ROOT
+  /** @type {SkillInstallDestinationResult[]} */
+  const destinations = []
+  for (const skill of BUNDLED_SKILLS) {
+    if (!skillSupportsClient(skill, client)) continue
+    const sourceDir = path.join(root, skill.name)
+    const result = await installSkill({
+      ...opts,
+      client: clientForSkill(skill, client),
+      skillName: skill.name,
+      sourceDir,
+    })
+    for (const destination of result.destinations) destinations.push(destination)
+  }
+  return { destinations }
+}
+
+/**
+ * @param {{ clients: ReadonlyArray<'claude' | 'codex'> }} skill
+ * @param {SkillInstallClient} requested
+ * @returns {boolean}
+ */
+function skillSupportsClient(skill, requested) {
+  if (requested === 'all') return skill.clients.length > 0
+  return skill.clients.includes(requested)
+}
+
+/**
+ * Narrow `requested === 'all'` down to the intersection of `requested` with
+ * the skill's declared clients so a Claude-only skill stays out of the Codex
+ * install paths even when the caller asked for `all`.
+ *
+ * @param {{ clients: ReadonlyArray<'claude' | 'codex'> }} skill
+ * @param {SkillInstallClient} requested
+ * @returns {SkillInstallClient}
+ */
+function clientForSkill(skill, requested) {
+  if (requested !== 'all') return requested
+  if (skill.clients.length === 2) return 'all'
+  return skill.clients[0]
 }
 
 /**

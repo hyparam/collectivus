@@ -301,6 +301,63 @@ describe('runAttach', function() {
     expect(stderr.value()).toMatch(/proxy.listen/)
   })
 
+  it('auto-installs the Claude skill bundle after a successful Claude attach', async function() {
+    /** @type {object[]} */
+    const skillCalls = []
+    const stdout = memo()
+    const code = await runAttach(['--port', '8787'], {
+      stdout, stderr: memo(),
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      attach() { return Promise.resolve({ changed: true }) },
+      installSkillBundle(opts) {
+        skillCalls.push(opts)
+        return Promise.resolve({
+          destinations: [
+            { client: 'claude', path: path.join(tmpDir, 'skills', 'collectivus-query'), action: 'installed' },
+            { client: 'claude', path: path.join(tmpDir, 'skills', 'ctvs-ignore'), action: 'installed' },
+            { client: 'claude', path: path.join(tmpDir, 'skills', 'ctvs-unignore'), action: 'installed' },
+          ],
+        })
+      },
+    })
+    expect(code).toBe(0)
+    expect(skillCalls).toEqual([{ client: 'claude' }])
+    const out = stdout.value()
+    expect(out).toMatch(/Installed Claude skill collectivus-query/)
+    expect(out).toMatch(/Installed Claude skill ctvs-ignore/)
+    expect(out).toMatch(/Installed Claude skill ctvs-unignore/)
+  })
+
+  it('still succeeds when the skill bundle install fails (prints a warning)', async function() {
+    const stderr = memo()
+    const code = await runAttach(['--port', '8787'], {
+      stdout: memo(), stderr,
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      attach() { return Promise.resolve({ changed: true }) },
+      installSkillBundle() { return Promise.reject(new Error('skill dir collision')) },
+    })
+    expect(code).toBe(0)
+    expect(stderr.value()).toMatch(/failed to install Claude helper skills.*skill dir collision/)
+    expect(stderr.value()).toMatch(/ctvs skills install --client claude/)
+  })
+
+  it('does not auto-install when --client codex is used alone', async function() {
+    /** @type {object[]} */
+    const skillCalls = []
+    const code = await runAttach(['--port', '8787', '--client', 'codex'], {
+      stdout: memo(), stderr: memo(),
+      version: '2.0.0',
+      settingsPath: path.join(tmpDir, 'settings.json'),
+      codexConfigPath: path.join(tmpDir, 'codex.toml'),
+      attachCodex() { return Promise.resolve({ changed: true }) },
+      installSkillBundle(opts) { skillCalls.push(opts); return Promise.resolve({ destinations: [] }) },
+    })
+    expect(code).toBe(0)
+    expect(skillCalls).toEqual([])
+  })
+
   it('reports prevValue when attach overwrote ANTHROPIC_BASE_URL', async function() {
     const stdout = memo()
     const code = await runAttach(['--port', '8787'], {

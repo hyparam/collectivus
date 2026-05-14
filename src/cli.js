@@ -7,6 +7,7 @@ import { ConfigClient } from './gateway/config_client.js'
 import { applyDiff, diffConfig } from './gateway/hot_reload.js'
 import { IdentityClient } from './gateway/identity.js'
 import { OutboxSink, defaultOutboxDir } from './gateway/outbox_sink.js'
+import { IgnoreFilter } from './ignore.js'
 import { Proxy } from './proxy.js'
 import { Recorder } from './recorder.js'
 import { defaultPidFilePath } from './runtime/paths.js'
@@ -59,6 +60,7 @@ Commands:
   ctvs query <command> [...]                   Query local recordings through Parquet cache
   ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
   ctvs skills install [...]                    Install the Collectivus query LLM skill
+  ctvs ignore <add|remove|list> [path]         Suppress Claude recording for a folder
   ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs
   ctvs rendezvous [--listen <host:port>] ...   Run the hosted-discovery rendezvous service
@@ -505,8 +507,10 @@ function buildConfigListeners(config, ctx) {
       const sinkDir = config.sink.dir
       factories.set('proxy', async () => {
         const sink = new FileSink(sinkDir, gatewayId)
+        const ignoreFilter = new IgnoreFilter()
+        await ignoreFilter.load({ stderr: ctx.stderr })
         const recorder = new Recorder({ sink, redactHeaders: proxyConfig.redact_headers })
-        const proxy = new Proxy(proxyConfig, { recorder })
+        const proxy = new Proxy(proxyConfig, { recorder, ignoreFilter })
         await proxy.start()
         const effective = effectiveBinding(proxy.server, proxy.host, proxy.port)
         return {

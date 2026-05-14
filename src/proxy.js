@@ -7,6 +7,7 @@ import { isSseHeaders } from './sse.js'
  * @import { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
  * @import { ProxyConfig, UpstreamConfig, CompiledUpstream, ClientInfo, ClaudeSessionContext } from './types.js'
  * @import { Recorder, Exchange } from './recorder.js'
+ * @import { IgnoreFilter } from './ignore.js'
  */
 
 /**
@@ -26,6 +27,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 
 const SESSION_CONTEXT_PATH = '/_collectivus/session-context'
 const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
+const IGNORE_SESSION_PATH = '/_collectivus/ignore/session'
+const IGNORE_SESSION_MAX_BYTES = 16 * 1024
 
 /**
  * Reverse-proxy listener that forwards matched requests to a configured upstream.
@@ -38,7 +41,7 @@ const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
 export class Proxy {
   /**
    * @param {ProxyConfig} config
-   * @param {{ recorder?: Recorder }} [options]
+   * @param {{ recorder?: Recorder, ignoreFilter?: IgnoreFilter }} [options]
    */
   constructor(config, options = {}) {
     /** @type {ProxyConfig} */
@@ -52,6 +55,8 @@ export class Proxy {
     this.upstreams = compileUpstreams(config.upstreams)
     /** @type {Recorder | undefined} */
     this.recorder = options.recorder
+    /** @type {IgnoreFilter | undefined} */
+    this.ignoreFilter = options.ignoreFilter
     /** @type {Map<string, ClaudeSessionContext>} */
     this.sessionContexts = new Map()
     /** @type {Server | undefined} */
@@ -65,9 +70,9 @@ export class Proxy {
    * @returns {Promise<void>}
    */
   start() {
-    const { upstreams, recorder, sessionContexts } = this
+    const { upstreams, recorder, sessionContexts, ignoreFilter } = this
     const server = http.createServer((req, res) => {
-      handleRequest(upstreams, recorder, sessionContexts, req, res)
+      handleRequest(upstreams, recorder, sessionContexts, ignoreFilter, req, res)
     })
     this.server = server
     return new Promise((resolve, reject) => {
@@ -171,14 +176,19 @@ function compileUpstreams(upstreams) {
  * @param {CompiledUpstream[]} upstreams
  * @param {Recorder | undefined} recorder
  * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @param {IgnoreFilter | undefined} ignoreFilter
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, recorder, sessionContexts, req, res) {
+function handleRequest(upstreams, recorder, sessionContexts, ignoreFilter, req, res) {
   const requestUrl = req.url ?? '/'
   const url = new URL(requestUrl, 'http://placeholder')
   if (url.pathname === SESSION_CONTEXT_PATH) {
     handleSessionContext(sessionContexts, req, res)
+    return
+  }
+  if (url.pathname === IGNORE_SESSION_PATH) {
+    handleIgnoreSession(ignoreFilter, req, res)
     return
   }
 
@@ -198,6 +208,14 @@ function handleRequest(upstreams, recorder, sessionContexts, req, res) {
 
   const headers = forwardHeaders(req.headers, upstreamHost)
 
+  // Per-request ignore predicate. When configured, the recorder consults
+  // this before any sink.writeRow to drop recordings whose `cwd` lives under
+  // a registered ignore path, whose ancestor has `.ctvsignore`, or whose
+  // session id is in the temporary in-memory set.
+  const shouldDrop = ignoreFilter
+    ? buildIgnorePredicate(ignoreFilter, sessionContexts)
+    : undefined
+
   const exchange = recorder?.startExchange({
     upstream: upstream.name,
     client: clientInfo(req),
@@ -207,6 +225,7 @@ function handleRequest(upstreams, recorder, sessionContexts, req, res) {
       headers: req.headers,
     },
     localContextForRequest: (body) => localContextForRequest(req.headers, body, sessionContexts),
+    ...(shouldDrop ? { shouldDrop } : {}),
   })
 
   const upstreamReq = lib.request({
@@ -455,6 +474,112 @@ function handleSessionContext(sessionContexts, req, res) {
       ...(gitBranch ? { git_branch: gitBranch } : {}),
     })
     sendJson(res, 200, { ok: true })
+  })
+  req.on('error', () => {
+    if (!res.headersSent) sendJson(res, 400, { error: 'failed to read request body' })
+  })
+}
+
+/**
+ * Build the per-exchange filter predicate handed to `recorder.startExchange`.
+ * Closes over the ignore filter and the live session-context map so each
+ * call resolves the request's session id, looks up its `cwd`, and asks the
+ * filter for a verdict.
+ *
+ * @param {IgnoreFilter} ignoreFilter
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @returns {(args: { requestHeaders: IncomingHttpHeaders, requestBody: string }) => boolean}
+ */
+function buildIgnorePredicate(ignoreFilter, sessionContexts) {
+  return function shouldDropExchange(args) {
+    const sessionId = sessionIdFromBody(args.requestBody)
+      ?? headerValue(args.requestHeaders, 'x-claude-code-session-id')
+    const cwd = sessionId ? sessionContexts.get(sessionId)?.cwd : undefined
+    return ignoreFilter.shouldDrop({ sessionId, cwd, conversationId: sessionId })
+  }
+}
+
+/**
+ * Local-only endpoint that manages the in-memory temporary session-ignore
+ * set on the running daemon. Three verbs:
+ *
+ *   POST /_collectivus/ignore/session   { session_id } -> { ok, total }
+ *   DELETE /_collectivus/ignore/session { session_id } -> { ok, removed, total }
+ *   GET /_collectivus/ignore/session                   -> { ignored, total }
+ *
+ * Bound to loopback so a remote attacker cannot toggle recording for a user
+ * session by guessing the path; the same loopback check shields the existing
+ * session-context endpoint above.
+ *
+ * @param {IgnoreFilter | undefined} ignoreFilter
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
+ * @returns {void}
+ */
+function handleIgnoreSession(ignoreFilter, req, res) {
+  if (!isLoopback(req.socket.remoteAddress)) {
+    req.resume()
+    sendJson(res, 403, { error: 'ignore endpoint is local-only' })
+    return
+  }
+  if (!ignoreFilter) {
+    req.resume()
+    sendJson(res, 503, { error: 'ignore filter is not configured' })
+    return
+  }
+  if (req.method === 'GET') {
+    req.resume()
+    const ignored = ignoreFilter.listIgnoredSessions()
+    sendJson(res, 200, { ignored, total: ignored.length })
+    return
+  }
+  if (req.method !== 'POST' && req.method !== 'DELETE') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', 'allow': 'GET, POST, DELETE' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+
+  /** @type {Buffer[]} */
+  const chunks = []
+  let bytes = 0
+  let tooLarge = false
+  req.on('data', (chunk) => {
+    bytes += chunk.byteLength
+    if (bytes > IGNORE_SESSION_MAX_BYTES) {
+      tooLarge = true
+      req.destroy()
+      return
+    }
+    chunks.push(Buffer.from(chunk))
+  })
+  req.on('end', () => {
+    if (tooLarge) return
+    /** @type {unknown} */
+    let payload
+    try {
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' })
+      return
+    }
+    if (!payload || typeof payload !== 'object') {
+      sendJson(res, 400, { error: 'body must be an object' })
+      return
+    }
+    const sessionId = stringValue(/** @type {Record<string, unknown>} */ (payload).session_id)
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'session_id is required' })
+      return
+    }
+    if (req.method === 'POST') {
+      const { total } = ignoreFilter.addIgnoredSession(sessionId)
+      sendJson(res, 200, { ok: true, total })
+      return
+    }
+    // DELETE
+    const { removed, total } = ignoreFilter.removeIgnoredSession(sessionId)
+    sendJson(res, 200, { ok: true, removed, total })
   })
   req.on('error', () => {
     if (!res.headersSent) sendJson(res, 400, { error: 'failed to read request body' })

@@ -81,3 +81,13 @@ Use `_ctvs_source_path` to see which segment file a row came from, and `_ctvs_li
 `events` is append-only single-file; mtime/size changes trigger re-materialization on refresh.
 
 Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema session_segments --format markdown`. Catalog: `ctvs query catalog --format markdown`.
+
+## Refresh cost
+
+Refreshing isn't free. `events.jsonl` and the `session_segments/**/*.jsonl` files registered by `ctvs collect` can be large — gascity ships hundreds of decision/mutation tracepoints per agent per hour — and re-materializing the Parquet partitions reads every byte that changed since the last refresh. On a busy workspace, a full refresh of `session_segments` can take tens of seconds and write tens of megabytes.
+
+Recommended workflow:
+
+1. Run `ctvs query status` first. The summary shows which date ranges are already cached and which are stale; cheap queries against a covered range never need a refresh.
+2. Only invoke `--refresh always` or `ctvs query refresh <dataset>` when a needed date range is missing or `status` reports staleness in the window you care about.
+3. Do not reflexively pass `--refresh always` "just in case". Stale-data queries print a warning to stderr (the default behavior); reading that warning is cheaper than re-materializing the cache. Treat refresh as a deliberate step, not a default.

@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { installSkill as defaultInstallSkill } from '../skills/install.js'
+import { installSkillBundle as defaultInstallSkillBundle } from '../skills/install.js'
 
 /**
  * @import { SkillInstallClient, SkillInstallResult } from '../skills/types.d.ts'
@@ -74,7 +74,7 @@ export function parseSkillsArgs(argv) {
 export async function runSkills(argv, hooks = {}) {
   const stdout = hooks.stdout ?? process.stdout
   const stderr = hooks.stderr ?? process.stderr
-  const installSkill = hooks.installSkill ?? defaultInstallSkill
+  const installSkillBundle = hooks.installSkill ?? defaultInstallSkillBundle
 
   const parsed = parseSkillsArgs(argv)
   if (parsed.help) {
@@ -89,7 +89,7 @@ export async function runSkills(argv, hooks = {}) {
   /** @type {SkillInstallResult} */
   let result
   try {
-    result = await installSkill({
+    result = await installSkillBundle({
       client: parsed.client,
       force: parsed.force,
       dryRun: parsed.dryRun,
@@ -98,7 +98,7 @@ export async function runSkills(argv, hooks = {}) {
       sourceDir: hooks.sourceDir,
     })
   } catch (err) {
-    stderr.write(`error: failed to install collectivus query skill: ${formatError(err)}\n`)
+    stderr.write(`error: failed to install collectivus skills: ${formatError(err)}\n`)
     return 1
   }
 

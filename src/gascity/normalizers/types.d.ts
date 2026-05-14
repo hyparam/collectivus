@@ -44,9 +44,40 @@ export interface NormalizedRow {
   message_id: string | null
   /** Zero-based block index inside `message.content[]`; 0 for single-row frames. */
   part_index: number
-  /** Block-or-frame type. See README: text / thinking / tool_use / tool_result /
-   * attachment / last-prompt / permission-mode / file-history-snapshot /
-   * queue-operation / ai-title / system / user-text / passthrough. */
+  /**
+   * Block-or-frame type. The vocabulary is the union of values emitted by
+   * every registered provider normalizer; new providers extend it without a
+   * schema bump because the column is plain string.
+   *
+   * Claude-shared (cross-provider, queries can target uniformly):
+   *   - `text` — assistant/user content text block
+   *   - `thinking` — assistant reasoning text + signature
+   *   - `tool_use` — outgoing tool call (Claude tool_use / Codex
+   *     function_call / Codex custom_tool_call)
+   *   - `tool_result` — incoming tool response (Claude tool_result / Codex
+   *     function_call_output / Codex custom_tool_call_output)
+   *
+   * Claude-only (proxy/native Claude shapes):
+   *   - `attachment` — hook output, skill listing, task reminder, etc.
+   *   - `last-prompt`, `permission-mode`, `file-history-snapshot`,
+   *     `queue-operation`, `ai-title`, `system`
+   *
+   * Codex-only (Codex CLI session-log shapes):
+   *   - `session_meta` — one-per-session header (cwd, cli_version, git)
+   *   - `turn_context` — per-turn model/sandbox/approval-policy header
+   *   - `agent_message`, `user_message` — eventized stream copies of the
+   *     `response_item.message` rows, kept for rate/timing queries
+   *   - `task_started`, `task_complete` — per-turn lifecycle (duration_ms,
+   *     time_to_first_token_ms in attributes)
+   *   - `token_count` — periodic usage snapshot with rate_limits
+   *   - `patch_apply_end` — `apply_patch` tool result with unified diff
+   *   - `context_compacted`, `item_completed`, `compacted` — lifecycle
+   *
+   * Passthrough (unknown provider):
+   *   - `raw_frame` — bead-3 passthrough one-row-per-frame fallback
+   *   - `unknown` — never emitted by production normalizers (any unmapped
+   *     frame surfaces its native `type` string instead)
+   */
   part_type: string
 
   // ---------- outer-frame hoist ----------

@@ -82,7 +82,10 @@ function findSeparator(buf) {
  * Parse a single event block per the WHATWG eventsource grammar — fields are
  * `field: value` lines, multiple `data:` lines concatenate with `\n`, the
  * default event type is `message`, lines starting with `:` are comments, and
- * blocks containing only comments dispatch nothing.
+ * blocks containing only comments dispatch nothing. The `id` field, when
+ * present, is round-tripped on the dispatched event so callers that need
+ * `Last-Event-ID` resume on reconnect (gascity supervisor subscribers) can
+ * persist it. `retry` is recognized but not surfaced.
  *
  * @param {string} block
  * @returns {SseEvent | undefined}
@@ -90,6 +93,8 @@ function findSeparator(buf) {
 function parseBlock(block) {
   let event = 'message'
   let data = ''
+  /** @type {string | undefined} */
+  let id
   let hasField = false
   const lines = block.split(/\r?\n/)
   for (const line of lines) {
@@ -105,12 +110,16 @@ function parseBlock(block) {
     } else if (field === 'data') {
       data = data.length === 0 ? value : `${data}\n${value}`
       hasField = true
-    } else if (field === 'id' || field === 'retry') {
-      // Recognized but ignored — they don't change event/data, but their
-      // presence still counts as field content (spec dispatches the block).
+    } else if (field === 'id') {
+      id = value
+      hasField = true
+    } else if (field === 'retry') {
       hasField = true
     }
   }
   if (!hasField) return undefined
-  return { event, data }
+  /** @type {SseEvent} */
+  const ev = { event, data }
+  if (id !== undefined) ev.id = id
+  return ev
 }

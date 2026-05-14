@@ -379,9 +379,9 @@ export async function runWithConfig(config, env, hooks = {}) {
  *   gateway/server roles take it from the JWT subject.
  * @returns {Map<string, ListenerFactory>} Section-keyed factory map.
  *   Section names: `otel`, `proxy`, `upload`, `server`, `configPoll`,
- *   `selfUpdate`. Insertion order is preserved by `Map`, which `runLifecycle`
- *   relies on to start listeners in dependency order (sink-owners before
- *   config-poll, config-poll before self-update).
+ *   `gascity`, `selfUpdate`. Insertion order is preserved by `Map`, which
+ *   `runLifecycle` relies on to start listeners in dependency order
+ *   (sink-owners before config-poll, config-poll before self-update).
  */
 function buildConfigListeners(config, ctx) {
   /** @type {Map<string, ListenerFactory>} */
@@ -553,6 +553,20 @@ function buildConfigListeners(config, ctx) {
           await configClient.whenIdle()
         },
       })
+    })
+  }
+
+  // Gascity supervisor capture. Wired in standalone and server modes — it
+  // reads from a remote supervisor and writes to its own sink root, so it
+  // does not depend on `config.sink` like the proxy/otel sources do.
+  // Disabled in gateway mode for now: a gateway with a remote supervisor
+  // would need to flow gascity rows through the central-server outbox,
+  // which is out of scope for the bead-1 skeleton.
+  if (config.gascity !== undefined && config.role !== 'gateway') {
+    const cities = config.gascity
+    factories.set('gascity', async () => {
+      const { startGascitySource } = await import('./gascity/index.js')
+      return startGascitySource({ cities, stderr: ctx.stderr })
     })
   }
 

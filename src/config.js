@@ -21,8 +21,9 @@ export class ConfigError extends Error {
 }
 
 const ALLOWED_TOP_KEYS = new Set([
-  'version', 'role', 'gateway_id', 'otel', 'proxy', 'sink', 'upload', 'query', 'server', 'central_server',
+  'version', 'role', 'gateway_id', 'otel', 'proxy', 'sink', 'upload', 'query', 'server', 'central_server', 'gascity',
 ])
+const ALLOWED_GASCITY_KEYS = new Set(['name', 'api_url', 'include_templates', 'exclude_templates'])
 const ALLOWED_PROXY_KEYS = new Set(['listen', 'upstreams', 'redact_headers'])
 const ALLOWED_UPSTREAM_KEYS = new Set(['name', 'base_url', 'match'])
 const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
@@ -244,6 +245,7 @@ function validateConfig(cfg, opts) {
   if (cfg.sink !== undefined) validateSink(cfg.sink)
   if (cfg.upload !== undefined) validateUpload(cfg.upload)
   if (cfg.query !== undefined) validateQuery(cfg.query)
+  if (cfg.gascity !== undefined) validateGascity(cfg.gascity)
   validateRole(cfg)
 }
 
@@ -743,6 +745,55 @@ function validateQueryParquet(parquet) {
   if (parquet.dir !== undefined) {
     assertNonEmptyString(parquet.dir, '/query/parquet/dir')
   }
+}
+
+/**
+ * Validate the `gascity` block — an array of supervisor cities the daemon
+ * should subscribe to. Empty array is allowed (the source spins up but
+ * captures nothing; useful for staging configs). Each entry must carry a
+ * unique `name` and an `http(s)://` `api_url`; the optional template filter
+ * arrays must hold non-empty strings.
+ *
+ * @param {unknown} gascity
+ */
+function validateGascity(gascity) {
+  if (!Array.isArray(gascity)) {
+    throw new ConfigError('must be an array', { pointer: '/gascity' })
+  }
+  /** @type {Set<string>} */
+  const seen = new Set()
+  gascity.forEach(function(city, i) {
+    const pointer = `/gascity/${i}`
+    assertObject(city, pointer)
+    assertOnlyKeys(city, ALLOWED_GASCITY_KEYS, pointer)
+    assertNonEmptyString(city.name, `${pointer}/name`)
+    if (seen.has(city.name)) {
+      throw new ConfigError(`duplicate gascity name "${city.name}"`, { pointer: `${pointer}/name` })
+    }
+    seen.add(city.name)
+    assertHttpUrl(city.api_url, `${pointer}/api_url`)
+    if (city.include_templates !== undefined) {
+      validateTemplateList(city.include_templates, `${pointer}/include_templates`)
+    }
+    if (city.exclude_templates !== undefined) {
+      validateTemplateList(city.exclude_templates, `${pointer}/exclude_templates`)
+    }
+  })
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} pointer
+ */
+function validateTemplateList(value, pointer) {
+  if (!Array.isArray(value)) {
+    throw new ConfigError('must be an array of strings', { pointer })
+  }
+  value.forEach(function(item, i) {
+    if (typeof item !== 'string' || item.length === 0) {
+      throw new ConfigError('must be a non-empty string', { pointer: `${pointer}/${i}` })
+    }
+  })
 }
 
 /**

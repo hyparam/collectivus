@@ -1177,3 +1177,90 @@ describe('loadConfigAsync', () => {
     ).rejects.toThrow(/unsupported version/)
   })
 })
+
+describe('loadConfig - gascity section', () => {
+  it('accepts an empty gascity array', () => {
+    const p = writeJson('gascity-empty.json', { version: 1, gascity: [] })
+    expect(loadConfig(p)).toEqual({ version: 1, gascity: [] })
+  })
+
+  it('accepts a fully specified city entry', () => {
+    const cfg = {
+      version: 1,
+      gascity: [
+        {
+          name: 'hyptown',
+          api_url: 'http://127.0.0.1:8372',
+          include_templates: ['desktop/*'],
+          exclude_templates: ['desktop/witness'],
+        },
+      ],
+    }
+    const p = writeJson('gascity-ok.json', cfg)
+    expect(loadConfig(p)).toEqual(cfg)
+  })
+
+  it('rejects a non-array gascity', () => {
+    const p = writeJson('gascity-obj.json', { version: 1, gascity: { name: 'h' } })
+    expect(() => loadConfig(p)).toThrow(/\/gascity.*must be an array/)
+  })
+
+  it('rejects a missing name', () => {
+    const p = writeJson('gascity-no-name.json', {
+      version: 1,
+      gascity: [{ api_url: 'http://h' }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/name.*non-empty string/)
+  })
+
+  it('rejects a missing api_url', () => {
+    const p = writeJson('gascity-no-url.json', {
+      version: 1,
+      gascity: [{ name: 'h' }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/api_url.*non-empty string/)
+  })
+
+  it('rejects a non-http api_url', () => {
+    const p = writeJson('gascity-bad-url.json', {
+      version: 1,
+      gascity: [{ name: 'h', api_url: 'ftp://example' }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/api_url.*http\(s\) URL/)
+  })
+
+  it('rejects duplicate city names', () => {
+    const p = writeJson('gascity-dup.json', {
+      version: 1,
+      gascity: [
+        { name: 'h', api_url: 'http://a' },
+        { name: 'h', api_url: 'http://b' },
+      ],
+    })
+    expect(() => loadConfig(p)).toThrow(/duplicate gascity name "h"/)
+  })
+
+  it('rejects unknown keys inside a city entry', () => {
+    const p = writeJson('gascity-unknown.json', {
+      version: 1,
+      gascity: [{ name: 'h', api_url: 'http://h', surprise: true }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/surprise.*unknown key/)
+  })
+
+  it('rejects non-string entries in include_templates', () => {
+    const p = writeJson('gascity-bad-include.json', {
+      version: 1,
+      gascity: [{ name: 'h', api_url: 'http://h', include_templates: ['ok', 5] }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/include_templates\/1.*non-empty string/)
+  })
+
+  it('rejects a non-array exclude_templates', () => {
+    const p = writeJson('gascity-bad-exclude.json', {
+      version: 1,
+      gascity: [{ name: 'h', api_url: 'http://h', exclude_templates: 'desktop/x' }],
+    })
+    expect(() => loadConfig(p)).toThrow(/\/gascity\/0\/exclude_templates.*array of strings/)
+  })
+})

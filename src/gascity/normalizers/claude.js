@@ -131,12 +131,17 @@ function normalizeAttachment(frame, ctx) {
   const attachmentType = typeof attachment.type === 'string' ? attachment.type : null
   const hookEvent = typeof attachment.hookEvent === 'string' ? attachment.hookEvent : null
   const contentText = renderAttachmentContent(attachment)
+  // Strip `content` from attributes only when we successfully rendered it into
+  // content_text — otherwise a non-string `content` (e.g. structured
+  // task_reminder payload) would land nowhere except raw_frame.
+  const dropKeys = ['type', 'hookEvent']
+  if (contentText !== null) dropKeys.push('content')
   return [makeBaseRow(frame, ctx, {
     part_type: 'attachment',
     attachment_type: attachmentType,
     hook_event: hookEvent,
     content_text: contentText,
-    attributes: stripKey(clone(attachment), 'type', 'hookEvent', 'content'),
+    attributes: stripKey(clone(attachment), ...dropKeys),
   })]
 }
 

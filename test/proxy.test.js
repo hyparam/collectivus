@@ -261,6 +261,57 @@ describe('Proxy — forwarding behavior', () => {
     }
   })
 
+  it('records Claude session context posted by the local attach hook', async () => {
+    await proxy.stop()
+    /** @type {any[]} */
+    const rows = []
+    const recorder = new Recorder({
+      sink: {
+        writeRow(row) { rows.push(row); return Promise.resolve() },
+        close() { return Promise.resolve() },
+      },
+    })
+    proxy = new Proxy({
+      listen: '127.0.0.1:0',
+      upstreams: [
+        {
+          name: 'anthropic',
+          base_url: upstream.baseUrl,
+          match: { path_prefix: '/v1/messages' },
+        },
+      ],
+    }, { recorder })
+    await proxy.start()
+
+    const contextRes = await fetch(`${proxyOrigin(proxy)}/_collectivus/session-context`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        session_id: 'sess-hook',
+        cwd: '/repo/app',
+        git_branch: 'main',
+      }),
+    })
+    expect(contextRes.status).toBe(200)
+
+    await fetch(`${proxyOrigin(proxy)}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [],
+        metadata: { user_id: JSON.stringify({ session_id: 'sess-hook' }) },
+      }),
+    })
+
+    expect(upstream.requests).toHaveLength(1)
+    expect(upstream.requests[0].url).toBe('/v1/messages')
+
+    await waitForRows({ rows }, 1, (seen) => seen.some((row) => row.kind === 'exchange'))
+    const exchange = rows.find((row) => row.kind === 'exchange')
+    expect(exchange.cwd).toBe('/repo/app')
+    expect(exchange.git_branch).toBe('main')
+  })
+
   it('strips hop-by-hop response headers (transfer-encoding)', async () => {
     upstream.setHandler((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/plain', 'x-custom': 'kept' })

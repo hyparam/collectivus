@@ -8,6 +8,14 @@ import path from 'node:path'
  * @import { AttachOptions, AttachResult, DetachOptions, DetachResult, IsAttachedOptions, ReadSettingsResult } from '../types.js'
  */
 
+const MANAGED_HOOK_SPECS = [
+  { event: 'SessionStart' },
+  { event: 'CwdChanged' },
+  { event: 'UserPromptSubmit' },
+  { event: 'PostToolUse', matcher: 'Bash' },
+]
+const MANAGED_HOOK_PATTERN = /\bclaude-hook\s+session-context\b/
+
 export class SettingsError extends Error {
   /**
    * @param {string} message
@@ -43,7 +51,7 @@ export function defaultSettingsPath() {
  * @returns {Promise<AttachResult>}
  */
 export async function attach(opts) {
-  const { port, version, settingsPath = defaultSettingsPath() } = opts
+  const { port, version, settingsPath = defaultSettingsPath(), binPath = 'ctvs' } = opts
   validatePort(port)
   validateVersion(version)
 
@@ -54,6 +62,7 @@ export async function attach(opts) {
   const prevValue = typeof previous === 'string' ? previous : undefined
 
   env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${port}`
+  installSessionContextHooks(value, managedHookCommand(binPath, port))
   value._collectivus = {
     attached_at: new Date().toISOString(),
     version,
@@ -87,6 +96,7 @@ export async function detach(opts = {}) {
 
   const markerPort = typeof marker.port === 'number' ? marker.port : undefined
   delete value._collectivus
+  removeSessionContextHooks(value)
 
   /** @type {string | undefined} */
   let removed
@@ -254,6 +264,121 @@ function ensureObject(value, key) {
   const fresh = {}
   value[key] = fresh
   return fresh
+}
+
+/**
+ * @param {Record<string, unknown>} value
+ * @param {string} command
+ * @returns {void}
+ */
+function installSessionContextHooks(value, command) {
+  const hooksRoot = ensureObject(value, 'hooks')
+  for (const spec of MANAGED_HOOK_SPECS) {
+    const { event } = spec
+    const existing = hooksRoot[event]
+    const groups = Array.isArray(existing)
+      ? existing.filter((group) => !isManagedHookGroup(group)).map(removeManagedHandlers)
+      : []
+    groups.push({
+      ...(spec.matcher ? { matcher: spec.matcher } : {}),
+      hooks: [{ type: 'command', command }],
+    })
+    hooksRoot[event] = groups
+  }
+}
+
+/**
+ * @param {Record<string, unknown>} value
+ * @returns {void}
+ */
+function removeSessionContextHooks(value) {
+  const hooksRoot = value.hooks
+  if (!isPlainObject(hooksRoot)) return
+  for (const event of managedHookEvents()) {
+    const existing = hooksRoot[event]
+    if (!Array.isArray(existing)) continue
+    const groups = existing
+      .filter((group) => !isManagedHookGroup(group))
+      .map(removeManagedHandlers)
+      .filter((group) => !isEmptyHookGroup(group))
+    if (groups.length > 0) {
+      hooksRoot[event] = groups
+    } else {
+      delete hooksRoot[event]
+    }
+  }
+  if (Object.keys(hooksRoot).length === 0) delete value.hooks
+}
+
+/**
+ * @returns {string[]}
+ */
+function managedHookEvents() {
+  return [...new Set(MANAGED_HOOK_SPECS.map((spec) => spec.event))]
+}
+
+/**
+ * @param {unknown} group
+ * @returns {unknown}
+ */
+function removeManagedHandlers(group) {
+  if (!isPlainObject(group)) return group
+  const handlers = group.hooks
+  if (!Array.isArray(handlers)) return group
+  return {
+    ...group,
+    hooks: handlers.filter((handler) => !isManagedHookHandler(handler)),
+  }
+}
+
+/**
+ * @param {unknown} group
+ * @returns {boolean}
+ */
+function isManagedHookGroup(group) {
+  if (!isPlainObject(group)) return false
+  const handlers = group.hooks
+  return Array.isArray(handlers) &&
+    handlers.length > 0 &&
+    handlers.every(isManagedHookHandler)
+}
+
+/**
+ * @param {unknown} group
+ * @returns {boolean}
+ */
+function isEmptyHookGroup(group) {
+  return isPlainObject(group) && Array.isArray(group.hooks) && group.hooks.length === 0
+}
+
+/**
+ * @param {unknown} handler
+ * @returns {boolean}
+ */
+function isManagedHookHandler(handler) {
+  if (!isPlainObject(handler)) return false
+  return handler.type === 'command' &&
+    typeof handler.command === 'string' &&
+    MANAGED_HOOK_PATTERN.test(handler.command)
+}
+
+/**
+ * @param {string} binPath
+ * @param {number} port
+ * @returns {string}
+ */
+function managedHookCommand(binPath, port) {
+  return `${shellQuote(binPath)} claude-hook session-context --port ${port}`
+}
+
+/**
+ * @param {string} value
+ * @returns {string}
+ */
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value
+  const quote = String.fromCharCode(39)
+  return quote + value.split(quote).join(quote + '\\' + quote + quote) + quote
 }
 
 /**

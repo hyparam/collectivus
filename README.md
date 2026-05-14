@@ -151,7 +151,7 @@ Add an `upload` block to drain JSONL to S3 once a day:
     "prefix": "collectivus",
     "region": "us-east-1",
     "time":   "00:10",
-    "signals": ["logs", "traces", "metrics"]
+    "signals": ["logs", "traces", "metrics", "proxy"]
   }
 }
 ```
@@ -328,8 +328,11 @@ the previous day's JSONL into Parquet partitions in S3. Object keys are
 Hive-partitioned:
 
 ```
-<prefix>/<gateway_id>/<signal>/date=<YYYY-MM-DD>/data.parquet
+<prefix>/<gateway_id>/<signal-or-dataset>/date=<YYYY-MM-DD>/data.parquet
 ```
+
+OTLP signals use `logs`, `traces`, or `metrics` as the middle segment. Proxy
+traffic is materialized as the `proxy_messages` dataset.
 
 This is useful for long-term retention, columnar queries with
 Athena / DuckDB / Snowflake, and offsite backup of recordings that would
@@ -344,7 +347,7 @@ uploads).
 | `prefix`      | no       | `collectivus` | Key prefix under the bucket.               |
 | `region`      | no       | `AWS_REGION` env, or `us-east-1` | AWS region. |
 | `time`        | no       | `00:10`     | Daily run time, `HH:MM` UTC.                  |
-| `signals`     | no       | all three   | Subset of `logs`, `traces`, `metrics`.        |
+| `signals`     | no       | all four    | Subset of `logs`, `traces`, `metrics`, `proxy`. |
 | `catchupDays` | no       | `30`        | Look back this many days for unuploaded JSONL. |
 | `endpoint`    | no       | —           | Custom S3-compatible endpoint (e.g. MinIO).   |
 
@@ -557,9 +560,9 @@ Recorded LLM proxy traffic is exposed as a single logical dataset, `proxy_messag
 
 Rows are globally deduplicated by `message_id` — a 16-character hex prefix of `sha256(conversation_id : role : canonicalJson(content))`. Identical content in the same conversation always produces the same id, so the user-history blocks that Anthropic replays on every request are written once. The walker also tracks `previous_message_id` across exchanges so callers can reconstruct conversation order even after dedup.
 
-`conversation_id` is resolved tiered — Claude Code's `metadata.user_id.session_id` when present, otherwise a stable 16-hex hash of the first user message's content, otherwise a hash of `exchange_id` (so even single-shot malformed exchanges get a deterministic id). `conversation_source` is `claude_code` when the recorded user-agent starts with `claude-cli/`, else `api`.
+`conversation_id` is resolved tiered — Claude Code's `metadata.user_id.session_id` when present, otherwise a stable 16-hex hash of the first user message's content, otherwise a hash of `exchange_id` (so even single-shot malformed exchanges get a deterministic id). `conversation_source` is `claude_code` when the recorded user-agent starts with `claude-cli/`, else `api`. When Claude Code is configured through `ctvs attach`, a local hook records `cwd` and `git_branch` into the proxy JSONL so those fields survive Gateway/Central server shipping; local query/export also falls back to Claude Code transcript metadata when available.
 
-JSON columns (`attributes`, `status`, `tools`, `tool_args`) carry sparse structured data; scalars are accessed with `JSON_VALUE(<col>, '$.path')`. `attributes` holds request settings, per-message `usage` (assistant only) and `timing.latency_ms`; `status` holds `tool_status` on tool results, `finish_reason` on the last assistant part, and `error_code` / `error_message` on error parts. JSONL capture is unchanged — the dataset is purely a derived projection over the recorded `exchange` and `stream_event` rows.
+JSON columns (`attributes`, `status`, `tools`, `tool_args`) carry sparse structured data; scalars are accessed with `JSON_VALUE(<col>, '$.path')`. `attributes` holds request settings, per-message `usage` (assistant only), `timing.latency_ms`, and `client.claude_version` when available; `status` holds `tool_status` on tool results, `finish_reason` on the last assistant part, and `error_code` / `error_message` on error parts.
 
 For the full per-column derivation table see [skills/collectivus-query/references/query-cli.md](skills/collectivus-query/references/query-cli.md).
 

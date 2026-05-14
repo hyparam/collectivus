@@ -1,4 +1,5 @@
 export type Signal = 'logs' | 'traces' | 'metrics'
+export type UploadSignal = Signal | 'proxy'
 
 export interface StorageConnector {
   /** Scheme this connector handles, e.g. "s3". */
@@ -14,7 +15,7 @@ export interface UploadOptions {
   bucket: string
   prefix?: string
   time?: string
-  signals?: ReadonlyArray<Signal>
+  signals?: ReadonlyArray<UploadSignal>
   catchupDays?: number
   region?: string
   endpoint?: string
@@ -33,7 +34,7 @@ export interface ResolvedUploadOptions {
   bucket: string
   prefix: string
   time: string
-  signals: ReadonlyArray<Signal>
+  signals: ReadonlyArray<UploadSignal>
   catchupDays: number
   region: string
   endpoint?: string
@@ -49,7 +50,7 @@ export interface ResolvedUploadOptions {
 
 export interface LedgerEntry {
   service: string
-  signal: Signal
+  signal: UploadSignal
   date: string
   status: 'committed'
   key: string
@@ -67,7 +68,7 @@ export interface UploadJob {
    * uniquely without a structural change.
    */
   service: string
-  signal: Signal
+  signal: UploadSignal
   date: string
   jsonlPath: string
   /**
@@ -90,7 +91,7 @@ export interface PartitionFile {
    * Convenience copy of `partition.signal`. Always set because
    * `walkPartitionFiles` requires `signal` in `partitionDimensions`.
    */
-  signal: Signal
+  signal: UploadSignal
   /** YYYY-MM-DD UTC parsed from the filename. */
   date: string
 }

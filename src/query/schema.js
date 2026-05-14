@@ -11,8 +11,10 @@ import { columnsForMessages } from '../cli/messages-parquet.js'
  * Parquet partition written under the old schema is treated as stale by the
  * freshness check (and refresh skips it rather than regenerating the
  * retired `proxy_exchanges` / `proxy_stream_events` layout).
+ * Bumped to 3 when Claude local context (`cwd`, `git_branch`) was added to
+ * `proxy_messages`.
  */
-export const QUERY_CACHE_SCHEMA_VERSION = 2
+export const QUERY_CACHE_SCHEMA_VERSION = 3
 
 /** @type {readonly QueryDataset[]} */
 export const QUERY_DATASETS = [

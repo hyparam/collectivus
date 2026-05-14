@@ -256,4 +256,41 @@ describe('walkExchanges — dedup and ordering', function() {
     expect(rows[0].conversation_id).toBe('sess-simple-aaaa')
     expect(rows[0].user_id).toBe('acct-test-0001')
   })
+
+  it('enriches cwd/git_branch/claude_version from a session transcript lookup', async function() {
+    const { exchanges } = loadFixture('non-streaming-simple.jsonl')
+    const rows = await drainWalk(exchanges, {
+      gateway_id: 'gw-test',
+      contextLookup(sessionId, timestamp) {
+        expect(sessionId).toBe('sess-simple-aaaa')
+        expect(timestamp).toBe('2026-05-13T10:00:00.000Z')
+        return { cwd: '/repo/app', git_branch: 'main', claude_version: '2.1.141' }
+      },
+    })
+    expect(rows.every((r) => r.cwd === '/repo/app')).toBe(true)
+    expect(rows.every((r) => r.git_branch === 'main')).toBe(true)
+    expect(rows.every((r) =>
+      /** @type {{ client?: { claude_version?: string } }} */ (r.attributes).client?.claude_version === '2.1.141'
+    )).toBe(true)
+  })
+
+  it('prefers proxy-recorded local context over transcript context', async function() {
+    const { exchanges: original } = loadFixture('non-streaming-simple.jsonl')
+    const exchanges = original.map((ex) => {
+      return {
+        ...ex,
+        cwd: '/hook/repo',
+        git_branch: 'feature/hook',
+      }
+    })
+    const rows = await drainWalk(exchanges, {
+      gateway_id: 'gw-test',
+      contextLookup() {
+        return { cwd: '/transcript/repo', git_branch: 'main', claude_version: '2.1.141' }
+      },
+    })
+    expect(rows[0].cwd).toBe('/hook/repo')
+    expect(rows[0].git_branch).toBe('feature/hook')
+    expect(/** @type {{ client?: { claude_version?: string } }} */ (rows[0].attributes).client?.claude_version).toBe('2.1.141')
+  })
 })

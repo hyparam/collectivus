@@ -92,6 +92,7 @@ export async function runAttach(argv, hooks = {}) {
   const loadConfigFn = hooks.loadConfig ?? defaultLoadConfig
   const settingsPath = hooks.settingsPath ?? defaultSettingsPath()
   const codexConfigPath = hooks.codexConfigPath ?? defaultCodexConfigPath()
+  const binPath = hooks.binPath ?? process.argv[1] ?? 'ctvs'
 
   const parsed = parseAttachArgs(argv)
   if (parsed.help) {
@@ -149,7 +150,7 @@ export async function runAttach(argv, hooks = {}) {
     /** @type {{ changed: boolean, prevValue?: string }} */
     let result
     try {
-      result = await attachClaude({ port, version, settingsPath })
+      result = await attachClaude({ port, version, settingsPath, binPath })
     } catch (err) {
       stderr.write(`error: failed to attach Claude Code: ${err instanceof Error ? err.message : String(err)}\n`)
       return 1

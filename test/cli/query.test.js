@@ -123,7 +123,7 @@ describe('ctvs query', function() {
     const metaPath = `${parquetPath}.meta.json`
     expect(fs.existsSync(parquetPath)).toBe(true)
     expect(JSON.parse(fs.readFileSync(metaPath, 'utf8'))).toMatchObject({
-      cache_schema_version: 2,
+      cache_schema_version: 3,
       dataset: 'proxy_messages',
       gateway_id: 'gw1',
       date: '2026-05-11',

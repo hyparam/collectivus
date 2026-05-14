@@ -48,12 +48,13 @@ Key columns:
 - `message_index`, `part_index` — message order inside the conversation; part order inside that message. `part_id = <message_id>#<part_index>`.
 - `role` — `system`, `user`, `assistant`, or `tool`.
 - `part_type` — `text`, `reasoning`, `tool_call`, `tool_result`, `image`, `file`, `error`, or a passed-through provider type.
+- `cwd`, `git_branch` — Claude Code local context when available from transcript metadata or the Collectivus attach hook.
 - `content_text` — extracted text payload for text / reasoning / tool_result / error parts; null otherwise.
 - `tool_name`, `tool_call_id`, `tool_args` — populated on `tool_call` parts; `tool_result` parts carry the matching `tool_call_id` and a `status.tool_status` of `success` or `error`.
-- `attributes` (JSON) — request settings, per-message `usage` (assistant only), and exchange-level `timing`.
+- `attributes` (JSON) — request settings, per-message `usage` (assistant only), exchange-level `timing`, and `client.claude_version` when available.
 - `status` (JSON) — sparse; carries `finish_reason` on the last assistant part, `tool_status` on tool results, and `error_code` / `error_message` on error parts.
 
-Run `ctvs query schema proxy_messages --format markdown` for the full 24-column reference (plus `gateway_id` and `date` partition columns).
+Run `ctvs query schema proxy_messages --format markdown` for the full 26-column reference (plus `gateway_id` and `date` partition columns).
 
 ## Example SQL
 

@@ -172,6 +172,20 @@ describe('extractMessageParts', function() {
     expect(rows[0]).toMatchObject({ part_type: 'text', content_text: 'hello' })
   })
 
+  it('adds Claude local context as top-level columns and nested client attributes', function() {
+    const rows = extractMessageParts(undefined, { role: 'user', content: 'hello' }, ctx({
+      cwd: '/repo/app',
+      git_branch: 'main',
+      claude_version: '2.1.141',
+    }))
+    expect(rows[0]).toMatchObject({
+      schema_version: 2,
+      cwd: '/repo/app',
+      git_branch: 'main',
+      attributes: { client: { claude_version: '2.1.141' } },
+    })
+  })
+
   it('returns no rows for empty content', function() {
     expect(extractMessageParts(undefined, { role: 'user', content: '' }, ctx())).toEqual([])
     expect(extractMessageParts(undefined, { role: 'user', content: [] }, ctx())).toEqual([])

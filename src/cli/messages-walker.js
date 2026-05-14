@@ -42,7 +42,7 @@ import { computeMessageId, extractMessageParts } from './messages-parquet.js'
  * @param {WalkerOptions} [opts]
  * @yields {Record<string, unknown>}
  *   Part rows ready to be written to Parquet. Each row carries
- *   `gateway_id` (from opts) plus the 24 schema columns declared in
+ *   `gateway_id` (from opts) plus the 26 schema columns declared in
  *   `messages-parquet.js`.
  */
 export async function* walkExchanges(exchanges, opts) {
@@ -76,6 +76,7 @@ export async function* walkExchanges(exchanges, opts) {
     const conversation_id = resolveConversationId(reqBody, exchangeRow)
     const user_id = resolveUserId(reqBody)
     const conversation_source = resolveConversationSource(exchangeRow)
+    const claudeContext = resolveClaudeContext(reqBody, exchangeRow, opts?.contextLookup)
     const modelRaw = readKey(reqBody, 'model')
     const model = typeof modelRaw === 'string' ? modelRaw : undefined
     const system_text = extractSystemText(readKey(reqBody, 'system'))
@@ -128,6 +129,9 @@ export async function* walkExchanges(exchanges, opts) {
         conversation_id,
         conversation_started_at: /** @type {string} */ (conversation_started_at),
         conversation_source,
+        cwd: claudeContext.cwd,
+        git_branch: claudeContext.git_branch,
+        claude_version: claudeContext.claude_version,
         user_id,
         provider,
         model,
@@ -230,6 +234,133 @@ function resolveUserId(reqBody) {
   if (!parsed || typeof parsed !== 'object') return undefined
   const accountUuid = /** @type {Record<string, unknown>} */ (parsed).account_uuid
   return typeof accountUuid === 'string' && accountUuid.length > 0 ? accountUuid : undefined
+}
+
+/**
+ * Resolve Claude Code local context from proxy-recorded session context first,
+ * then from the optional transcript lookup. The user-agent fallback only
+ * provides version; cwd/git_branch must come from recorded local context.
+ *
+ * @param {Record<string, unknown>} reqBody
+ * @param {Record<string, unknown>} exchange
+ * @param {ClaudeContextLookup | undefined} lookup
+ * @returns {{ cwd?: string, git_branch?: string, claude_version?: string }}
+ */
+function resolveClaudeContext(reqBody, exchange, lookup) {
+  const sessionId = readMetadataSessionId(reqBody) ?? readHeader(exchange, 'x-claude-code-session-id')
+  const transcript = readTranscriptContext(lookup, sessionId, readKey(exchange, 'ts_start'))
+  const recorded = resolveRecordedContext(reqBody, exchange)
+  const uaVersion = claudeVersionFromUserAgent(readPath(exchange, ['client', 'user_agent']))
+
+  return {
+    cwd: firstString(recorded.cwd, transcript?.cwd),
+    git_branch: firstString(recorded.git_branch, transcript?.git_branch),
+    claude_version: firstString(recorded.claude_version, transcript?.claude_version, uaVersion),
+  }
+}
+
+/**
+ * @param {ClaudeContextLookup | undefined} lookup
+ * @param {string | undefined} sessionId
+ * @param {unknown} timestamp
+ * @returns {{ cwd?: string, git_branch?: string, claude_version?: string } | undefined}
+ */
+function readTranscriptContext(lookup, sessionId, timestamp) {
+  if (!lookup || !sessionId) return undefined
+  try {
+    return lookup(sessionId, timestamp)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * @param {Record<string, unknown>} reqBody
+ * @param {Record<string, unknown>} exchange
+ * @returns {{ cwd?: string, git_branch?: string, claude_version?: string }}
+ */
+function resolveRecordedContext(reqBody, exchange) {
+  const meta = readKey(reqBody, 'metadata')
+  const userId = meta && typeof meta === 'object'
+    ? parseMaybeJson(/** @type {Record<string, unknown>} */ (meta).user_id)
+    : undefined
+
+  return {
+    cwd: firstString(
+      readStringKey(exchange, 'cwd'),
+      readStringKey(reqBody, 'cwd'),
+      readStringKey(meta, 'cwd'),
+      readStringKey(userId, 'cwd')
+    ),
+    git_branch: firstString(
+      readStringKey(exchange, 'git_branch'),
+      readStringKey(exchange, 'gitBranch'),
+      readStringKey(reqBody, 'git_branch'),
+      readStringKey(reqBody, 'gitBranch'),
+      readStringKey(meta, 'git_branch'),
+      readStringKey(meta, 'gitBranch'),
+      readStringKey(userId, 'git_branch'),
+      readStringKey(userId, 'gitBranch')
+    ),
+    claude_version: firstString(
+      readStringKey(exchange, 'claude_version'),
+      readStringKey(exchange, 'claudeVersion'),
+      readStringKey(reqBody, 'claude_version'),
+      readStringKey(reqBody, 'claudeVersion'),
+      readStringKey(meta, 'claude_version'),
+      readStringKey(meta, 'claudeVersion'),
+      readStringKey(userId, 'claude_version'),
+      readStringKey(userId, 'claudeVersion')
+    ),
+  }
+}
+
+/**
+ * @param {unknown} obj
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function readStringKey(obj, key) {
+  const value = readKey(obj, key)
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * @param {unknown} exchange
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function readHeader(exchange, name) {
+  const headers = readPath(exchange, ['request', 'headers'])
+  if (!headers || typeof headers !== 'object') return undefined
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(/** @type {Record<string, unknown>} */ (headers))) {
+    if (key.toLowerCase() !== wanted) continue
+    if (typeof value === 'string' && value.length > 0) return value
+    if (Array.isArray(value)) {
+      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
+      if (typeof found === 'string') return found
+    }
+  }
+  return undefined
+}
+
+/**
+ * @param {unknown} userAgent
+ * @returns {string | undefined}
+ */
+function claudeVersionFromUserAgent(userAgent) {
+  if (typeof userAgent !== 'string') return undefined
+  const match = /^claude-cli\/([^/\s]+)/.exec(userAgent)
+  return match?.[1]
+}
+
+/**
+ * @param {...(string | undefined)} values
+ * @returns {string | undefined}
+ */
+function firstString(...values) {
+  return values.find((value) => typeof value === 'string' && value.length > 0)
 }
 
 /**
@@ -424,8 +555,15 @@ function readKey(obj, key) {
  * @property {unknown} [upstream]
  *   Provider hint for column 4. Accepts a string (taken verbatim) or an
  *   object with `.provider`/`.name`. Defaults to `"anthropic"`.
+ * @property {ClaudeContextLookup} [contextLookup]
+ *   Optional Claude transcript/local-context lookup keyed by session id and
+ *   exchange timestamp. Callers build it once and pass it into each walk.
  * @property {(exchange: Record<string, unknown>) => Record<string, unknown> | null | undefined} [reconstructAssistantMessage]
  *   Injected by bead 4 once bead 2 lands. Returns a synthesized assistant
  *   message for streamed exchanges where `response.body` is absent.
  *   Absence is tolerated: those exchanges contribute their history only.
+ */
+
+/**
+ * @typedef {(sessionId: string | undefined, timestamp: unknown) => ({ cwd?: string, git_branch?: string, claude_version?: string } | undefined)} ClaudeContextLookup
  */

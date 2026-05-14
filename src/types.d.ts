@@ -41,6 +41,13 @@ export interface ExchangeResponse {
   body: string | undefined
 }
 
+export interface ClaudeSessionContext {
+  /** Claude Code working directory captured locally by the attach hook. */
+  cwd?: string
+  /** Git branch captured locally by the attach hook. */
+  git_branch?: string
+}
+
 // ---------- File sink ----------
 
 export interface Sink {
@@ -98,7 +105,7 @@ export interface FileSinkConfig {
   dir: string
 }
 
-export type UploadSignal = 'logs' | 'traces' | 'metrics'
+export type UploadSignal = 'logs' | 'traces' | 'metrics' | 'proxy'
 
 export interface UploadConfig {
   /** Destination bucket. Required. */
@@ -109,7 +116,7 @@ export interface UploadConfig {
   region?: string
   /** Daily fire time as HH:MM (24-hour, local). Default '00:10'. */
   time?: string
-  /** Subset of signals to upload. Default ['logs', 'traces', 'metrics']. */
+  /** Subset of signals to upload. Default ['logs', 'traces', 'metrics', 'proxy']. */
   signals?: UploadSignal[]
   /** Days of past data to backfill on startup. Default 30. */
   catchupDays?: number
@@ -377,6 +384,8 @@ export interface AttachOptions {
   port: number
   /** Non-empty version string recorded in the marker. */
   version: string
+  /** CLI path used by managed Claude Code hooks. Default `ctvs`. */
+  binPath?: string
   /** Override the settings.json path (default: `~/.claude/settings.json`). */
   settingsPath?: string
 }

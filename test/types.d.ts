@@ -49,6 +49,7 @@ export interface AttachCall {
   port: number
   version: string
   settingsPath: string
+  binPath?: string
 }
 
 export interface InstallMocks {

@@ -165,6 +165,30 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
     expect(rows[0].conversation_id).toBe('sess-fresh')
   })
 
+  it('refreshes proxy_messages with Claude local context columns', async function() {
+    const exchange = buildExchange({
+      exchangeId: 'ex-context-1',
+      tsStart: '2026-05-13T10:00:00.000Z',
+      sessionId: 'sess-context',
+      userContent: 'hello',
+      assistant: { content: 'hi back' },
+    })
+    exchange.cwd = '/repo/app'
+    exchange.git_branch = 'main'
+    writeProxyJsonl('gw-test', '2026-05-13', [exchange])
+
+    const result = await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout: memo() })
+    expect(result.failures).toBe(0)
+
+    const rows = await readMessagesPartition('gw-test', '2026-05-13')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      cwd: '/repo/app',
+      git_branch: 'main',
+      attributes: { client: { claude_version: '2.1.140' } },
+    })
+  })
+
   it('skips a fresh partition on re-run with no source changes', async function() {
     writeProxyJsonl('gw-test', '2026-05-13', [
       buildExchange({

@@ -5,7 +5,7 @@ import { isSseHeaders } from './sse.js'
 
 /**
  * @import { Server, IncomingMessage, ServerResponse, IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http'
- * @import { ProxyConfig, UpstreamConfig, CompiledUpstream, ClientInfo } from './types.js'
+ * @import { ProxyConfig, UpstreamConfig, CompiledUpstream, ClientInfo, ClaudeSessionContext } from './types.js'
  * @import { Recorder, Exchange } from './recorder.js'
  */
 
@@ -23,6 +23,9 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ])
+
+const SESSION_CONTEXT_PATH = '/_collectivus/session-context'
+const SESSION_CONTEXT_MAX_BYTES = 64 * 1024
 
 /**
  * Reverse-proxy listener that forwards matched requests to a configured upstream.
@@ -49,6 +52,8 @@ export class Proxy {
     this.upstreams = compileUpstreams(config.upstreams)
     /** @type {Recorder | undefined} */
     this.recorder = options.recorder
+    /** @type {Map<string, ClaudeSessionContext>} */
+    this.sessionContexts = new Map()
     /** @type {Server | undefined} */
     this.server = undefined
   }
@@ -60,9 +65,9 @@ export class Proxy {
    * @returns {Promise<void>}
    */
   start() {
-    const { upstreams, recorder } = this
+    const { upstreams, recorder, sessionContexts } = this
     const server = http.createServer((req, res) => {
-      handleRequest(upstreams, recorder, req, res)
+      handleRequest(upstreams, recorder, sessionContexts, req, res)
     })
     this.server = server
     return new Promise((resolve, reject) => {
@@ -165,12 +170,18 @@ function compileUpstreams(upstreams) {
 /**
  * @param {CompiledUpstream[]} upstreams
  * @param {Recorder | undefined} recorder
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
  * @param {IncomingMessage} req
  * @param {ServerResponse} res
  */
-function handleRequest(upstreams, recorder, req, res) {
+function handleRequest(upstreams, recorder, sessionContexts, req, res) {
   const requestUrl = req.url ?? '/'
   const url = new URL(requestUrl, 'http://placeholder')
+  if (url.pathname === SESSION_CONTEXT_PATH) {
+    handleSessionContext(sessionContexts, req, res)
+    return
+  }
+
   const upstream = matchUpstream(upstreams, url.pathname)
   if (!upstream) {
     sendJson(res, 404, { error: 'no upstream matches path', path: url.pathname })
@@ -195,6 +206,7 @@ function handleRequest(upstreams, recorder, req, res) {
       path: requestUrl,
       headers: req.headers,
     },
+    localContextForRequest: (body) => localContextForRequest(req.headers, body, sessionContexts),
   })
 
   const upstreamReq = lib.request({
@@ -379,6 +391,153 @@ function forwardHeaders(reqHeaders, upstreamHost) {
   }
   out.host = upstreamHost
   return out
+}
+
+/**
+ * Local-only endpoint used by Claude Code hooks installed by `ctvs attach`.
+ * The hook posts `{ session_id, cwd, git_branch }`; later Messages API
+ * exchanges with the same Claude session id are enriched before JSONL write.
+ *
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @param {IncomingMessage} req
+ * @param {ServerResponse} res
+ * @returns {void}
+ */
+function handleSessionContext(sessionContexts, req, res) {
+  if (!isLoopback(req.socket.remoteAddress)) {
+    req.resume()
+    sendJson(res, 403, { error: 'session context endpoint is local-only' })
+    return
+  }
+  if (req.method !== 'POST') {
+    req.resume()
+    res.writeHead(405, { 'content-type': 'application/json', 'allow': 'POST' })
+    res.end(JSON.stringify({ error: 'method not allowed' }))
+    return
+  }
+
+  /** @type {Buffer[]} */
+  const chunks = []
+  let bytes = 0
+  let tooLarge = false
+  req.on('data', (chunk) => {
+    bytes += chunk.byteLength
+    if (bytes > SESSION_CONTEXT_MAX_BYTES) {
+      tooLarge = true
+      req.destroy()
+      return
+    }
+    chunks.push(Buffer.from(chunk))
+  })
+  req.on('end', () => {
+    if (tooLarge) return
+    let payload
+    try {
+      payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' })
+      return
+    }
+    if (!payload || typeof payload !== 'object') {
+      sendJson(res, 400, { error: 'body must be an object' })
+      return
+    }
+    const obj = /** @type {Record<string, unknown>} */ (payload)
+    const sessionId = stringValue(obj.session_id)
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'session_id is required' })
+      return
+    }
+    const cwd = stringValue(obj.cwd) ?? stringValue(obj.new_cwd)
+    const gitBranch = stringValue(obj.git_branch) ?? stringValue(obj.gitBranch)
+    sessionContexts.set(sessionId, {
+      ...(cwd ? { cwd } : {}),
+      ...(gitBranch ? { git_branch: gitBranch } : {}),
+    })
+    sendJson(res, 200, { ok: true })
+  })
+  req.on('error', () => {
+    if (!res.headersSent) sendJson(res, 400, { error: 'failed to read request body' })
+  })
+}
+
+/**
+ * @param {IncomingHttpHeaders} headers
+ * @param {string} body
+ * @param {Map<string, ClaudeSessionContext>} sessionContexts
+ * @returns {ClaudeSessionContext | undefined}
+ */
+function localContextForRequest(headers, body, sessionContexts) {
+  const sessionId = sessionIdFromBody(body) ?? headerValue(headers, 'x-claude-code-session-id')
+  if (!sessionId) return undefined
+  return sessionContexts.get(sessionId)
+}
+
+/**
+ * @param {string} body
+ * @returns {string | undefined}
+ */
+function sessionIdFromBody(body) {
+  let parsed
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return undefined
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined
+  const meta = /** @type {Record<string, unknown>} */ (parsed).metadata
+  if (!meta || typeof meta !== 'object') return undefined
+  const userId = /** @type {Record<string, unknown>} */ (meta).user_id
+  const decoded = parseMaybeJson(userId)
+  if (!decoded || typeof decoded !== 'object') return undefined
+  return stringValue(/** @type {Record<string, unknown>} */ (decoded).session_id)
+}
+
+/**
+ * @param {IncomingHttpHeaders} headers
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+function headerValue(headers, name) {
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== wanted) continue
+    if (typeof value === 'string' && value.length > 0) return value
+    if (Array.isArray(value)) {
+      const found = value.find((entry) => typeof entry === 'string' && entry.length > 0)
+      if (typeof found === 'string') return found
+    }
+  }
+  return undefined
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function parseMaybeJson(value) {
+  if (typeof value !== 'string') return value
+  try { return JSON.parse(value) } catch { return value }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | undefined}
+ */
+function stringValue(value) {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * @param {string | undefined} address
+ * @returns {boolean}
+ */
+function isLoopback(address) {
+  if (!address) return false
+  return address === '::1' ||
+    address === '127.0.0.1' ||
+    address.startsWith('127.') ||
+    address.startsWith('::ffff:127.')
 }
 
 /**

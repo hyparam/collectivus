@@ -34,6 +34,22 @@ function readJson() {
   return JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
 }
 
+/**
+ * @param {Record<string, unknown>} settings
+ * @param {string} command
+ * @returns {void}
+ */
+function expectManagedHooks(settings, command = 'ctvs claude-hook session-context --port 8787') {
+  for (const event of ['SessionStart', 'CwdChanged', 'UserPromptSubmit']) {
+    const groups = /** @type {Record<string, unknown[]>} */ (settings.hooks)[event]
+    expect(groups).toEqual([{ hooks: [{ type: 'command', command }] }])
+  }
+  expect(/** @type {Record<string, unknown[]>} */ (settings.hooks).PostToolUse).toEqual([{
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command }],
+  }])
+}
+
 describe('defaultSettingsPath', () => {
   it('points at ~/.claude/settings.json', () => {
     expect(defaultSettingsPath()).toBe(path.join(os.homedir(), '.claude', 'settings.json'))
@@ -49,6 +65,7 @@ describe('attach', () => {
     expect(result).toEqual({ changed: true })
     const written = JSON.parse(fs.readFileSync(nested, 'utf8'))
     expect(written.env).toEqual({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' })
+    expectManagedHooks(written)
     expect(written._collectivus).toMatchObject({ version: '1.0.0', port: 8787 })
     expect(new Date(written._collectivus.attached_at).toISOString()).toBe(
       written._collectivus.attached_at
@@ -63,6 +80,7 @@ describe('attach', () => {
     expect(result).toEqual({ changed: true })
     const written = readJson()
     expect(written.env).toEqual({ ANTHROPIC_BASE_URL: 'http://127.0.0.1:8787' })
+    expectManagedHooks(written)
     expect(written._collectivus).toMatchObject({ version: '1.2.3', port: 8787 })
   })
 
@@ -77,7 +95,8 @@ describe('attach', () => {
 
     const written = readJson()
     expect(written.includeCoAuthoredBy).toBe(false)
-    expect(written.hooks).toEqual({ stop: 'echo hi' })
+    expect(written.hooks.stop).toBe('echo hi')
+    expectManagedHooks(written, 'ctvs claude-hook session-context --port 9000')
     expect(written.env).toEqual({
       OTHER_KEY: 'keep-me',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:9000',
@@ -244,6 +263,23 @@ describe('detach', () => {
     expect(readJson()).toEqual({
       env: { OTHER: 'keep' },
       includeCoAuthoredBy: false,
+    })
+  })
+
+  it('removes managed hooks while preserving user hooks', async () => {
+    await attach({ port: 8787, version: '1.0.0', settingsPath, binPath: '/usr/local/bin/ctvs' })
+    const attached = readJson()
+    attached.hooks.SessionStart.unshift({ hooks: [{ type: 'command', command: 'echo user-start' }] })
+    attached.hooks.Stop = [{ hooks: [{ type: 'command', command: 'echo user-stop' }] }]
+    writeJson(attached)
+
+    await detach({ settingsPath })
+
+    expect(readJson()).toEqual({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo user-start' }] }],
+        Stop: [{ hooks: [{ type: 'command', command: 'echo user-stop' }] }],
+      },
     })
   })
 

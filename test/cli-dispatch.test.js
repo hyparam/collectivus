@@ -71,6 +71,12 @@ describe('bin/cli.js — subcommand dispatch', function() {
     expect(r.stdout).toMatch(/Usage:\s+ctvs query/)
   })
 
+  it('dispatches `collect --help`', async function() {
+    const r = await runCli(['collect', '--help'])
+    expect(r.exitCode).toBe(0)
+    expect(r.stdout).toMatch(/Usage:\s+ctvs collect/)
+  })
+
   it('dispatches `rendezvous --help`', async function() {
     const r = await runCli(['rendezvous', '--help'])
     expect(r.exitCode).toBe(0)

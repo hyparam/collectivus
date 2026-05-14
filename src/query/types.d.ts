@@ -11,8 +11,8 @@ export type QueryFormat = 'table' | 'json' | 'jsonl' | 'markdown'
 export type QueryRefreshMode = 'never' | 'always'
 
 export interface QueryScope {
-  dataset?: QueryDataset
-  datasets?: QueryDataset[]
+  dataset?: string
+  datasets?: string[]
   gatewayId?: string
   date?: string
   from?: string
@@ -94,7 +94,7 @@ export interface RefreshResult {
 }
 
 export interface RefreshFileResult {
-  dataset: QueryDataset
+  dataset: string
   gatewayId: string
   date: string
   rows: number
@@ -106,4 +106,56 @@ export interface RefreshFileResult {
 export interface QueryResultSet {
   columns: string[]
   rows: Record<string, unknown>[]
+}
+
+export interface JsonlCollection {
+  /** Original user-facing name passed to `ctvs collect --name`. */
+  name: string
+  /** SQL-safe table name exposed to `ctvs query sql`. */
+  table: string
+  /** Absolute path to the external JSONL source file. */
+  source_path: string
+  /** Optional source field requested for time filtering. */
+  timestamp_column?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CollectionsManifest {
+  version: 1
+  collections: Record<string, JsonlCollection>
+}
+
+export interface CollectionColumnMeta {
+  name: string
+  source_field?: string
+  type: ColumnSpec['type']
+  nullable: boolean
+}
+
+export interface CollectionCacheMeta {
+  cache_schema_version: number
+  kind: 'collection'
+  table: string
+  name: string
+  source_path: string
+  source_size: number
+  source_mtime_ms: number
+  row_count: number
+  refreshed_at: string
+  columns: CollectionColumnMeta[]
+  timestamp_column?: string
+}
+
+export interface CollectionCachePartition {
+  kind: 'collection'
+  dataset: string
+  table: string
+  collection: JsonlCollection
+  jsonlPath: string
+  sourceExists: boolean
+  sourceSize: number
+  sourceMtimeMs: number
+  parquetPath: string
+  metaPath: string
 }

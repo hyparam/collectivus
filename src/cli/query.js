@@ -6,8 +6,8 @@ import { readJsonlRows } from '../upload/reader.js'
 import { renderResult } from '../query/format.js'
 import {
   QUERY_DATASETS,
-  assertQueryDataset,
   columnsForDataset,
+  isQueryDataset,
 } from '../query/schema.js'
 import {
   discoverSourceFiles,
@@ -17,6 +17,16 @@ import {
 } from '../query/paths.js'
 import { refreshQueryCache } from '../query/refresh.js'
 import { executeLogicalSql, prepareReadOnlySql } from '../query/sql.js'
+import {
+  collectionMetaPath,
+  collectionTablesForQuery,
+  expectedCollectionPartitions,
+  inspectCollectionCachePartitions,
+  listCollections,
+  normalizeTableName,
+  readCollectionCacheMeta,
+  refreshCollectionCache,
+} from '../query/collections.js'
 
 /**
  * @import { CollectivusConfig } from '../types.js'
@@ -98,8 +108,8 @@ export async function runQuery(argv, hooks = {}) {
     return 0
   }
 
-  if (command === 'schema') {
-    return handleSchema(parsed, stdout, stderr)
+  if (command === 'schema' && isQueryDataset(parsed.positionals[1])) {
+    return handleSchema(undefined, parsed, stdout, stderr)
   }
 
   /** @type {CollectivusConfig} */
@@ -129,6 +139,8 @@ export async function runQuery(argv, hooks = {}) {
       return handleStatus(paths, parsed, stdout)
     case 'catalog':
       return handleCatalog(paths, parsed, stdout)
+    case 'schema':
+      return handleSchema(paths, parsed, stdout, stderr)
     case 'doctor':
       return handleDoctor(paths, parsed, stdout)
     case 'refresh':
@@ -321,6 +333,7 @@ function handleStatus(paths, parsed, stdout) {
 function handleCatalog(paths, parsed, stdout) {
   const scope = baseScope(parsed)
   const sourceRows = statusRows(paths, scope)
+  /** @type {Record<string, unknown>[]} */
   const rows = QUERY_DATASETS.map((dataset) => {
     const status = sourceRows.find((row) => row.dataset === dataset)
     return {
@@ -331,35 +344,64 @@ function handleCatalog(paths, parsed, stdout) {
       cached_rows: status?.rows ?? 0,
     }
   })
+  for (const collection of listCollections(paths.recordingRoot)) {
+    const status = sourceRows.find((row) => row.dataset === collection.table)
+    const meta = paths.parquetDir ? readCollectionCacheMeta(collectionMetaPath(paths.parquetDir, collection.table)) : undefined
+    rows.push({
+      dataset: collection.table,
+      source_signal: 'collection',
+      columns: meta?.columns.length ?? 0,
+      source_partitions: status?.sources ?? 0,
+      cached_rows: status?.rows ?? 0,
+    })
+  }
   stdout.write(renderResult({ columns: ['dataset', 'source_signal', 'columns', 'source_partitions', 'cached_rows'], rows }, parsed.format))
   return 0
 }
 
 /**
+ * @param {QueryPaths | undefined} paths
  * @param {ReturnType<typeof parseQueryArgs>} parsed
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
  * @returns {number}
  */
-function handleSchema(parsed, stdout, stderr) {
+function handleSchema(paths, parsed, stdout, stderr) {
   const raw = parsed.positionals[1]
   if (!raw) {
     stderr.write('error: schema requires a dataset\n')
     return 2
   }
-  let dataset
-  try {
-    dataset = assertQueryDataset(raw)
-  } catch (err) {
-    stderr.write(`error: ${formatError(err)}\n`)
+  if (isQueryDataset(raw)) {
+    const rows = columnsForDataset(raw).map((column) => ({
+      name: column.name,
+      type: column.type,
+      nullable: column.nullable,
+    }))
+    stdout.write(renderResult({ columns: ['name', 'type', 'nullable'], rows }, parsed.format))
+    return 0
+  }
+  if (!paths?.parquetDir) {
+    stderr.write(`error: unknown dataset "${raw}"\n`)
     return 2
   }
-  const rows = columnsForDataset(dataset).map((column) => ({
+  const collection = collectionByNameOrTable(paths, raw)
+  if (!collection) {
+    stderr.write(`error: unknown dataset "${raw}"\n`)
+    return 2
+  }
+  const meta = readCollectionCacheMeta(collectionMetaPath(paths.parquetDir, collection.table))
+  if (!meta) {
+    stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed)}\n`)
+    return 1
+  }
+  const rows = meta.columns.map((column) => ({
     name: column.name,
     type: column.type,
     nullable: column.nullable,
+    source_field: column.source_field ?? '',
   }))
-  stdout.write(renderResult({ columns: ['name', 'type', 'nullable'], rows }, parsed.format))
+  stdout.write(renderResult({ columns: ['name', 'type', 'nullable', 'source_field'], rows }, parsed.format))
   return 0
 }
 
@@ -371,12 +413,12 @@ function handleSchema(parsed, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function handleRefresh(paths, parsed, stdout, stderr) {
-  const scope = scopeWithOptionalDataset(parsed, parsed.positionals[1])
+  const scope = scopeWithOptionalDataset(paths, parsed, parsed.positionals[1])
   if (!paths.parquetEnabled || !paths.parquetDir) {
     stderr.write('error: query parquet cache is disabled; pass --parquet-dir to refresh explicitly\n')
     return 1
   }
-  const result = await refreshQueryCache({ paths, scope, force: parsed.force, stdout })
+  const result = await refreshAllCaches({ paths, scope, force: parsed.force, stdout })
   if (result.written === 0 && result.skipped === 0 && result.failures === 0) {
     stdout.write(`No JSONL files matched in ${paths.recordingRoot}.\n`)
   }
@@ -395,7 +437,7 @@ async function handleSql(paths, parsed, stdout, stderr) {
   const sql = parsed.positionals.slice(1).join(' ')
   let prepared
   try {
-    prepared = prepareReadOnlySql(sql, parsed.limit)
+    prepared = prepareReadOnlySql(sql, parsed.limit, listCollections(paths.recordingRoot).map((collection) => collection.table))
   } catch (err) {
     stderr.write(`error: ${formatError(err)}\n`)
     return 2
@@ -416,11 +458,9 @@ async function handleSample(paths, parsed, stdout, stderr) {
     stderr.write('error: sample requires a dataset\n')
     return 2
   }
-  let dataset
-  try {
-    dataset = assertQueryDataset(raw)
-  } catch (err) {
-    stderr.write(`error: ${formatError(err)}\n`)
+  const dataset = resolveQueryTable(paths, raw)
+  if (!dataset) {
+    stderr.write(`error: unknown dataset "${raw}"\n`)
     return 2
   }
   return executeGeneratedSql(paths, parsed, stdout, stderr, [dataset], `select * from ${dataset} limit ${parsed.limit}`)
@@ -435,16 +475,16 @@ async function handleSample(paths, parsed, stdout, stderr) {
 function handleDoctor(paths, parsed, stdout) {
   const rootExists = fs.existsSync(paths.recordingRoot)
   const scope = baseScope(parsed)
-  const sources = discoverSourceFiles(paths.recordingRoot, scope)
+  const sources = allSourceCount(paths, scope)
   const states = paths.parquetEnabled && paths.parquetDir
-    ? inspectCachePartitions(expectedCachePartitions(paths, scope))
+    ? inspectAllCachePartitions(paths, scope)
     : []
   const unfresh = states.filter((state) => state.status !== 'fresh')
   const rows = [
     { check: 'config', status: 'ok', detail: paths.configPath },
     { check: 'recording_root', status: rootExists ? 'ok' : 'warn', detail: paths.recordingRoot },
     { check: 'query_cache', status: paths.parquetEnabled ? 'ok' : 'warn', detail: paths.parquetDir ?? 'disabled' },
-    { check: 'source_partitions', status: 'ok', detail: String(sources.length) },
+    { check: 'source_partitions', status: 'ok', detail: String(sources) },
     { check: 'cache_freshness', status: unfresh.length === 0 ? 'ok' : 'warn', detail: `${unfresh.length} missing/stale partition(s)` },
   ]
   stdout.write(renderResult({ columns: ['check', 'status', 'detail'], rows }, parsed.format))
@@ -686,12 +726,12 @@ async function handleService(paths, parsed, stdout, stderr) {
  * @param {ReturnType<typeof parseQueryArgs>} parsed
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
- * @param {QueryDataset[]} datasets
+ * @param {string[]} datasets
  * @param {string} sql
  * @returns {Promise<number>}
  */
 async function executeGeneratedSql(paths, parsed, stdout, stderr, datasets, sql) {
-  const prepared = prepareReadOnlySql(sql, parsed.limit)
+  const prepared = prepareReadOnlySql(sql, parsed.limit, listCollections(paths.recordingRoot).map((collection) => collection.table))
   return executePrepared(paths, parsed, stdout, stderr, datasets, prepared.statement)
 }
 
@@ -700,7 +740,7 @@ async function executeGeneratedSql(paths, parsed, stdout, stderr, datasets, sql)
  * @param {ReturnType<typeof parseQueryArgs>} parsed
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
- * @param {QueryDataset[]} datasets
+ * @param {string[]} datasets
  * @param {import('squirreling').Statement} statement
  * @returns {Promise<number>}
  */
@@ -730,18 +770,18 @@ async function ensureCacheReady(paths, scope, parsed) {
     return { ok: false, message: 'error: query parquet cache is disabled; pass --parquet-dir or set query.parquet.enabled: true' }
   }
   if (parsed.refresh === 'always') {
-    const result = await refreshQueryCache({ paths, scope, force: false })
+    const result = await refreshAllCaches({ paths, scope, force: false })
     if (result.failures > 0) {
       return { ok: false, message: `error: refresh failed for ${result.failures} partition(s)` }
     }
   }
-  const states = inspectCachePartitions(expectedCachePartitions(paths, scope))
+  const states = inspectAllCachePartitions(paths, scope)
   const missing = states.filter((state) => state.status === 'missing')
   const stale = states.filter((state) => state.status === 'stale')
 
   if (missing.length > 0) {
     const first = missing[0]
-    const detail = `${first.partition.dataset}/${first.partition.gatewayId}/${first.partition.date}: missing${first.reason ? ` (${first.reason})` : ''}`
+    const detail = `${partitionLabel(first)}: missing${first.reason ? ` (${first.reason})` : ''}`
     return {
       ok: false,
       message: `error: query cache is missing for ${detail}. Run: ${refreshCommand(parsed)}`,
@@ -751,13 +791,13 @@ async function ensureCacheReady(paths, scope, parsed) {
   if (stale.length > 0) {
     if (parsed.strictFreshness) {
       const first = stale[0]
-      const detail = `${first.partition.dataset}/${first.partition.gatewayId}/${first.partition.date}: stale${first.reason ? ` (${first.reason})` : ''}`
+      const detail = `${partitionLabel(first)}: stale${first.reason ? ` (${first.reason})` : ''}`
       return {
         ok: false,
         message: `error: query cache is stale for ${detail} (--strict-freshness set). Run: ${refreshCommand(parsed)}`,
       }
     }
-    const summary = stale.slice(0, 3).map((state) => `${state.partition.dataset}/${state.partition.gatewayId}/${state.partition.date}${state.reason ? ` (${state.reason})` : ''}`).join(', ')
+    const summary = stale.slice(0, 3).map((state) => `${partitionLabel(state)}${state.reason ? ` (${state.reason})` : ''}`).join(', ')
     const more = stale.length > 3 ? `, +${stale.length - 3} more` : ''
     return {
       ok: true,
@@ -821,6 +861,92 @@ async function readLiveRows(paths, scope) {
 }
 
 /**
+ * @param {{
+ *   paths: QueryPaths,
+ *   scope: QueryScope,
+ *   force?: boolean,
+ *   stdout?: { write: (s: string) => void },
+ * }} args
+ * @returns {Promise<import('../query/types.js').RefreshResult>}
+ */
+async function refreshAllCaches(args) {
+  const { paths, scope, force = false, stdout } = args
+  /** @type {import('../query/types.js').RefreshResult} */
+  const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
+  const builtinScope = scopeForBuiltins(scope)
+  if (builtinScope) {
+    mergeRefreshResult(result, await refreshQueryCache({ paths, scope: builtinScope, force, stdout }))
+  }
+  const collectionScope = scopeForCollections(scope)
+  if (collectionScope) {
+    mergeRefreshResult(result, await refreshCollectionCache({ paths, scope: collectionScope, force, stdout }))
+  }
+  return result
+}
+
+/**
+ * @param {import('../query/types.js').RefreshResult} target
+ * @param {import('../query/types.js').RefreshResult} source
+ * @returns {void}
+ */
+function mergeRefreshResult(target, source) {
+  target.written += source.written
+  target.skipped += source.skipped
+  target.rows += source.rows
+  target.failures += source.failures
+  target.files.push(...source.files)
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {QueryScope | undefined}
+ */
+function scopeForBuiltins(scope) {
+  const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  if (!requested) return scope
+  const datasets = requested.filter(isQueryDataset)
+  if (datasets.length === 0) return undefined
+  return { ...scope, datasets }
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {QueryScope | undefined}
+ */
+function scopeForCollections(scope) {
+  const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  if (!requested) return scope
+  const datasets = requested.filter((dataset) => !isQueryDataset(dataset))
+  if (datasets.length === 0) return undefined
+  return { ...scope, datasets }
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @returns {Array<ReturnType<typeof inspectCachePartitions>[number] | ReturnType<typeof inspectCollectionCachePartitions>[number]>}
+ */
+function inspectAllCachePartitions(paths, scope) {
+  return [
+    ...inspectCachePartitions(expectedCachePartitions(paths, scopeForBuiltins(scope) ?? { ...scope, datasets: [] })),
+    ...inspectCollectionCachePartitions(expectedCollectionPartitions(paths, scopeForCollections(scope) ?? { ...scope, datasets: [] })),
+  ]
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @returns {number}
+ */
+function allSourceCount(paths, scope) {
+  const builtinSources = discoverSourceFiles(paths.recordingRoot, scopeForBuiltins(scope) ?? { ...scope, datasets: [] }).length
+  const collectionSources = expectedCollectionPartitions(paths, scopeForCollections(scope) ?? { ...scope, datasets: [] })
+    .filter((partition) => partition.sourceExists)
+    .length
+  return builtinSources + collectionSources
+}
+
+/**
  * Live-tail view of one raw `exchange` JSONL row. The `proxy_messages`
  * Parquet schema is conversation-grain; for tail we still want the
  * wire-level "what just flew through" columns, so this projection lifts the
@@ -874,7 +1000,8 @@ function liveRowMatchesScope(row, scope) {
  * @returns {Record<string, unknown>[]}
  */
 function statusRows(paths, scope) {
-  const datasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : QUERY_DATASETS)
+  const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
+  const datasets = requested ? requested.filter(isQueryDataset) : QUERY_DATASETS
   const rows = []
   for (const dataset of datasets) {
     const datasetScope = { ...scope, datasets: [dataset] }
@@ -885,6 +1012,21 @@ function statusRows(paths, scope) {
     rows.push({
       dataset,
       sources: sources.length,
+      fresh: states.filter((state) => state.status === 'fresh').length,
+      stale: states.filter((state) => state.status === 'stale').length,
+      missing: states.filter((state) => state.status === 'missing').length,
+      rows: states.reduce((sum, state) => sum + (state.meta?.row_count ?? 0), 0),
+    })
+  }
+  for (const collection of collectionTablesForQuery(paths, scope)) {
+    const datasetScope = { ...scope, datasets: [collection.table] }
+    const partitions = expectedCollectionPartitions(paths, datasetScope)
+    const states = paths.parquetEnabled && paths.parquetDir
+      ? inspectCollectionCachePartitions(partitions)
+      : []
+    rows.push({
+      dataset: collection.table,
+      sources: partitions.filter((partition) => partition.sourceExists).length,
       fresh: states.filter((state) => state.status === 'fresh').length,
       stale: states.filter((state) => state.status === 'stale').length,
       missing: states.filter((state) => state.status === 'missing').length,
@@ -910,14 +1052,61 @@ function baseScope(parsed) {
 }
 
 /**
+ * @param {QueryPaths} paths
  * @param {ReturnType<typeof parseQueryArgs>} parsed
  * @param {string | undefined} rawDataset
  * @returns {QueryScope}
  */
-function scopeWithOptionalDataset(parsed, rawDataset) {
+function scopeWithOptionalDataset(paths, parsed, rawDataset) {
   const scope = baseScope(parsed)
-  if (rawDataset) scope.dataset = assertQueryDataset(rawDataset)
+  if (rawDataset) {
+    const table = resolveQueryTable(paths, rawDataset)
+    if (!table) throw new Error(`unknown dataset "${rawDataset}"`)
+    scope.dataset = table
+  }
   return scope
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {string} raw
+ * @returns {string | undefined}
+ */
+function resolveQueryTable(paths, raw) {
+  if (isQueryDataset(raw)) return raw
+  return collectionByNameOrTable(paths, raw)?.table
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {string} raw
+ * @returns {import('../query/types.js').JsonlCollection | undefined}
+ */
+function collectionByNameOrTable(paths, raw) {
+  const normalized = normalizeCollectionLookup(raw)
+  return listCollections(paths.recordingRoot).find((collection) => (
+    collection.table === raw ||
+    collection.table === normalized ||
+    collection.name === raw
+  ))
+}
+
+/**
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizeCollectionLookup(raw) {
+  return normalizeTableName(raw)
+}
+
+/**
+ * @param {{ partition: unknown }} state
+ * @returns {string}
+ */
+function partitionLabel(state) {
+  const partition = /** @type {Record<string, unknown>} */ (state.partition)
+  if (partition.kind === 'collection') return String(partition.table)
+  return `${String(partition.dataset)}/${String(partition.gatewayId)}/${String(partition.date)}`
 }
 
 /**

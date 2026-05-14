@@ -96,6 +96,43 @@ export interface ExportJob {
   jsonlPath: string
 }
 
+// ---------- CLI collect ----------
+
+export type CollectParseResult =
+  | { kind: 'help' }
+  | { kind: 'error', message: string, exitCode: 2 }
+  | {
+    kind: 'add'
+    configPath: string
+    parquetDir?: string
+    filePath?: string
+    name?: string
+    replace: boolean
+    timestampColumn?: string
+    format: 'table' | 'json' | 'jsonl' | 'markdown'
+  }
+  | {
+    kind: 'list'
+    configPath: string
+    parquetDir?: string
+    replace: boolean
+    format: 'table' | 'json' | 'jsonl' | 'markdown'
+  }
+  | {
+    kind: 'remove'
+    configPath: string
+    parquetDir?: string
+    nameOrTable?: string
+    replace: boolean
+    format: 'table' | 'json' | 'jsonl' | 'markdown'
+  }
+
+export interface CollectHooks {
+  stdout?: WriteStream
+  stderr?: WriteStream
+  loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
+}
+
 // ---------- CLI subcommand parse results / hooks ----------
 
 export interface AttachParseResult {

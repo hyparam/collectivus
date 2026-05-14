@@ -2,7 +2,7 @@
 
 import process from 'node:process'
 
-const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'admin', 'invite', 'export', 'query', 'rendezvous', 'join', 'skills'])
+const SUBCOMMANDS = new Set(['install', 'uninstall', 'attach', 'detach', 'status', 'config', 'admin', 'invite', 'export', 'query', 'collect', 'rendezvous', 'join', 'skills'])
 
 const argv = process.argv.slice(2)
 const subcommand = argv[0]
@@ -83,6 +83,10 @@ async function loadSubcommand(name) {
   case 'query': {
     const { runQuery } = await import('../src/cli/query.js')
     return runQuery
+  }
+  case 'collect': {
+    const { runCollect } = await import('../src/cli/collect.js')
+    return runCollect
   }
   case 'rendezvous': {
     const { runRendezvous } = await import('../src/cli/rendezvous.js')

@@ -54,6 +54,7 @@ Commands:
   ctvs status                                  Report daemon, config, recordings, attach state
   ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
   ctvs query <command> [...]                   Query local recordings through Parquet cache
+  ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
   ctvs skills install [...]                    Install the Collectivus query LLM skill
   ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs

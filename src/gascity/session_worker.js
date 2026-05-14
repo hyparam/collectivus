@@ -166,7 +166,14 @@ export class SessionWorker {
     if (this.debug) {
       this.stderr.write(`[gascity] frame_received city=${this.city} session=${this.sessionId} event=${ev.event}\n`)
     }
-    this.dispatcher.dispatch(envelope, ctx)
+    const rows = this.dispatcher.dispatch(envelope, ctx)
+    if (this.debug && rows.length > 0) {
+      this.stderr.write(
+        `[gascity] frame_normalized city=${this.city} session=${this.sessionId} rows=${rows.length}\n`
+      )
+    }
+    // Bead 3 hooks the parquet writer in here. Until then, rows are discarded
+    // after the debug log — the cursor still advances so resume semantics hold.
     const uuid = extractUuid(envelope)
     if (uuid !== undefined && uuid !== this.lastUuid) {
       this.lastUuid = uuid

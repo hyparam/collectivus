@@ -41,7 +41,7 @@ describe('NormalizerDispatcher', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {Array<{ frame: unknown, ctx: unknown }>} */
     const seen = []
-    dispatcher.register('claude', (frame, c) => { seen.push({ frame, ctx: c }) })
+    dispatcher.register('claude', (frame, c) => { seen.push({ frame, ctx: c }); return [] })
     const frame = { provider: 'claude', uuid: 'u-1' }
     dispatcher.dispatch(frame, ctx)
     expect(seen).toEqual([{ frame, ctx }])
@@ -53,7 +53,7 @@ describe('NormalizerDispatcher', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {unknown[]} */
     const seen = []
-    dispatcher.passthrough = (frame) => { seen.push(frame) }
+    dispatcher.passthrough = (frame) => { seen.push(frame); return [] }
     const frame = { provider: 'gemini' }
     dispatcher.dispatch(frame, ctx)
     expect(seen).toEqual([frame])
@@ -65,7 +65,7 @@ describe('NormalizerDispatcher', () => {
     dispatcher.register('claude', () => { throw new Error('boom') })
     /** @type {unknown[]} */
     const downstream = []
-    dispatcher.register('codex', (frame) => { downstream.push(frame) })
+    dispatcher.register('codex', (frame) => { downstream.push(frame); return [] })
     dispatcher.dispatch({ provider: 'claude' }, ctx)
     dispatcher.dispatch({ provider: 'codex' }, ctx)
     expect(downstream).toEqual([{ provider: 'codex' }])
@@ -77,7 +77,7 @@ describe('NormalizerDispatcher', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {unknown[]} */
     const seen = []
-    dispatcher.passthrough = (frame) => { seen.push(frame) }
+    dispatcher.passthrough = (frame) => { seen.push(frame); return [] }
     dispatcher.dispatch({ uuid: 'no-provider' }, ctx)
     expect(seen).toEqual([{ uuid: 'no-provider' }])
   })
@@ -87,9 +87,40 @@ describe('NormalizerDispatcher', () => {
     const dispatcher = new NormalizerDispatcher({ stderr })
     expect(dispatcher.registry.has('claude')).toBe(true)
     expect(dispatcher.registry.has('codex')).toBe(true)
-    // Stubs are no-ops — calling them must not throw or write to stderr.
-    dispatcher.dispatch({ provider: 'claude' }, ctx)
-    dispatcher.dispatch({ provider: 'codex' }, ctx)
+    // Stubs return empty rows — calling them must not throw or write to stderr.
+    expect(dispatcher.dispatch({ provider: 'claude' }, ctx)).toEqual([])
+    expect(dispatcher.dispatch({ provider: 'codex' }, ctx)).toEqual([])
     expect(stderr.value()).toBe('')
+  })
+
+  it('returns the rows produced by the normalizer', () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const row = { schema_version: 1, part_index: 0, part_type: 'text' }
+    dispatcher.register('claude', () => [/** @type {any} */ (row)])
+    const rows = dispatcher.dispatch({ provider: 'claude' }, ctx)
+    expect(rows).toEqual([row])
+  })
+
+  it('returns an empty array when a registered normalizer throws', () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    dispatcher.register('claude', () => { throw new Error('boom') })
+    const rows = dispatcher.dispatch({ provider: 'claude' }, ctx)
+    expect(rows).toEqual([])
+  })
+
+  it('coerces a non-array return into an empty array', () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    /** @returns {undefined} */
+    function brokenImpl() {
+      return undefined
+    }
+    const broken = /** @type {import('../../src/gascity/types.d.ts').NormalizerFn} */ (
+      /** @type {unknown} */ (brokenImpl)
+    )
+    dispatcher.register('claude', broken)
+    expect(dispatcher.dispatch({ provider: 'claude' }, ctx)).toEqual([])
   })
 })

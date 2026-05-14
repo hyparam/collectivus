@@ -39,6 +39,13 @@ export interface SessionContext {
   rig: string | undefined
   /** Optional alias the session was started under. */
   alias: string | undefined
+  /**
+   * Timestamp of the first frame seen for this session (ISO 8601). Bead 3 owns
+   * tracking — it's set once and reused across every subsequent row. Bead 2's
+   * normalizer reads it as-is and falls back to `null` (the column is
+   * nullable) when bead 3 hasn't populated it yet.
+   */
+  conversationStartedAt?: string | undefined
 }
 
 /**
@@ -69,8 +76,16 @@ export interface LifecyclePayload {
   [k: string]: unknown
 }
 
-/** Type a normalizer function takes when registered on the dispatcher. */
-export type NormalizerFn = (frame: unknown, ctx: SessionContext) => void
+/**
+ * Type a normalizer function takes when registered on the dispatcher. Each
+ * invocation produces zero or more rows ready for the parquet writer (bead 3).
+ * Returning an empty array is valid and signals "skip this frame" — used by
+ * stubs and by lifecycle/heartbeat frames that don't translate to rows.
+ */
+export type NormalizerFn = (
+  frame: unknown,
+  ctx: SessionContext,
+) => Array<import('./normalizers/types.d.ts').NormalizedRow>
 
 /**
  * Persistent cursor state for a lifecycle stream — bead 1 only writes the

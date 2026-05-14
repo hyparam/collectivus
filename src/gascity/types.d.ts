@@ -97,11 +97,41 @@ export interface LifecycleCursor {
 }
 
 /**
- * Persistent cursor state for a single session stream. Bead 1 records the
- * last frame uuid we successfully dispatched (so reconnect resumes after
- * it via the supervisor's `?after=<uuid>` param). Bead 3 will extend this
- * struct with flush counters and timestamps.
+ * Persistent cursor state for a single session stream.
+ *
+ * Bead 1 wrote `last_uuid` per dispatched frame so SSE reconnects could resume
+ * via `?after=<uuid>`. Bead 3 moves cursor ownership to the parquet writer:
+ * the cursor only advances after a successful flush + rename, so a daemon
+ * killed mid-flush re-reads the last *flushed* uuid and replays the SSE tail
+ * from there (idempotent via the writer's dedup set).
+ *
+ * Forward-compatible: future beads adding fields (`schema_version` bumps,
+ * compaction state) must not require existing fields to change.
  */
 export interface SessionCursor {
+  /** Last `provider_uuid` from the most recent flushed row. Used for resume. */
   last_uuid?: string
+  /**
+   * Monotonic per-session frame counter, incremented by the writer for every
+   * accepted (non-duplicate) row. Survives across daemon restarts.
+   */
+  last_seq?: number
+  /** ISO timestamp of the last flushed row's `message_created_at`. */
+  last_timestamp?: string
+  /**
+   * True when the supervisor has emitted `session.draining` / `session.stopped`
+   * for this session. Backfill skips retired cursors so the daemon doesn't
+   * re-request transcripts for already-finished sessions.
+   */
+  retired?: boolean
+  /** Cumulative count of rows the writer has flushed for this session. */
+  flushed_count?: number
+  /** ISO timestamp the cursor was first created (writer's first append). */
+  started_at?: string
+  /**
+   * `GASCITY_MESSAGES_SCHEMA_VERSION` the cursor was written with. Lets the
+   * writer detect a schema bump and start a fresh part-file rather than
+   * appending mismatched columns.
+   */
+  schema_version?: number
 }

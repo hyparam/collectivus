@@ -7,6 +7,7 @@ import { compileFilter } from './template_filter.js'
 /**
  * @import { GascityCityConfig } from './types.d.ts'
  * @import { NormalizerDispatcher } from './normalizer_dispatcher.js'
+ * @import { ParquetWriter } from './parquet_writer.js'
  */
 
 const SPAWN_EVENTS = new Set(['session.created', 'session.woke'])
@@ -30,6 +31,7 @@ export class SupervisorSubscriber {
    *   city: GascityCityConfig,
    *   sinkRoot: string,
    *   dispatcher: NormalizerDispatcher,
+   *   writer?: ParquetWriter,
    *   stderr?: { write: (s: string) => void },
    *   debug?: boolean,
    *   fetchFn?: typeof fetch,
@@ -43,6 +45,8 @@ export class SupervisorSubscriber {
     this.sinkRoot = opts.sinkRoot
     /** @type {NormalizerDispatcher} */
     this.dispatcher = opts.dispatcher
+    /** @type {ParquetWriter | undefined} */
+    this.writer = opts.writer
     /** @type {{ write: (s: string) => void }} */
     this.stderr = opts.stderr ?? process.stderr
     /** @type {boolean} */
@@ -200,6 +204,7 @@ export class SupervisorSubscriber {
       stderr: this.stderr,
       debug: this.debug,
     }
+    if (this.writer) workerOpts.writer = this.writer
     if (template !== undefined) workerOpts.template = template
     if (rig !== undefined) workerOpts.rig = rig
     if (alias !== undefined) workerOpts.alias = alias

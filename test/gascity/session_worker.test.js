@@ -54,7 +54,7 @@ describe('SessionWorker', () => {
     await fs.rm(sinkRoot, { recursive: true, force: true })
   })
 
-  it('parses each frame, dispatches it, and persists a per-session cursor', async () => {
+  it('parses each frame and dispatches it; cursor writes are owned by the writer (no per-frame writes)', async () => {
     const stderr = memoStream()
     const dispatcher = new NormalizerDispatcher({ stderr })
     /** @type {unknown[]} */
@@ -86,11 +86,12 @@ describe('SessionWorker', () => {
       { provider: 'claude', uuid: 'u-1', x: 1 },
       { provider: 'claude', uuid: 'u-2', x: 2 },
     ])
-    const cursor = JSON.parse(await fs.readFile(
-      path.join(sinkRoot, '.cursors', 'hyptown', 'hy-1.json'),
-      'utf8'
-    ))
-    expect(cursor).toEqual({ last_uuid: 'u-2' })
+    // No writer was attached, so no cursor file should have been written by
+    // the worker itself — bead 3 moved cursor ownership to ParquetWriter.
+    await expect(fs.access(path.join(sinkRoot, '.cursors', 'hyptown', 'hy-1.json')))
+      .rejects.toThrow()
+    // In-memory last_uuid is still tracked for observability.
+    expect(worker.lastUuid).toBe('u-2')
   })
 
   it('resumes via ?after=<last_uuid> when a cursor exists', async () => {

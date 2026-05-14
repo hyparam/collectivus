@@ -123,4 +123,54 @@ describe('NormalizerDispatcher', () => {
     dispatcher.register('claude', broken)
     expect(dispatcher.dispatch({ provider: 'claude' }, ctx)).toEqual([])
   })
+
+  it('hands normalizer rows to the attached writer', async () => {
+    const stderr = memoStream()
+    /** @type {Array<{ ctx: unknown, rows: unknown[] }>} */
+    const appended = []
+    const writer = /** @type {import('../../src/gascity/parquet_writer.js').ParquetWriter} */ (
+      /** @type {unknown} */ ({
+        append: async (/** @type {unknown} */ c, /** @type {unknown[]} */ rows) => {
+          appended.push({ ctx: c, rows: [...rows] })
+        },
+      })
+    )
+    const dispatcher = new NormalizerDispatcher({ stderr, writer })
+    dispatcher.register('claude', (frame) => {
+      const f = /** @type {Record<string, unknown>} */ (frame)
+      return [/** @type {any} */ ({
+        schema_version: 1,
+        city: 'hyptown',
+        provider_session_id: 'hy-1',
+        provider_uuid: String(f.uuid),
+        provider: 'claude',
+        message_created_at: '2026-05-14T00:00:00Z',
+        part_index: 0,
+        part_type: 'text',
+      })]
+    })
+    const rows = dispatcher.dispatch({ provider: 'claude', uuid: 'u-1' }, ctx)
+    expect(rows).toHaveLength(1)
+    // Append is async; wait for the next microtask.
+    await new Promise((r) => setImmediate(r))
+    expect(appended).toHaveLength(1)
+    expect(appended[0].ctx).toEqual(ctx)
+    const firstRow = /** @type {Record<string, unknown>} */ (appended[0].rows[0])
+    expect(firstRow.provider_uuid).toBe('u-1')
+  })
+
+  it('the default passthrough emits a raw_frame row when no provider matches', () => {
+    const dispatcher = new NormalizerDispatcher({ stderr: memoStream() })
+    const rows = dispatcher.dispatch(
+      { provider: 'gemini', uuid: 'u-X', timestamp: '2026-05-14T00:00:00Z' },
+      ctx
+    )
+    expect(rows).toHaveLength(1)
+    const row = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (rows[0]))
+    expect(row.part_type).toBe('raw_frame')
+    expect(row.provider).toBe('gemini')
+    expect(row.provider_uuid).toBe('u-X')
+    expect(row.provider_session_id).toBe('hy-1')
+    expect(row.city).toBe('hyptown')
+  })
 })

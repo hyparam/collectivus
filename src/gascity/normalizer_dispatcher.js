@@ -1,39 +1,50 @@
+import { passthroughNormalize } from './passthrough.js'
+
 /**
  * @import { NormalizerFn, SessionContext } from './types.d.ts'
  * @import { NormalizedRow } from './normalizers/types.d.ts'
+ * @import { ParquetWriter } from './parquet_writer.js'
  */
 
 /**
- * Pluggable provider → normalizer registry. Bead 1 shipped stubs for
- * `claude`, `codex`, and the unknown-provider passthrough so the rest of the
- * source could be exercised end-to-end; bead 2 swaps in the real `claude`
- * normalizer (via `registerProductionNormalizers`) and bead 4 will do the
- * same for `codex`.
+ * Pluggable provider → normalizer registry. Bead 1 shipped stubs for `claude`,
+ * `codex`, and an unknown-provider passthrough so the rest of the source could
+ * be exercised end-to-end. Bead 2 swaps in the real `claude` normalizer (via
+ * `registerProductionNormalizers`); bead 3 replaces the passthrough stub with
+ * `passthroughNormalize` (one `raw_frame` row per frame) and wires the
+ * dispatcher to a `ParquetWriter` — normalizers return rows and the dispatcher
+ * hands them off to the writer. Bead 4 will do the same for `codex`.
  *
  * The dispatcher is intentionally small: lookup-by-provider, call the
- * registered fn (or fall through to passthrough), and never throw. A
- * normalizer raising on a single frame is logged and `dispatch` returns an
- * empty array — one malformed payload must not stop the stream.
+ * registered fn (or fall through to passthrough), hand any returned rows to
+ * the writer, and never throw. A normalizer raising on a single frame is
+ * logged and `dispatch` returns an empty array — one malformed payload must
+ * not stop the stream.
  */
 export class NormalizerDispatcher {
   /**
-   * @param {{ stderr?: { write: (s: string) => void } }} [opts]
+   * @param {{
+   *   stderr?: { write: (s: string) => void },
+   *   writer?: ParquetWriter,
+   * }} [opts]
    */
   constructor(opts = {}) {
     /** @type {Map<string, NormalizerFn>} */
     this.registry = new Map()
     /** @type {{ write: (s: string) => void }} */
     this.stderr = opts.stderr ?? process.stderr
+    /** @type {ParquetWriter | undefined} */
+    this.writer = opts.writer
     /** @type {NormalizerFn} */
-    this.passthrough = passthroughStub
+    this.passthrough = passthroughNormalize
     this.register('claude', claudeStub)
     this.register('codex', codexStub)
   }
 
   /**
    * Register or replace a normalizer for `provider`. The registered function
-   * is invoked with the raw frame plus a per-session context object and is
-   * expected to return the rows produced for that frame.
+   * is invoked with the raw frame plus a per-session context object and may
+   * return zero or more `NormalizedRow`s for the writer.
    *
    * @param {string} provider
    * @param {NormalizerFn} fn
@@ -44,12 +55,28 @@ export class NormalizerDispatcher {
   }
 
   /**
+   * Attach (or replace) the writer the dispatcher hands rows to. Useful when
+   * tests construct a dispatcher first and a writer second, or when the
+   * daemon swaps in a stub writer for a soak test.
+   *
+   * @param {ParquetWriter | undefined} writer
+   * @returns {void}
+   */
+  setWriter(writer) {
+    this.writer = writer
+  }
+
+  /**
    * Resolve `provider` from the frame envelope and dispatch. The supervisor's
    * `format=raw` envelope wraps each provider frame in `{ provider, frame }`
    * (or similar); we look at common positions and fall through to passthrough
    * when the provider can't be determined. Any normalizer error is caught and
    * logged, and an empty row array is returned so a single bad frame never
    * derails the worker loop.
+   *
+   * Returns the rows the normalizer emitted (already forwarded to the writer
+   * if one is attached). Tests use the return value to assert normalizer
+   * output without instantiating a writer.
    *
    * @param {unknown} envelope The full frame envelope as parsed from the SSE `data:` field.
    * @param {SessionContext} ctx
@@ -58,15 +85,30 @@ export class NormalizerDispatcher {
   dispatch(envelope, ctx) {
     const provider = resolveProvider(envelope) ?? 'unknown'
     const fn = this.registry.get(provider) ?? this.passthrough
+    /** @type {NormalizedRow[] | undefined | void} */
+    let rows
     try {
-      const rows = fn(envelope, ctx)
-      return Array.isArray(rows) ? rows : []
+      rows = fn(envelope, ctx)
     } catch (err) {
       this.stderr.write(
         `[gascity] normalizer error provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
       )
       return []
     }
+    const out = Array.isArray(rows) ? rows : []
+    if (out.length > 0 && this.writer) {
+      // Writer.append is async but we don't block dispatch — appending only
+      // buffers and any triggered flush failures land on the writer's own
+      // error path. We surface a top-level "writer rejected" only if append
+      // itself throws synchronously (defensive — current ParquetWriter
+      // returns a promise unconditionally).
+      this.writer.append(ctx, out).catch((err) => {
+        this.stderr.write(
+          `[gascity] writer_append_failed provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
+        )
+      })
+    }
+    return out
   }
 }
 
@@ -113,17 +155,6 @@ function claudeStub() {
  * @type {NormalizerFn}
  */
 function codexStub() {
-  return []
-}
-
-/**
- * Default passthrough used when the provider is not registered. Bead 3 will
- * replace this with one that emits a single `raw_frame` row so unknown
- * providers still land in `gascity_messages`.
- *
- * @type {NormalizerFn}
- */
-function passthroughStub() {
   return []
 }
 

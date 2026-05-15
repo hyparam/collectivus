@@ -343,8 +343,12 @@ export interface InitHooks {
   writeFile?: (path: string, contents: string) => void
   /** Override the read used to detect an existing config at the default path. */
   readConfig?: (path: string) => CollectivusConfig | undefined
+  /** Override the npx bootstrap global install step. */
+  installGlobal?: () => Promise<boolean>
+  /** Override lookup of the stable globally installed CLI path. */
+  resolveGlobalBinPath?: () => Promise<string>
   /** Override `collectivus install` chain entry. */
-  runInstall?: (args: string[]) => Promise<number>
+  runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>
   /** Override `process.platform`. */
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */

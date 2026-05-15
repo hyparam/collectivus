@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -276,6 +277,75 @@ export function parseListenPort(value) {
 export function isNpxBinPath(p) {
   if (typeof p !== 'string') return false
   return /[/\\]_npx[/\\]/.test(p)
+}
+
+/**
+ * Install the current published package into npm's global prefix.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function installGlobalCollectivus() {
+  const exitCode = await runInherited(defaultNpmPath(), ['install', '-g', 'collectivus'])
+  return exitCode === 0
+}
+
+/**
+ * Resolve the stable CLI entrypoint after `npm install -g collectivus`.
+ *
+ * @returns {Promise<string>}
+ */
+export async function resolveGlobalCollectivusBinPath() {
+  const result = await runCaptured(defaultNpmPath(), ['root', '-g'])
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `npm root -g exited ${result.exitCode}`)
+  }
+  const root = result.stdout.trim()
+  if (!root) throw new Error('npm root -g returned an empty path')
+  const binPath = path.join(root, 'collectivus', 'bin', 'cli.js')
+  if (!fs.existsSync(binPath)) {
+    throw new Error(`${binPath} does not exist after npm install -g collectivus`)
+  }
+  return binPath
+}
+
+/**
+ * @returns {string}
+ */
+function defaultNpmPath() {
+  const name = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  return path.join(path.dirname(process.execPath), name)
+}
+
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {Promise<number>}
+ */
+function runInherited(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: 'inherit' })
+    child.once('error', reject)
+    child.once('exit', (code) => resolve(code === null ? -1 : code))
+  })
+}
+
+/**
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {Promise<{ exitCode: number, stdout: string, stderr: string }>}
+ */
+function runCaptured(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.once('error', reject)
+    child.once('exit', (code) => resolve({ exitCode: code === null ? -1 : code, stdout, stderr }))
+  })
 }
 
 /**

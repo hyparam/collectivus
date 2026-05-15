@@ -34,7 +34,7 @@ beforeEach(function() {
   fs.writeFileSync(configPath, JSON.stringify({
     version: 1,
     sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }))
 })
 

@@ -29,6 +29,7 @@ describe('package.json', () => {
     expect(packageJson.dependencies).toMatchObject({
       hyparquet: '1.25.8',
       'hyparquet-compressors': '1.1.1',
+      icebird: '0.7.0',
       squirreling: '0.12.19',
     })
   })

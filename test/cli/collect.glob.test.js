@@ -35,7 +35,7 @@ beforeEach(function() {
   fs.writeFileSync(configPath, JSON.stringify({
     version: 1,
     sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }))
 })
 
@@ -49,6 +49,31 @@ afterEach(function() {
  */
 function writeJsonl(filePath, rows) {
   fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+}
+
+/**
+ * @param {string} table
+ * @returns {string}
+ */
+function collectionTableDir(table) {
+  return path.join(sinkDir, '.collectivus-query', 'cache', 'collections', table)
+}
+
+/**
+ * @param {string} tableDir
+ * @returns {string[]}
+ */
+function sourcePartitionDirs(tableDir) {
+  return fs.readdirSync(tableDir).filter((entry) => entry.startsWith('source=')).sort()
+}
+
+/**
+ * @param {string} tableDir
+ * @param {string} partitionDir
+ * @returns {Record<string, any>}
+ */
+function readCursor(tableDir, partitionDir) {
+  return JSON.parse(fs.readFileSync(path.join(tableDir, partitionDir, 'cursor.json'), 'utf8'))
 }
 
 describe('ctvs collect --glob', function() {
@@ -72,12 +97,14 @@ describe('ctvs collect --glob', function() {
     expect(collectOut.value()).toMatch(/Registered segs as table segs/)
     expect(collectOut.value()).toMatch(/3 row\(s\)/)
 
-    const tableDir = path.join(sinkDir, '.collectivus-query', 'parquet', 'collections', 'segs')
-    const partitionDirs = fs.readdirSync(tableDir).filter((entry) => entry.startsWith('source='))
+    const tableDir = collectionTableDir('segs')
+    const partitionDirs = sourcePartitionDirs(tableDir)
     expect(partitionDirs.length).toBe(3)
     for (const dir of partitionDirs) {
-      expect(fs.existsSync(path.join(tableDir, dir, 'data.parquet'))).toBe(true)
-      expect(fs.existsSync(path.join(tableDir, dir, 'data.parquet.meta.json'))).toBe(true)
+      const cursor = readCursor(tableDir, dir)
+      expect(cursor).toMatchObject({ kind: 'collection', table: 'segs', name: 'segs', source_epoch: 0 })
+      const metadataDir = path.join(cursor.table_path, 'metadata')
+      expect(fs.readdirSync(metadataDir).some((entry) => /\.metadata\.json$/.test(entry))).toBe(true)
     }
 
     const sqlOut = memo()
@@ -95,7 +122,7 @@ describe('ctvs collect --glob', function() {
     expect(JSON.parse(filterOut.value())).toEqual([{ c: 2 }])
   })
 
-  it('prunes orphan partitions when a source file is deleted', async function() {
+  it('keeps cache-only partitions when a glob source file is deleted', async function() {
     const fileA = path.join(sourceRoot, 'a', 'segment-001.jsonl')
     const fileB = path.join(sourceRoot, 'a', 'segment-002.jsonl')
     writeJsonl(fileA, [{ ts: '2026-05-14T00:00:00Z', n: 1 }])
@@ -107,8 +134,8 @@ describe('ctvs collect --glob', function() {
       stderr: memo(),
     })).toBe(0)
 
-    const tableDir = path.join(sinkDir, '.collectivus-query', 'parquet', 'collections', 'segs')
-    expect(fs.readdirSync(tableDir).filter((e) => e.startsWith('source=')).length).toBe(2)
+    const tableDir = collectionTableDir('segs')
+    expect(sourcePartitionDirs(tableDir).length).toBe(2)
 
     fs.unlinkSync(fileB)
 
@@ -117,9 +144,17 @@ describe('ctvs collect --glob', function() {
       stdout: refreshOut,
       stderr: memo(),
     })).toBe(0)
-    expect(refreshOut.value()).toMatch(/pruned orphan partition/)
+    expect(refreshOut.value()).not.toMatch(/pruned orphan partition/)
+    expect(refreshOut.value()).toMatch(/fresh segs/)
 
-    expect(fs.readdirSync(tableDir).filter((e) => e.startsWith('source=')).length).toBe(1)
+    expect(sourcePartitionDirs(tableDir).length).toBe(2)
+
+    const sqlOut = memo()
+    expect(await runQuery(['sql', 'select count(*) as c from segs', '--config', configPath, '--format', 'json'], {
+      stdout: sqlOut,
+      stderr: memo(),
+    })).toBe(0)
+    expect(JSON.parse(sqlOut.value())).toEqual([{ c: 2 }])
   })
 
   it('only re-materializes partitions whose source files changed', async function() {
@@ -134,9 +169,10 @@ describe('ctvs collect --glob', function() {
       stderr: memo(),
     })).toBe(0)
 
-    const tableDir = path.join(sinkDir, '.collectivus-query', 'parquet', 'collections', 'segs')
-    const partitions = fs.readdirSync(tableDir).filter((e) => e.startsWith('source='))
-    const mtimes = Object.fromEntries(partitions.map((p) => [p, fs.statSync(path.join(tableDir, p, 'data.parquet')).mtimeMs]))
+    const tableDir = collectionTableDir('segs')
+    const partitions = sourcePartitionDirs(tableDir)
+    const mtimes = Object.fromEntries(partitions.map((p) => [p, fs.statSync(path.join(tableDir, p, 'cursor.json')).mtimeMs]))
+    const sources = Object.fromEntries(partitions.map((p) => [p, path.basename(readCursor(tableDir, p).source_path)]))
 
     await new Promise((resolve) => setTimeout(resolve, 25))
     writeJsonl(fileB, [
@@ -149,12 +185,17 @@ describe('ctvs collect --glob', function() {
       stderr: memo(),
     })).toBe(0)
 
-    const afterMtimes = Object.fromEntries(partitions.map((p) => [p, fs.statSync(path.join(tableDir, p, 'data.parquet')).mtimeMs]))
+    const afterMtimes = Object.fromEntries(partitions.map((p) => [p, fs.statSync(path.join(tableDir, p, 'cursor.json')).mtimeMs]))
     let unchanged = 0
     let changed = 0
     for (const p of partitions) {
-      if (afterMtimes[p] === mtimes[p]) unchanged++
-      else changed++
+      if (sources[p] === 'segment-002.jsonl') {
+        expect(afterMtimes[p]).toBeGreaterThan(mtimes[p])
+        changed++
+      } else {
+        expect(afterMtimes[p]).toBe(mtimes[p])
+        unchanged++
+      }
     }
     expect(changed).toBe(1)
     expect(unchanged).toBe(1)

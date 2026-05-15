@@ -161,16 +161,16 @@ export interface UploadConfig {
   endpoint?: string
 }
 
-export interface QueryParquetConfig {
-  /** Enable the local query Parquet cache. Default true. */
+export interface QueryCacheConfig {
+  /** Enable the local Iceberg-backed query cache. Default true. */
   enabled?: boolean
-  /** Cache directory. Default `<recording-root>/.collectivus-query/parquet`. */
+  /** Cache directory. Default `<recording-root>/.collectivus-query/cache`. */
   dir?: string
 }
 
 export interface QueryConfig {
   /** Local query-cache materialization settings. */
-  parquet?: QueryParquetConfig
+  cache?: QueryCacheConfig
 }
 
 /**

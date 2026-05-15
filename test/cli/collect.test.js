@@ -30,7 +30,7 @@ beforeEach(function() {
   fs.writeFileSync(configPath, JSON.stringify({
     version: 1,
     sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }))
 })
 
@@ -44,6 +44,17 @@ afterEach(function() {
  */
 function writeJsonl(filePath, rows) {
   fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+}
+
+/**
+ * @param {string} table
+ * @returns {Record<string, any>}
+ */
+function readOnlyCollectionCursor(table) {
+  const tableDir = path.join(sinkDir, '.collectivus-query', 'cache', 'collections', table)
+  const partitions = fs.readdirSync(tableDir).filter((entry) => entry.startsWith('source='))
+  expect(partitions).toHaveLength(1)
+  return JSON.parse(fs.readFileSync(path.join(tableDir, partitions[0], 'cursor.json'), 'utf8'))
 }
 
 describe('ctvs collect', function() {
@@ -177,7 +188,51 @@ describe('ctvs collect', function() {
       stderr: deletedErr,
     })).toBe(0)
     expect(deletedOut.value()).toMatch(/\b2\b/)
-    expect(deletedErr.value()).toMatch(/source file is missing/)
+    expect(deletedErr.value()).toBe('')
+  })
+
+  it('starts a new collection source epoch when appended rows introduce schema drift', async function() {
+    const jsonlPath = path.join(tmpDir, 'events.jsonl')
+    writeJsonl(jsonlPath, [
+      { timestamp: '2026-05-11T10:00:00.000Z', event: 'one' },
+    ])
+    expect(await runCollect([jsonlPath, '--name', 'events', '--config', configPath], {
+      stdout: memo(),
+      stderr: memo(),
+    })).toBe(0)
+
+    const before = readOnlyCollectionCursor('events')
+    expect(before.source_epoch).toBe(0)
+
+    writeJsonl(jsonlPath, [
+      { timestamp: '2026-05-11T10:00:00.000Z', event: 'one' },
+      { timestamp: '2026-05-11T10:01:00.000Z', event: 'two', extra: 'new-column' },
+    ])
+    const refreshOut = memo()
+    expect(await runQuery(['refresh', jsonlPath, '--config', configPath], {
+      stdout: refreshOut,
+      stderr: memo(),
+    })).toBe(0)
+    expect(refreshOut.value()).toMatch(/Done\. 1 file\(s\) written/)
+
+    const after = readOnlyCollectionCursor('events')
+    expect(after.source_epoch).toBe(1)
+    expect(path.basename(after.table_path)).toBe('epoch=1')
+    expect(after.row_count).toBe(2)
+    const afterColumns = /** @type {{ name: string }[]} */ (after.columns)
+    expect(afterColumns.map((column) => column.name)).toContain('extra')
+
+    const sqlOut = memo()
+    expect(await runQuery([
+      'sql',
+      'select event, extra from events order by timestamp asc',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: sqlOut, stderr: memo() })).toBe(0)
+    expect(JSON.parse(sqlOut.value())).toEqual([
+      { event: 'one', extra: null },
+      { event: 'two', extra: 'new-column' },
+    ])
   })
 
   it('supports replace, list, and remove for registered collections', async function() {

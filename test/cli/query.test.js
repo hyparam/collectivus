@@ -33,7 +33,7 @@ beforeEach(function() {
   fs.writeFileSync(configPath, JSON.stringify({
     version: 1,
     sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }))
   // Pin `os.homedir()` to the test's tmp dir so `defaultGascityRoot()` lands
   // under it. The gascity source has no JSONL stage — its sink IS the parquet
@@ -237,8 +237,35 @@ function writeAllSignals() {
   ])
 }
 
+/**
+ * @param {string} dataset
+ * @param {string} gatewayId
+ * @param {string} date
+ * @returns {string}
+ */
+function cacheCursorPath(dataset, gatewayId, date) {
+  return path.join(
+    sinkDir,
+    '.collectivus-query',
+    'cache',
+    'datasets',
+    dataset,
+    `gateway_id=${gatewayId}`,
+    `date=${date}`,
+    'cursor.json'
+  )
+}
+
+/**
+ * @param {string} cursorPath
+ * @returns {Record<string, any>}
+ */
+function readCursor(cursorPath) {
+  return JSON.parse(fs.readFileSync(cursorPath, 'utf8'))
+}
+
 describe('ctvs query', function() {
-  it('refreshes local JSONL into partitioned query-cache parquet with metadata', async function() {
+  it('refreshes local JSONL into partitioned query-cache Iceberg tables with cursors', async function() {
     writeAllSignals()
     const stdout = memo()
     const stderr = memo()
@@ -250,15 +277,17 @@ describe('ctvs query', function() {
     // drops from 5 to 4 for the same JSONL fixtures.
     expect(stdout.value()).toMatch(/Done\. 4 file\(s\) written/)
 
-    const parquetPath = path.join(sinkDir, '.collectivus-query', 'parquet', 'proxy_messages', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet')
-    const metaPath = `${parquetPath}.meta.json`
-    expect(fs.existsSync(parquetPath)).toBe(true)
-    expect(JSON.parse(fs.readFileSync(metaPath, 'utf8'))).toMatchObject({
+    const proxyCursorPath = cacheCursorPath('proxy_messages', 'gw1', '2026-05-11')
+    expect(fs.existsSync(proxyCursorPath)).toBe(true)
+    const cursor = readCursor(proxyCursorPath)
+    expect(cursor).toMatchObject({
       cache_schema_version: 3,
+      kind: 'builtin',
       dataset: 'proxy_messages',
       gateway_id: 'gw1',
       date: '2026-05-11',
     })
+    expect(fs.readdirSync(path.join(cursor.table_path, 'metadata')).some((entry) => /\.metadata\.json$/.test(entry))).toBe(true)
   })
 
   it('refreshes only explicit JSONL files by default', async function() {
@@ -271,10 +300,10 @@ describe('ctvs query', function() {
     expect(stderr.value()).toBe('')
     expect(stdout.value()).toMatch(/Done\. 1 file\(s\) written/)
 
-    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'logs', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(true)
-    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'traces', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
-    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'metrics', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
-    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'proxy_messages', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
+    expect(fs.existsSync(cacheCursorPath('logs', 'gw1', '2026-05-11'))).toBe(true)
+    expect(fs.existsSync(cacheCursorPath('traces', 'gw1', '2026-05-11'))).toBe(false)
+    expect(fs.existsSync(cacheCursorPath('metrics', 'gw1', '2026-05-11'))).toBe(false)
+    expect(fs.existsSync(cacheCursorPath('proxy_messages', 'gw1', '2026-05-11'))).toBe(false)
   })
 
   it('requires source files or --all for explicit refresh', async function() {
@@ -339,7 +368,7 @@ describe('ctvs query', function() {
     writeAllSignals()
     expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
-    // Simulate a drain: remove the source JSONLs but keep the parquet+meta.
+    // Simulate a drain: remove the source JSONLs but keep the cache cursors and tables.
     for (const signal of /** @type {const} */ (['logs', 'traces', 'metrics', 'proxy'])) {
       fs.unlinkSync(path.join(sinkDir, 'gw1', signal, '2026-05-11.jsonl'))
     }
@@ -476,7 +505,7 @@ describe('ctvs query freshness gate', function() {
   }
 
   /**
-   * Write JSONL, refresh into parquet+meta, then mutate JSONL so its size
+   * Write JSONL, refresh into cache tables, then mutate JSONL so its size
    * differs from the recorded source_size — making the logs partition stale.
    * @returns {Promise<void>}
    */
@@ -637,7 +666,7 @@ describe('ctvs query gascity_messages', function() {
     }
   })
 
-  it('runs SELECT count(*) and SELECT * SQL against the parquet sink', async function() {
+  it('runs SELECT count(*) and SELECT * SQL against the gascity parquet sink', async function() {
     await writeGascityFixtures([
       {
         city: 'hyptown',
@@ -689,11 +718,11 @@ describe('ctvs query gascity_messages', function() {
     ])
   })
 
-  it('queries gascity_messages even when the parquet cache is disabled', async function() {
+  it('queries gascity_messages even when the query cache is disabled', async function() {
     fs.writeFileSync(configPath, JSON.stringify({
       version: 1,
       sink: { type: 'file', dir: sinkDir },
-      query: { parquet: { enabled: false } },
+      query: { cache: { enabled: false } },
     }))
     await writeGascityFixtures([
       {
@@ -738,7 +767,7 @@ describe('ctvs query gascity_messages', function() {
   })
 
   it('UNION ALL with proxy_messages selects shared columns from both sources', async function() {
-    // Set up proxy_messages partition so the JSONL → parquet refresh path runs.
+    // Set up proxy_messages partition so the JSONL → cache refresh path runs.
     writeJsonl('gw1', 'proxy', '2026-05-14', [
       {
         exchange_id: 'ex-1',

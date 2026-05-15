@@ -1,30 +1,25 @@
-import fs from 'node:fs'
-import path from 'node:path'
-import { parquetReadObjects } from 'hyparquet'
-import { compressors } from 'hyparquet-compressors'
 import { loadClaudeContextLookup, sessionIdsFromExchanges } from '../cli/claude-transcripts.js'
-import { messageRowsToParquet } from '../cli/messages-parquet.js'
 import { walkExchanges } from '../cli/messages-walker.js'
 import { reconstructAssistantMessage } from '../cli/stream-reconstruct.js'
-import { rowsToParquet } from '../upload/parquet.js'
-import { iterExchangesWithStreamEvents, readPartitionRows } from '../upload/reader.js'
+import { iterExchangesWithStreamEvents } from '../upload/reader.js'
 import {
-  buildCacheMeta,
   cachePartitionForSource,
   datasetsForSource,
   discoverSourceFiles,
   discoverGascityPartitions as expectedGascityPartitions,
   inspectCachePartition,
-  parquetPathFor,
+  listBuiltinCacheCursors,
+  nextBuiltinCacheLocation,
 } from './paths.js'
-import { isQueryDataset } from './schema.js'
+import { QUERY_CACHE_SCHEMA_VERSION, columnsForDataset, isQueryDataset } from './schema.js'
+import { readCacheCursor, stableFingerprint, writeCacheCursor } from './iceberg/cursor.js'
+import { readJsonlEntries } from './iceberg/jsonl.js'
+import { appendRowsToTable, readRowsFromCursor } from './iceberg/store.js'
 
 /**
  * @import { CachePartition, QueryDataset, QueryPaths, QueryScope, RefreshResult, SourceFile } from './types.js'
+ * @import { BuiltinCacheCursor, QueryCacheCursor } from './iceberg/types.d.ts'
  */
-
-const GATEWAY_PARTITION_DIMENSIONS = ['gateway_id']
-const DATE_PARTITION_PATTERN = /^date=(\d{4}-\d{2}-\d{2})$/
 
 /**
  * @param {{
@@ -37,33 +32,29 @@ const DATE_PARTITION_PATTERN = /^date=(\d{4}-\d{2}-\d{2})$/
  */
 export async function refreshQueryCache(args) {
   const { paths, scope, force = false, stdout } = args
-  if (!paths.parquetEnabled || !paths.parquetDir) {
-    throw new Error('query parquet cache is disabled; pass --parquet-dir to refresh explicitly')
+  if (!paths.cacheEnabled || !paths.cacheDir) {
+    throw new Error('query cache is disabled; pass --cache-dir to refresh explicitly')
   }
 
   /** @type {RefreshResult} */
   const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const datasets = requestedDatasets?.filter(isQueryDataset)
-  // The gascity source is owned by the daemon, which writes Parquet directly
-  // to `~/.collectivus/sink/gascity_messages/`. There's no JSONL stage to
-  // materialize, so refresh is a no-op for that dataset — count the existing
-  // part-files as `skipped` so progress output stays consistent.
   const wantsGascity = !datasets || datasets.includes('gascity_messages')
-  if (wantsGascity) {
-    countGascityPartitions(scope, result, stdout)
-  }
+  if (wantsGascity) countGascityPartitions(scope, result, stdout)
+
   const otherDatasets = datasets ? datasets.filter((d) => d !== 'gascity_messages') : undefined
   const wantsOther = !datasets || (otherDatasets && otherDatasets.length > 0)
   if (!wantsOther) return result
+
   const sources = discoverSourceFiles(paths.recordingRoot, scope)
   for (const source of sources) {
     const sourceDatasets = datasetsForSource(source, otherDatasets)
     if (sourceDatasets.length === 0) continue
     if (source.signal === 'proxy') {
-      await refreshProxySource(paths.parquetDir, source, sourceDatasets, force, result, stdout)
+      await refreshProxySource(paths.cacheDir, source, sourceDatasets, force, result, stdout)
     } else {
-      await refreshOtlpSource(paths.parquetDir, source, sourceDatasets, force, result, stdout)
+      await refreshOtlpSource(paths.cacheDir, source, sourceDatasets, force, result, stdout)
     }
   }
   return result
@@ -83,15 +74,15 @@ function countGascityPartitions(scope, result, stdout) {
       gatewayId: partition.gatewayId,
       date: partition.date,
       rows: 0,
-      parquetPath: partition.parquetPath,
+      cachePath: partition.cachePath,
       status: 'skipped',
     })
-    stdout?.write(`fresh gascity_messages/${partition.date}/${partition.parquetPath}\n`)
+    stdout?.write(`fresh gascity_messages/${partition.date}/${partition.cachePath}\n`)
   }
 }
 
 /**
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {SourceFile} source
  * @param {QueryDataset[]} datasets
  * @param {boolean} force
@@ -99,69 +90,76 @@ function countGascityPartitions(scope, result, stdout) {
  * @param {{ write: (s: string) => void } | undefined} stdout
  * @returns {Promise<void>}
  */
-async function refreshOtlpSource(parquetDir, source, datasets, force, result, stdout) {
+async function refreshOtlpSource(cacheDir, source, datasets, force, result, stdout) {
   const dataset = datasets[0]
   if (!dataset) return
-  const partition = cachePartitionForSource(parquetDir, dataset, source)
+  const partition = cachePartitionForSource(cacheDir, dataset, source)
   const state = inspectCachePartition(partition)
   if (!force && state.status === 'fresh') {
-    result.skipped++
-    result.files.push({
-      dataset,
-      gatewayId: source.gatewayId,
-      date: source.date,
-      rows: state.meta?.row_count ?? 0,
-      parquetPath: partition.parquetPath,
-      status: 'skipped',
-    })
+    pushSkipped(result, dataset, source, state.meta?.row_count ?? 0, partition.cachePath)
     stdout?.write(`fresh ${dataset}/${source.gatewayId}/${source.date}\n`)
     return
   }
 
   try {
-    /** @type {Record<string, unknown>[]} */
-    const rows = []
-    for await (const row of readPartitionRows(source.jsonlPath, { gateway_id: source.gatewayId })) {
-      rows.push(row)
+    const columns = [...columnsForDataset(dataset)]
+    const schemaFingerprint = stableFingerprint(columns)
+    const existing = readBuiltinCursor(partition.cursorPath)
+    const reset = shouldResetBuiltin(existing, schemaFingerprint, source.size, force)
+    const location = reset
+      ? nextBuiltinCacheLocation(cacheDir, dataset, source.gatewayId, source.date)
+      : existingLocation(partition, existing)
+    const epoch = reset ? epochFromTablePath(location.tablePath) : existing?.source_epoch ?? 0
+    const startOffset = reset ? 0 : existing?.byte_offset ?? 0
+    const startLine = reset ? 0 : existing?.line_number ?? 0
+    const read = readJsonlEntries(source.jsonlPath, startOffset, startLine)
+    if (!reset && read.nextByteOffset === startOffset && read.entries.length === 0) {
+      pushSkipped(result, dataset, source, existing?.row_count ?? 0, partition.cachePath)
+      stdout?.write(`fresh ${dataset}/${source.gatewayId}/${source.date}\n`)
+      return
     }
-    const buf = await rowsToParquet(/** @type {import('../upload/upload.d.ts').Signal} */ (source.signal), rows, GATEWAY_PARTITION_DIMENSIONS)
-    writeParquetAndMeta(partition, buf, rows.length)
-    result.written++
-    result.rows += rows.length
-    result.files.push({
-      dataset,
-      gatewayId: source.gatewayId,
+    const sourceId = location.sourceId
+    const rows = read.entries.map((entry) => ({
+      ...entry.raw,
+      gateway_id: source.gatewayId,
       date: source.date,
-      rows: rows.length,
-      parquetPath: partition.parquetPath,
-      status: 'written',
+      _partition: { gateway_id: source.gatewayId },
+      _ctvs_row_id: `${sourceId}:${epoch}:${entry.lineNumber}`,
+      _ctvs_source_id: sourceId,
+      _ctvs_source_epoch: epoch,
+      _ctvs_byte_offset: entry.byteOffset,
+      _ctvs_line_number: entry.lineNumber,
+    }))
+    await appendRowsToTable(location.tablePath, columns, rows)
+    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rows.length
+    writeCacheCursor(location.cursorPath, {
+      cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
+      kind: 'builtin',
+      dataset,
+      gateway_id: source.gatewayId,
+      date: source.date,
+      source_id: sourceId,
+      source_path: source.jsonlPath,
+      source_epoch: epoch,
+      table_path: location.tablePath,
+      table_url: location.tableUrl,
+      source_size: read.nextByteOffset,
+      source_mtime_ms: read.fileMtimeMs,
+      byte_offset: read.nextByteOffset,
+      line_number: read.nextLineNumber,
+      row_count: rowCount,
+      schema_fingerprint: schemaFingerprint,
+      refreshed_at: new Date().toISOString(),
     })
-    stdout?.write(`wrote ${partition.parquetPath} (${rows.length} rows)\n`)
+    pushWritten(result, dataset, source, rows.length, location.cachePath)
+    stdout?.write(`wrote ${location.cachePath} (${rows.length} rows)\n`)
   } catch (err) {
-    result.failures++
-    result.files.push({
-      dataset,
-      gatewayId: source.gatewayId,
-      date: source.date,
-      rows: 0,
-      parquetPath: partition.parquetPath,
-      status: 'failed',
-      error: formatError(err),
-    })
+    pushFailed(result, dataset, source, partition.cachePath, err)
   }
 }
 
 /**
- * Refresh the `proxy_messages` Parquet partition for one proxy JSONL file.
- *
- * The walker dedupes across days via `priorSeen` — message ids already
- * materialized in earlier date partitions for this gateway are loaded and
- * passed in, so a user message that re-appears in 50 history requests has
- * exactly one row in the final Parquet. The `tool_call_id → tool_name` map
- * is seeded from those same earlier partitions so a tool_result row whose
- * matching tool_use lives in yesterday's partition still resolves its name.
- *
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {SourceFile} source
  * @param {QueryDataset[]} datasets
  * @param {boolean} force
@@ -169,35 +167,37 @@ async function refreshOtlpSource(parquetDir, source, datasets, force, result, st
  * @param {{ write: (s: string) => void } | undefined} stdout
  * @returns {Promise<void>}
  */
-async function refreshProxySource(parquetDir, source, datasets, force, result, stdout) {
+async function refreshProxySource(cacheDir, source, datasets, force, result, stdout) {
   if (!datasets.includes('proxy_messages')) return
-  const partition = cachePartitionForSource(parquetDir, 'proxy_messages', source)
+  const dataset = /** @type {QueryDataset} */ ('proxy_messages')
+  const partition = cachePartitionForSource(cacheDir, dataset, source)
   const state = inspectCachePartition(partition)
   if (!force && state.status === 'fresh') {
-    result.skipped++
-    result.files.push({
-      dataset: 'proxy_messages',
-      gatewayId: source.gatewayId,
-      date: source.date,
-      rows: state.meta?.row_count ?? 0,
-      parquetPath: partition.parquetPath,
-      status: 'skipped',
-    })
+    pushSkipped(result, dataset, source, state.meta?.row_count ?? 0, partition.cachePath)
     stdout?.write(`fresh proxy_messages/${source.gatewayId}/${source.date}\n`)
     return
   }
 
   try {
-    const { seen, toolLookup } = await loadPriorSeen(parquetDir, source.gatewayId, source.date)
+    const columns = [...columnsForDataset(dataset)]
+    const schemaFingerprint = stableFingerprint(columns)
+    const existing = readBuiltinCursor(partition.cursorPath)
+    const reset = shouldResetBuiltin(existing, schemaFingerprint, source.size, force)
+    const location = reset
+      ? nextBuiltinCacheLocation(cacheDir, dataset, source.gatewayId, source.date)
+      : existingLocation(partition, existing)
+    const epoch = reset ? epochFromTablePath(location.tablePath) : existing?.source_epoch ?? 0
+    const sourceId = location.sourceId
+    const read = readJsonlEntries(source.jsonlPath, 0, 0)
+
+    const { seen, toolLookup } = await loadProxySeen(cacheDir, source.gatewayId, source.date, !reset)
     stdout?.write(`priorSeen proxy_messages/${source.gatewayId}/${source.date}: ${seen.size} messages, ${toolLookup.size} tool calls\n`)
     const bundles = await iterExchangesWithStreamEvents(source.jsonlPath)
     /** @type {Map<string, Record<string, unknown>[]>} */
     const streamEventsByExchange = new Map()
     for (const bundle of bundles) {
       const exchangeId = bundle.exchange.exchange_id
-      if (typeof exchangeId === 'string') {
-        streamEventsByExchange.set(exchangeId, bundle.streamEvents)
-      }
+      if (typeof exchangeId === 'string') streamEventsByExchange.set(exchangeId, bundle.streamEvents)
     }
     const exchanges = bundles.map((bundle) => bundle.exchange)
     const contextLookup = await loadClaudeContextLookup({
@@ -218,105 +218,83 @@ async function refreshProxySource(parquetDir, source, datasets, force, result, s
     /** @type {Record<string, unknown>[]} */
     const rows = []
     for await (const row of walked) {
-      rows.push(row)
+      const messageId = typeof row.message_id === 'string' ? row.message_id : 'message'
+      const partIndex = typeof row.part_index === 'number' ? row.part_index : 0
+      rows.push({
+        ...row,
+        date: source.date,
+        _ctvs_row_id: `${sourceId}:${epoch}:${messageId}:${partIndex}`,
+        _ctvs_source_id: sourceId,
+        _ctvs_source_epoch: epoch,
+        _ctvs_byte_offset: 0,
+        _ctvs_line_number: 0,
+      })
     }
-    // The walker tracks tool_call_id → tool_name within a single walk only;
-    // tool_results whose matching tool_use lived in an earlier day's Parquet
-    // are resolved here from the priorSeen-seeded lookup.
     backfillToolNames(rows, toolLookup)
-    const buf = await messageRowsToParquet(rows, GATEWAY_PARTITION_DIMENSIONS, { allowEmpty: true })
-    if (!buf) throw new Error('failed to encode proxy_messages partition')
-    writeParquetAndMeta(partition, buf, rows.length)
-    result.written++
-    result.rows += rows.length
-    result.files.push({
-      dataset: 'proxy_messages',
-      gatewayId: source.gatewayId,
+    await appendRowsToTable(location.tablePath, columns, rows)
+    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rows.length
+    writeCacheCursor(location.cursorPath, {
+      cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
+      kind: 'builtin',
+      dataset,
+      gateway_id: source.gatewayId,
       date: source.date,
-      rows: rows.length,
-      parquetPath: partition.parquetPath,
-      status: 'written',
+      source_id: sourceId,
+      source_path: source.jsonlPath,
+      source_epoch: epoch,
+      table_path: location.tablePath,
+      table_url: location.tableUrl,
+      source_size: read.nextByteOffset,
+      source_mtime_ms: read.fileMtimeMs,
+      byte_offset: read.nextByteOffset,
+      line_number: read.nextLineNumber,
+      row_count: rowCount,
+      schema_fingerprint: schemaFingerprint,
+      refreshed_at: new Date().toISOString(),
     })
-    stdout?.write(`wrote ${partition.parquetPath} (${rows.length} rows)\n`)
+    pushWritten(result, dataset, source, rows.length, location.cachePath)
+    stdout?.write(`wrote ${location.cachePath} (${rows.length} rows)\n`)
   } catch (err) {
-    result.failures++
-    result.files.push({
-      dataset: 'proxy_messages',
-      gatewayId: source.gatewayId,
-      date: source.date,
-      rows: 0,
-      parquetPath: partition.parquetPath,
-      status: 'failed',
-      error: formatError(err),
-    })
+    pushFailed(result, dataset, source, partition.cachePath, err)
   }
 }
 
 /**
- * Build the `{message_id → {conversation_id, message_index}}` and
- * `{tool_call_id → tool_name}` maps from every Parquet partition in
- * `proxy_messages/gateway_id=<id>/date=<earlier-day>/` for the given
- * `gateway_id`. The check is a path-level filter — only date directories
- * lexicographically before `beforeDate` are read, so each refresh pays
- * the I/O cost for past days only.
- *
- * Returns empty maps when no prior partitions exist (first-ever refresh).
- *
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {string} gatewayId
- * @param {string} beforeDate  -- exclusive upper bound, ISO `YYYY-MM-DD`
+ * @param {string} date
+ * @param {boolean} includeSameDate
  * @returns {Promise<{
  *   seen: Map<string, { conversation_id: string, message_index: number }>,
  *   toolLookup: Map<string, string>,
  * }>}
  */
-async function loadPriorSeen(parquetDir, gatewayId, beforeDate) {
+async function loadProxySeen(cacheDir, gatewayId, date, includeSameDate) {
   /** @type {Map<string, { conversation_id: string, message_index: number }>} */
   const seen = new Map()
   /** @type {Map<string, string>} */
   const toolLookup = new Map()
-  const datasetDir = path.join(parquetDir, 'proxy_messages', `gateway_id=${gatewayId}`)
-  let entries
-  try {
-    entries = fs.readdirSync(datasetDir, { withFileTypes: true })
-  } catch {
-    return { seen, toolLookup }
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
-    const match = DATE_PARTITION_PATTERN.exec(entry.name)
-    if (!match) continue
-    const date = match[1]
-    if (date >= beforeDate) continue
-    const parquetPath = parquetPathFor(parquetDir, 'proxy_messages', gatewayId, date)
-    if (!fileExists(parquetPath)) continue
-    const buf = fs.readFileSync(parquetPath)
-    const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
-    /** @type {Record<string, unknown>[]} */
-    const rows = await parquetReadObjects({
-      file,
-      compressors,
-      columns: ['message_id', 'conversation_id', 'message_index', 'tool_call_id', 'tool_name', 'part_type'],
-    })
+  const cursors = listBuiltinCacheCursors(cacheDir, {
+    datasets: ['proxy_messages'],
+    gatewayId,
+    limit: 100,
+  }).filter((cursor) => cursor.date < date || (includeSameDate && cursor.date === date))
+  for (const cursor of cursors) {
+    const rows = await readRowsFromCursor(cursor)
     for (const row of rows) {
       const messageId = row.message_id
       const conversationId = row.conversation_id
       const messageIndex = row.message_index
-      if (typeof messageId === 'string' && typeof conversationId === 'string' && typeof messageIndex === 'number') {
-        if (!seen.has(messageId)) {
-          seen.set(messageId, { conversation_id: conversationId, message_index: messageIndex })
-        }
+      if (typeof messageId === 'string' && typeof conversationId === 'string' && typeof messageIndex === 'number' && !seen.has(messageId)) {
+        seen.set(messageId, { conversation_id: conversationId, message_index: messageIndex })
       }
-      const toolCallId = row.tool_call_id
-      const toolName = row.tool_name
-      const partType = row.part_type
       if (
-        partType === 'tool_call' &&
-        typeof toolCallId === 'string' &&
-        typeof toolName === 'string' &&
-        !toolLookup.has(toolCallId)
+        row.part_type === 'tool_call' &&
+        typeof row.tool_call_id === 'string' &&
+        typeof row.tool_name === 'string' &&
+        !toolLookup.has(row.tool_call_id)
       ) {
-        toolLookup.set(toolCallId, toolName)
+        toolLookup.set(row.tool_call_id, row.tool_name)
       }
     }
   }
@@ -324,11 +302,6 @@ async function loadPriorSeen(parquetDir, gatewayId, beforeDate) {
 }
 
 /**
- * Resolve any `tool_result` rows whose `tool_name` is still null using the
- * cross-day lookup. The walker resolves intra-walk pairings on its own; this
- * pass picks up tool_results whose matching tool_use happened in an earlier
- * day's Parquet partition.
- *
  * @param {Record<string, unknown>[]} rows
  * @param {Map<string, string>} toolLookup
  * @returns {void}
@@ -346,27 +319,95 @@ function backfillToolNames(rows, toolLookup) {
 }
 
 /**
- * @param {CachePartition} partition
- * @param {Uint8Array} buf
- * @param {number} rowCount
+ * @param {string} cursorPath
+ * @returns {BuiltinCacheCursor | undefined}
  */
-function writeParquetAndMeta(partition, buf, rowCount) {
-  fs.mkdirSync(path.dirname(partition.parquetPath), { recursive: true })
-  fs.writeFileSync(partition.parquetPath, buf)
-  const meta = buildCacheMeta(partition, rowCount)
-  fs.writeFileSync(partition.metaPath, JSON.stringify(meta, null, 2) + '\n')
+function readBuiltinCursor(cursorPath) {
+  const cursor = readCacheCursor(cursorPath)
+  return cursor?.kind === 'builtin' ? cursor : undefined
 }
 
 /**
- * @param {string} p
+ * @param {BuiltinCacheCursor | undefined} cursor
+ * @param {string} schemaFingerprint
+ * @param {number} sourceSize
+ * @param {boolean} force
  * @returns {boolean}
  */
-function fileExists(p) {
-  try {
-    return fs.statSync(p).isFile()
-  } catch {
-    return false
+function shouldResetBuiltin(cursor, schemaFingerprint, sourceSize, force) {
+  if (force || !cursor) return true
+  if (cursor.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION) return true
+  if (cursor.schema_fingerprint !== schemaFingerprint) return true
+  return sourceSize < cursor.byte_offset
+}
+
+/**
+ * @param {CachePartition} partition
+ * @param {BuiltinCacheCursor | undefined} cursor
+ * @returns {{ cachePath: string, cursorPath: string, tablePath: string, tableUrl: string, sourceId: string }}
+ */
+function existingLocation(partition, cursor) {
+  return {
+    cachePath: partition.cachePath,
+    cursorPath: partition.cursorPath,
+    tablePath: cursor?.table_path ?? partition.tablePath,
+    tableUrl: cursor?.table_url ?? partition.tableUrl,
+    sourceId: cursor?.source_id ?? `${partition.dataset}:${partition.gatewayId}:${partition.date}`,
   }
+}
+
+/**
+ * @param {string} tablePath
+ * @returns {number}
+ */
+function epochFromTablePath(tablePath) {
+  const match = /(?:^|[/\\])epoch=(\d+)$/.exec(tablePath)
+  return match ? Number.parseInt(match[1], 10) : 0
+}
+
+/**
+ * @param {RefreshResult} result
+ * @param {string} dataset
+ * @param {SourceFile} source
+ * @param {number} rows
+ * @param {string} cachePath
+ */
+function pushWritten(result, dataset, source, rows, cachePath) {
+  result.written++
+  result.rows += rows
+  result.files.push({ dataset, gatewayId: source.gatewayId, date: source.date, rows, cachePath, status: 'written' })
+}
+
+/**
+ * @param {RefreshResult} result
+ * @param {string} dataset
+ * @param {SourceFile} source
+ * @param {number} rows
+ * @param {string} cachePath
+ */
+function pushSkipped(result, dataset, source, rows, cachePath) {
+  result.skipped++
+  result.files.push({ dataset, gatewayId: source.gatewayId, date: source.date, rows, cachePath, status: 'skipped' })
+}
+
+/**
+ * @param {RefreshResult} result
+ * @param {string} dataset
+ * @param {SourceFile} source
+ * @param {string} cachePath
+ * @param {unknown} err
+ */
+function pushFailed(result, dataset, source, cachePath, err) {
+  result.failures++
+  result.files.push({
+    dataset,
+    gatewayId: source.gatewayId,
+    date: source.date,
+    rows: 0,
+    cachePath,
+    status: 'failed',
+    error: formatError(err),
+  })
 }
 
 /**

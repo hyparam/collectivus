@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { parquetReadObjects } from 'hyparquet'
-import { compressors } from 'hyparquet-compressors'
 import { refreshQueryCache } from '../../src/query/refresh.js'
 import { QUERY_CACHE_SCHEMA_VERSION } from '../../src/query/schema.js'
+import { readCacheCursor } from '../../src/query/iceberg/cursor.js'
+import { readRowsFromCursor } from '../../src/query/iceberg/store.js'
 
 /**
  * Memo writer for capturing the refresh CLI's stdout. The refresh helper
@@ -27,14 +27,14 @@ let tmpDir
 /** @type {string} */
 let sinkDir
 /** @type {string} */
-let parquetDir
+let cacheDir
 
 beforeEach(function() {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-msgs-refresh-'))
   sinkDir = path.join(tmpDir, 'sink')
-  parquetDir = path.join(tmpDir, 'parquet')
+  cacheDir = path.join(tmpDir, 'cache')
   fs.mkdirSync(sinkDir, { recursive: true })
-  fs.mkdirSync(parquetDir, { recursive: true })
+  fs.mkdirSync(cacheDir, { recursive: true })
 })
 
 afterEach(function() {
@@ -43,7 +43,7 @@ afterEach(function() {
 
 /**
  * Minimal QueryPaths constructed without going through the config layer —
- * refresh only reads `recordingRoot`, `parquetDir`, and `parquetEnabled`.
+ * refresh only reads `recordingRoot`, `cacheDir`, and `cacheEnabled`.
  *
  * @returns {import('../../src/query/types.js').QueryPaths}
  */
@@ -52,9 +52,9 @@ function paths() {
     config: /** @type {any} */ ({}),
     configPath: '<unused>',
     recordingRoot: sinkDir,
-    parquetDir,
-    parquetEnabled: true,
-    explicitParquetDir: true,
+    cacheDir,
+    cacheEnabled: true,
+    explicitCacheDir: true,
   }
 }
 
@@ -128,7 +128,7 @@ function buildExchange(opts) {
 }
 
 /**
- * Read all rows out of a parquet partition for assertions. Tests use this to
+ * Read all rows out of a cache partition for assertions. Tests use this to
  * verify what was actually written, not just refresh's reported counts.
  *
  * @param {string} gatewayId
@@ -136,11 +136,17 @@ function buildExchange(opts) {
  * @returns {Promise<Record<string, unknown>[]>}
  */
 async function readMessagesPartition(gatewayId, date) {
-  const parquetPath = path.join(parquetDir, 'proxy_messages', `gateway_id=${gatewayId}`, `date=${date}`, 'data.parquet')
-  if (!fs.existsSync(parquetPath)) return []
-  const buf = fs.readFileSync(parquetPath)
-  const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
-  return /** @type {Record<string, unknown>[]} */ (await parquetReadObjects({ file, compressors }))
+  const cursor = readCacheCursor(cursorPath(gatewayId, date))
+  return cursor ? readRowsFromCursor(cursor) : []
+}
+
+/**
+ * @param {string} gatewayId
+ * @param {string} date
+ * @returns {string}
+ */
+function cursorPath(gatewayId, date) {
+  return path.join(cacheDir, 'datasets', 'proxy_messages', `gateway_id=${gatewayId}`, `date=${date}`, 'cursor.json')
 }
 
 describe('refreshQueryCache — proxy_messages incremental', function() {
@@ -220,10 +226,10 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
     const first = await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout: memo() })
     expect(first.written).toBeGreaterThan(0)
 
-    const day1ParquetPath = path.join(parquetDir, 'proxy_messages', 'gateway_id=gw-test', 'date=2026-05-13', 'data.parquet')
-    const day1MtimeBefore = fs.statSync(day1ParquetPath).mtimeMs
+    const day1CursorPath = cursorPath('gw-test', '2026-05-13')
+    const day1MtimeBefore = fs.statSync(day1CursorPath).mtimeMs
 
-    // Add a second day; the first day's parquet must not be rewritten.
+    // Add a second day; the first day's cache cursor must not be rewritten.
     writeProxyJsonl('gw-test', '2026-05-14', [
       buildExchange({
         exchangeId: 'ex-day2-1',
@@ -241,7 +247,7 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
     expect(second.skipped).toBe(1)
     expect(stdout.value()).toMatch(/fresh proxy_messages\/gw-test\/2026-05-13/)
     expect(stdout.value()).toMatch(/wrote .*date=2026-05-14/)
-    const day1MtimeAfter = fs.statSync(day1ParquetPath).mtimeMs
+    const day1MtimeAfter = fs.statSync(day1CursorPath).mtimeMs
     expect(day1MtimeAfter).toBe(day1MtimeBefore)
   })
 
@@ -331,7 +337,7 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
       }),
     ])
     await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout: memo() })
-    const metaPath = path.join(parquetDir, 'proxy_messages', 'gateway_id=gw-test', 'date=2026-05-13', 'data.parquet.meta.json')
+    const metaPath = cursorPath('gw-test', '2026-05-13')
     const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
     expect(meta.cache_schema_version).toBe(QUERY_CACHE_SCHEMA_VERSION)
     // Tamper with the version to a stale value and confirm the next refresh

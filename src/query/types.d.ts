@@ -1,5 +1,6 @@
 import type { ColumnSpec, Signal } from '../upload/upload.js'
 import type { CollectivusConfig } from '../types.js'
+import type { CollectionColumnMeta, QueryCacheCursor } from './iceberg/types.d.ts'
 
 export type QueryDataset =
   | 'logs'
@@ -28,9 +29,9 @@ export interface QueryPaths {
   config: CollectivusConfig
   configPath: string
   recordingRoot: string
-  parquetDir?: string
-  parquetEnabled: boolean
-  explicitParquetDir: boolean
+  cacheDir?: string
+  cacheEnabled: boolean
+  explicitCacheDir: boolean
 }
 
 export interface SourceFile {
@@ -53,38 +54,28 @@ export interface CachePartition {
   gatewayId: string
   date: string
   /**
-   * Where the source JSONL was, or still is, on disk. For sealed
-   * (drained) partitions synthesized from a CacheMeta, this is the path
-   * the meta recorded at last refresh — the file itself may no longer
-   * exist.
+   * Where the source JSONL was, or still is, on disk. For cache-only
+   * partitions, this is the path recorded by the cursor at last refresh.
    */
   jsonlPath: string
   /** Source size at last refresh. Meaningless once the source is drained. */
   sourceSize: number
   /** Source mtime at last refresh. Meaningless once the source is drained. */
   sourceMtimeMs: number
-  parquetPath: string
-  metaPath: string
+  cachePath: string
+  cursorPath: string
+  tablePath: string
+  tableUrl: string
 }
 
-export interface CacheMeta {
-  cache_schema_version: number
-  dataset: QueryDataset
-  gateway_id: string
-  date: string
-  source_path: string
-  source_size: number
-  source_mtime_ms: number
-  row_count: number
-  refreshed_at: string
-}
+export type CacheMeta = QueryCacheCursor
 
 export type CachePartitionStatus = 'fresh' | 'missing' | 'stale'
 
 export interface CachePartitionState {
   partition: CachePartition
   status: CachePartitionStatus
-  meta?: CacheMeta
+  meta?: QueryCacheCursor
   reason?: string
 }
 
@@ -107,7 +98,7 @@ export interface RefreshFileResult {
   gatewayId: string
   date: string
   rows: number
-  parquetPath: string
+  cachePath: string
   status: 'written' | 'skipped' | 'failed'
   error?: string
 }
@@ -130,7 +121,7 @@ export interface JsonlCollection {
   /**
    * Absolute glob pattern matching one or more external JSONL source files.
    * Each matched file becomes its own cache partition under
-   * `collections/<table>/source=<hash>/data.parquet`.
+   * `collections/<table>/source=<hash>/`.
    */
   source_glob?: string
   /** Optional source field requested for time filtering. */
@@ -144,12 +135,7 @@ export interface CollectionsManifest {
   collections: Record<string, JsonlCollection>
 }
 
-export interface CollectionColumnMeta {
-  name: string
-  source_field?: string
-  type: ColumnSpec['type']
-  nullable: boolean
-}
+export type { CollectionColumnMeta } from './iceberg/types.d.ts'
 
 export interface CollectionCacheMeta {
   cache_schema_version: number
@@ -174,6 +160,8 @@ export interface CollectionCachePartition {
   sourceExists: boolean
   sourceSize: number
   sourceMtimeMs: number
-  parquetPath: string
-  metaPath: string
+  cachePath: string
+  cursorPath: string
+  tablePath: string
+  tableUrl: string
 }

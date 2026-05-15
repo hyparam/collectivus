@@ -57,7 +57,7 @@ Commands:
   ctvs status                                  Report daemon, config, recordings, attach state
   ctvs gascity <subcommand> [...]              Manage gascity supervisor capture sources
   ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
-  ctvs query <command> [...]                   Query local recordings through Parquet cache
+  ctvs query <command> [...]                   Query local recordings through query cache
   ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
   ctvs skills install [...]                    Install the Collectivus query LLM skill
   ctvs ignore <add|remove|list> [path]         Suppress Claude recording for a folder

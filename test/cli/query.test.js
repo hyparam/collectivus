@@ -306,6 +306,36 @@ describe('ctvs query', function() {
     expect(fs.existsSync(cacheCursorPath('proxy_messages', 'gw1', '2026-05-11'))).toBe(false)
   })
 
+  it('refreshes large JSONL sources across multiple bounded batches', async function() {
+    const rows = Array.from({ length: 5_001 }, (_, i) => ({
+      serviceName: 'svc-a',
+      timestamp: '2026-05-11T10:00:00.000Z',
+      body: `line-${i}`,
+      resource: {},
+      scope: { attributes: {} },
+      attributes: {},
+    }))
+    writeJsonl('gw1', 'logs', '2026-05-11', rows)
+
+    const stdout = memo()
+    const stderr = memo()
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout, stderr })).toBe(0)
+    expect(stderr.value()).toBe('')
+    expect(stdout.value()).toMatch(/5001 rows/)
+
+    const cursor = readCursor(cacheCursorPath('logs', 'gw1', '2026-05-11'))
+    expect(cursor.row_count).toBe(5_001)
+
+    const sqlOut = memo()
+    expect(await runQuery([
+      'sql',
+      'select count(*) as n from logs',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: sqlOut, stderr: memo() })).toBe(0)
+    expect(JSON.parse(sqlOut.value())).toEqual([{ n: 5_001 }])
+  })
+
   it('requires source files or --all for explicit refresh', async function() {
     const stdout = memo()
     const stderr = memo()

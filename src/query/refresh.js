@@ -13,7 +13,7 @@ import {
 } from './paths.js'
 import { QUERY_CACHE_SCHEMA_VERSION, columnsForDataset, isQueryDataset } from './schema.js'
 import { readCacheCursor, stableFingerprint, writeCacheCursor } from './iceberg/cursor.js'
-import { readJsonlEntries } from './iceberg/jsonl.js'
+import { readJsonlEntryBatches } from './iceberg/jsonl.js'
 import { appendRowsToTable, readRowsFromCursor } from './iceberg/store.js'
 
 /**
@@ -110,28 +110,36 @@ async function refreshOtlpSource(cacheDir, source, datasets, force, result, stdo
       ? nextBuiltinCacheLocation(cacheDir, dataset, source.gatewayId, source.date)
       : existingLocation(partition, existing)
     const epoch = reset ? epochFromTablePath(location.tablePath) : existing?.source_epoch ?? 0
+    const { sourceId } = location
     const startOffset = reset ? 0 : existing?.byte_offset ?? 0
     const startLine = reset ? 0 : existing?.line_number ?? 0
-    const read = readJsonlEntries(source.jsonlPath, startOffset, startLine)
-    if (!reset && read.nextByteOffset === startOffset && read.entries.length === 0) {
+    let rowsWritten = 0
+    const read = await readJsonlEntryBatches(
+      source.jsonlPath,
+      { startByteOffset: startOffset, startLineNumber: startLine },
+      async (batch) => {
+        const rows = batch.entries.map((entry) => ({
+          ...entry.raw,
+          gateway_id: source.gatewayId,
+          date: source.date,
+          _partition: { gateway_id: source.gatewayId },
+          _ctvs_row_id: `${sourceId}:${epoch}:${entry.lineNumber}`,
+          _ctvs_source_id: sourceId,
+          _ctvs_source_epoch: epoch,
+          _ctvs_byte_offset: entry.byteOffset,
+          _ctvs_line_number: entry.lineNumber,
+        }))
+        await appendRowsToTable(location.tablePath, columns, rows)
+        rowsWritten += rows.length
+      }
+    )
+    if (!reset && read.nextByteOffset === startOffset && rowsWritten === 0) {
       pushSkipped(result, dataset, source, existing?.row_count ?? 0, partition.cachePath)
       stdout?.write(`fresh ${dataset}/${source.gatewayId}/${source.date}\n`)
       return
     }
-    const sourceId = location.sourceId
-    const rows = read.entries.map((entry) => ({
-      ...entry.raw,
-      gateway_id: source.gatewayId,
-      date: source.date,
-      _partition: { gateway_id: source.gatewayId },
-      _ctvs_row_id: `${sourceId}:${epoch}:${entry.lineNumber}`,
-      _ctvs_source_id: sourceId,
-      _ctvs_source_epoch: epoch,
-      _ctvs_byte_offset: entry.byteOffset,
-      _ctvs_line_number: entry.lineNumber,
-    }))
-    await appendRowsToTable(location.tablePath, columns, rows)
-    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rows.length
+    if (rowsWritten === 0) await appendRowsToTable(location.tablePath, columns, [])
+    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rowsWritten
     writeCacheCursor(location.cursorPath, {
       cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
       kind: 'builtin',
@@ -151,8 +159,8 @@ async function refreshOtlpSource(cacheDir, source, datasets, force, result, stdo
       schema_fingerprint: schemaFingerprint,
       refreshed_at: new Date().toISOString(),
     })
-    pushWritten(result, dataset, source, rows.length, location.cachePath)
-    stdout?.write(`wrote ${location.cachePath} (${rows.length} rows)\n`)
+    pushWritten(result, dataset, source, rowsWritten, location.cachePath)
+    stdout?.write(`wrote ${location.cachePath} (${rowsWritten} rows)\n`)
   } catch (err) {
     pushFailed(result, dataset, source, partition.cachePath, err)
   }
@@ -187,8 +195,8 @@ async function refreshProxySource(cacheDir, source, datasets, force, result, std
       ? nextBuiltinCacheLocation(cacheDir, dataset, source.gatewayId, source.date)
       : existingLocation(partition, existing)
     const epoch = reset ? epochFromTablePath(location.tablePath) : existing?.source_epoch ?? 0
-    const sourceId = location.sourceId
-    const read = readJsonlEntries(source.jsonlPath, 0, 0)
+    const { sourceId } = location
+    const read = await readJsonlEntryBatches(source.jsonlPath, { startByteOffset: 0, startLineNumber: 0 })
 
     const { seen, toolLookup } = await loadProxySeen(cacheDir, source.gatewayId, source.date, !reset)
     stdout?.write(`priorSeen proxy_messages/${source.gatewayId}/${source.date}: ${seen.size} messages, ${toolLookup.size} tool calls\n`)
@@ -212,11 +220,21 @@ async function refreshProxySource(cacheDir, source, datasets, force, result, std
         if (typeof exchangeId !== 'string') return null
         const events = streamEventsByExchange.get(exchangeId)
         if (!events) return null
-        return reconstructAssistantMessage(/** @type {import('../cli/stream-reconstruct.js').StreamEventRow[]} */ (events))
+        const streamEvents = /** @type {import('../cli/stream-reconstruct.js').StreamEventRow[]} */ (events)
+        return reconstructAssistantMessage(streamEvents)
       },
     })
+    let rowsWritten = 0
     /** @type {Record<string, unknown>[]} */
-    const rows = []
+    let rows = []
+    /** @returns {Promise<void>} */
+    async function flushRows() {
+      if (rows.length === 0) return
+      backfillToolNames(rows, toolLookup)
+      await appendRowsToTable(location.tablePath, columns, rows)
+      rowsWritten += rows.length
+      rows = []
+    }
     for await (const row of walked) {
       const messageId = typeof row.message_id === 'string' ? row.message_id : 'message'
       const partIndex = typeof row.part_index === 'number' ? row.part_index : 0
@@ -229,10 +247,11 @@ async function refreshProxySource(cacheDir, source, datasets, force, result, std
         _ctvs_byte_offset: 0,
         _ctvs_line_number: 0,
       })
+      if (rows.length >= 5_000) await flushRows()
     }
-    backfillToolNames(rows, toolLookup)
-    await appendRowsToTable(location.tablePath, columns, rows)
-    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rows.length
+    await flushRows()
+    if (rowsWritten === 0) await appendRowsToTable(location.tablePath, columns, [])
+    const rowCount = (reset ? 0 : existing?.row_count ?? 0) + rowsWritten
     writeCacheCursor(location.cursorPath, {
       cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
       kind: 'builtin',
@@ -252,8 +271,8 @@ async function refreshProxySource(cacheDir, source, datasets, force, result, std
       schema_fingerprint: schemaFingerprint,
       refreshed_at: new Date().toISOString(),
     })
-    pushWritten(result, dataset, source, rows.length, location.cachePath)
-    stdout?.write(`wrote ${location.cachePath} (${rows.length} rows)\n`)
+    pushWritten(result, dataset, source, rowsWritten, location.cachePath)
+    stdout?.write(`wrote ${location.cachePath} (${rowsWritten} rows)\n`)
   } catch (err) {
     pushFailed(result, dataset, source, partition.cachePath, err)
   }

@@ -9,9 +9,9 @@ import { GASCITY_MESSAGES_COLUMNS } from '../gascity/schema.js'
 
 /**
  * Bumped to 2 when the proxy dataset was replaced by `proxy_messages` so any
- * Parquet partition written under the old schema is treated as stale by the
- * freshness check (and refresh skips it rather than regenerating the
- * retired `proxy_exchanges` / `proxy_stream_events` layout).
+ * cache partition written under the old schema is treated as stale by the
+ * freshness check (and refresh skips it rather than regenerating the retired
+ * `proxy_exchanges` / `proxy_stream_events` layout).
  * Bumped to 3 when Claude local context (`cwd`, `git_branch`) was added to
  * `proxy_messages`.
  */

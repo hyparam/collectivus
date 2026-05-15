@@ -20,7 +20,7 @@ const EVENTS_TABLE = 'events'
 const SEGMENTS_TABLE = 'session_segments'
 
 const USAGE = `Usage:
-  ctvs init gascity [--cwd <path>] [--config <path|url>] [--parquet-dir <dir>] [--replace]
+  ctvs init gascity [--cwd <path>] [--config <path|url>] [--cache-dir <dir>] [--replace]
 
 Register canonical gascity recordings as ctvs query tables, and drop a project-local
 Claude Code skill that teaches agents how to use them.
@@ -30,7 +30,7 @@ The current directory must be a gascity workspace (contain a \`.gc/\` directory)
 Options:
   --cwd <path>           Gascity root (defaults to the current working directory)
   --config <path|url>    Collectivus config (default: ~/.hyp/collectivus.json)
-  --parquet-dir <dir>    Query-cache directory override
+  --cache-dir <dir>    Query-cache directory override
   --replace              Re-register and re-materialize existing collections
   --help, -h             Show this help`
 
@@ -54,7 +54,7 @@ export async function runGascityPreset(argv, hooks = {}) {
   const stderr = hooks.stderr ?? process.stderr
   const cwd0 = hooks.cwd ?? process.cwd()
 
-  /** @type {{ cwd: string, configPath: string, parquetDir?: string, replace: boolean }} */
+  /** @type {{ cwd: string, configPath: string, cacheDir?: string, replace: boolean }} */
   const opts = {
     cwd: cwd0,
     configPath: defaultConfigPath(),
@@ -91,10 +91,10 @@ export async function runGascityPreset(argv, hooks = {}) {
       opts.configPath = cfg
       continue
     }
-    const parquetDir = readValue('--parquet-dir')
-    if (parquetDir !== undefined) {
-      if (!parquetDir) { stderr.write('error: --parquet-dir requires a directory\n'); return 2 }
-      opts.parquetDir = parquetDir
+    const cacheDir = readValue('--cache-dir')
+    if (cacheDir !== undefined) {
+      if (!cacheDir) { stderr.write('error: --cache-dir requires a directory\n'); return 2 }
+      opts.cacheDir = cacheDir
       continue
     }
     stderr.write(`error: unknown argument: ${arg}\n\n${USAGE}\n`)
@@ -119,13 +119,13 @@ export async function runGascityPreset(argv, hooks = {}) {
 
   let paths
   try {
-    paths = resolveQueryPaths(config, opts.configPath, opts.parquetDir)
+    paths = resolveQueryPaths(config, opts.configPath, opts.cacheDir)
   } catch (err) {
     stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`)
     return 1
   }
-  if (!paths.parquetEnabled || !paths.parquetDir) {
-    stderr.write('error: query parquet cache is disabled; pass --parquet-dir explicitly\n')
+  if (!paths.cacheEnabled || !paths.cacheDir) {
+    stderr.write('error: query cache is disabled; pass --cache-dir explicitly\n')
     return 1
   }
 

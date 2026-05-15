@@ -161,7 +161,7 @@ ORDER BY source, idx;
 
 ## Freshness
 
-`session_segments` is glob-backed: new segment files only appear in the cache after a refresh. Run `ctvs query refresh <segment-file.jsonl>` for selected segment files, `ctvs query refresh --all session_segments` to pick up every matching segment, or use `--refresh always` on any query. Deleted segment files are pruned from the cache on the next `--all` refresh.
+`session_segments` is glob-backed: new segment files only appear in the cache after a refresh. Run `ctvs query refresh <segment-file.jsonl>` for selected segment files, `ctvs query refresh --all session_segments` to pick up every matching segment, or use `--refresh always` on any query. Deleted segment files remain queryable from their cache-only partitions.
 
 `events` is append-only single-file; mtime/size changes trigger re-materialization on refresh.
 
@@ -171,7 +171,7 @@ Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema s
 
 ## Refresh cost
 
-Refreshing isn't free. `events.jsonl` and the `session_segments/**/*.jsonl` files registered by `ctvs collect` can be large — gascity ships hundreds of decision/mutation tracepoints per agent per hour — and re-materializing the Parquet partitions reads every byte that changed since the last refresh. On a busy workspace, a full refresh of `session_segments` can take tens of seconds and write tens of megabytes.
+Refreshing isn't free. `events.jsonl` and the `session_segments/**/*.jsonl` files registered by `ctvs collect` can be large — gascity ships hundreds of decision/mutation tracepoints per agent per hour — and the query cache appends newly changed bytes since the last refresh. On a busy workspace, a full refresh of `session_segments` can still take tens of seconds and write tens of megabytes.
 
 Recommended workflow:
 

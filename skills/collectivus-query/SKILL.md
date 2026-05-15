@@ -5,7 +5,7 @@ description: Inspect local Collectivus recordings with the ctvs query CLI. Use w
 
 # Collectivus Query
 
-Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL recordings and an explicit local Parquet cache; it does not query S3.
+Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL recordings and an explicit local query cache; it does not query S3.
 
 ## Workflow
 
@@ -39,7 +39,7 @@ ctvs collect <file.jsonl> --name <name>
 ctvs collect --glob '<pattern>' --name <name>
 ```
 
-`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its Parquet cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`. Pass `--glob '<pattern>'` instead of a single path to back one logical table with many files; each matched file becomes its own cache partition and `_ctvs_source_path` tells you which file a row came from.
+`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its query cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`. Pass `--glob '<pattern>'` instead of a single path to back one logical table with many files; each matched file becomes its own cache partition and `_ctvs_source_path` tells you which file a row came from.
 
 ## Proxy conversation log model
 
@@ -107,7 +107,7 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 ## Guardrails
 
 - Do not assume the cache auto-refreshes. Query commands default to `--refresh never`, and stale partitions return data with a stderr warning rather than refreshing themselves.
-- Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated Parquet, and the user should be told before drawing conclusions.
+- Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated cache rows, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
 - Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and registered collection tables from `ctvs query catalog`.

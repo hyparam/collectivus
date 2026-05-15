@@ -48,8 +48,8 @@ Commands:
   status                         Inspect JSONL sources and query-cache freshness
   catalog                        List logical datasets and cached row counts
   schema <dataset>               Print the static logical schema
-  refresh <file.jsonl>...        Materialize selected JSONL source files into Parquet
-  refresh --all [dataset]        Materialize all matching JSONL into query-cache Parquet
+  refresh <file.jsonl>...        Materialize selected JSONL source files into the query cache
+  refresh --all [dataset]        Materialize all matching JSONL into the query cache
   sql <select-sql>               Run read-only SELECT SQL over logical datasets
   sample <dataset>               Show sample rows
   doctor                         Check query prerequisites
@@ -65,7 +65,7 @@ Commands:
 
 Shared options:
   --config <path|url>            Config path or URL (default: ~/.hyp/collectivus.json)
-  --parquet-dir <dir>            Query-cache directory
+  --cache-dir <dir>              Query-cache directory
   --from <timestamp>             Inclusive timestamp lower bound
   --to <timestamp>               Inclusive timestamp upper bound
   --since <duration>             Relative lower bound, e.g. 15m, 2h, 7d
@@ -132,7 +132,7 @@ export async function runQuery(argv, hooks = {}) {
   /** @type {QueryPaths} */
   let paths
   try {
-    paths = resolveQueryPaths(config, parsed.configPath, parsed.parquetDir)
+    paths = resolveQueryPaths(config, parsed.configPath, parsed.cacheDir)
   } catch (err) {
     stderr.write(`error: ${formatError(err)}\n`)
     return 1
@@ -186,7 +186,7 @@ export async function runQuery(argv, hooks = {}) {
  *   help: boolean,
  *   positionals: string[],
  *   configPath: string,
- *   parquetDir?: string,
+ *   cacheDir?: string,
  *   from?: string,
  *   to?: string,
  *   date?: string,
@@ -235,10 +235,10 @@ export function parseQueryArgs(argv) {
       out.configPath = configPath
       continue
     }
-    const parquetDir = readValue('--parquet-dir')
-    if (parquetDir !== undefined) {
-      if (!parquetDir) { out.error = '--parquet-dir requires a directory'; return out }
-      out.parquetDir = parquetDir
+    const cacheDir = readValue('--cache-dir')
+    if (cacheDir !== undefined) {
+      if (!cacheDir) { out.error = '--cache-dir requires a directory'; return out }
+      out.cacheDir = cacheDir
       continue
     }
     const from = readValue('--from')
@@ -354,7 +354,7 @@ function handleCatalog(paths, parsed, stdout) {
   })
   for (const collection of listCollections(paths.recordingRoot)) {
     const status = sourceRows.find((row) => row.dataset === collection.table)
-    const meta = paths.parquetDir ? readAnyCollectionMeta(paths.parquetDir, collection) : undefined
+    const meta = paths.cacheDir ? readAnyCollectionMeta(paths.cacheDir, collection) : undefined
     rows.push({
       dataset: collection.table,
       source_signal: 'collection',
@@ -389,7 +389,7 @@ function handleSchema(paths, parsed, stdout, stderr) {
     stdout.write(renderResult({ columns: ['name', 'type', 'nullable'], rows }, parsed.format))
     return 0
   }
-  if (!paths?.parquetDir) {
+  if (!paths?.cacheDir) {
     stderr.write(`error: unknown dataset "${raw}"\n`)
     return 2
   }
@@ -398,7 +398,7 @@ function handleSchema(paths, parsed, stdout, stderr) {
     stderr.write(`error: unknown dataset "${raw}"\n`)
     return 2
   }
-  const meta = readAnyCollectionMeta(paths.parquetDir, collection)
+  const meta = readAnyCollectionMeta(paths.cacheDir, collection)
   if (!meta) {
     stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed, undefined, { ...baseScope(parsed), datasets: [collection.table] })}\n`)
     return 1
@@ -421,8 +421,8 @@ function handleSchema(paths, parsed, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function handleRefresh(paths, parsed, stdout, stderr) {
-  if (!paths.parquetEnabled || !paths.parquetDir) {
-    stderr.write('error: query parquet cache is disabled; pass --parquet-dir to refresh explicitly\n')
+  if (!paths.cacheEnabled || !paths.cacheDir) {
+    stderr.write('error: query cache is disabled; pass --cache-dir to refresh explicitly\n')
     return 1
   }
   const targets = parsed.positionals.slice(1)
@@ -504,14 +504,14 @@ function handleDoctor(paths, parsed, stdout) {
   const rootExists = fs.existsSync(paths.recordingRoot)
   const scope = baseScope(parsed)
   const sources = allSourceCount(paths, scope)
-  const states = paths.parquetEnabled && paths.parquetDir
+  const states = paths.cacheEnabled && paths.cacheDir
     ? inspectAllCachePartitions(paths, scope)
     : []
   const unfresh = states.filter((state) => state.status !== 'fresh')
   const rows = [
     { check: 'config', status: 'ok', detail: paths.configPath },
     { check: 'recording_root', status: rootExists ? 'ok' : 'warn', detail: paths.recordingRoot },
-    { check: 'query_cache', status: paths.parquetEnabled ? 'ok' : 'warn', detail: paths.parquetDir ?? 'disabled' },
+    { check: 'query_cache', status: paths.cacheEnabled ? 'ok' : 'warn', detail: paths.cacheDir ?? 'disabled' },
     { check: 'source_partitions', status: 'ok', detail: String(sources) },
     { check: 'cache_freshness', status: unfresh.length === 0 ? 'ok' : 'warn', detail: `${unfresh.length} missing/stale partition(s)` },
   ]
@@ -794,7 +794,7 @@ async function executePrepared(paths, parsed, stdout, stderr, datasets, statemen
  * @returns {Promise<{ ok: true, warnings?: string[] } | { ok: false, message: string }>}
  */
 async function ensureCacheReady(paths, scope, parsed) {
-  // The gascity sink is the source of truth — the parquet cache is irrelevant
+  // The gascity sink is the source of truth — the query cache is irrelevant
   // for `gascity_messages`-only queries. Only block on the cache-disabled
   // setting when the query touches a dataset that actually needs it.
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
@@ -802,8 +802,8 @@ async function ensureCacheReady(paths, scope, parsed) {
     ? requestedDatasets.filter((dataset) => dataset !== 'gascity_messages')
     : QUERY_DATASETS.filter((dataset) => dataset !== 'gascity_messages')
   const needsCache = cacheBackedDatasets.length > 0
-  if (needsCache && (!paths.parquetEnabled || !paths.parquetDir)) {
-    return { ok: false, message: 'error: query parquet cache is disabled; pass --parquet-dir or set query.parquet.enabled: true' }
+  if (needsCache && (!paths.cacheEnabled || !paths.cacheDir)) {
+    return { ok: false, message: 'error: query cache is disabled; pass --cache-dir or set query.cache.enabled: true' }
   }
   if (parsed.refresh === 'always') {
     const result = await refreshAllCaches({ paths, scope, force: false })
@@ -861,7 +861,7 @@ function refreshCommand(parsed, states, scope) {
     if (datasets?.length === 1) parts.push(datasets[0])
   }
   if (parsed.configPath) parts.push('--config', shellQuote(parsed.configPath))
-  if (parsed.parquetDir) parts.push('--parquet-dir', shellQuote(parsed.parquetDir))
+  if (parsed.cacheDir) parts.push('--cache-dir', shellQuote(parsed.cacheDir))
   if (parsed.gatewayId) parts.push('--gateway-id', shellQuote(parsed.gatewayId))
   if (parsed.date) parts.push('--date', parsed.date)
   return parts.join(' ')
@@ -1096,7 +1096,7 @@ function statusRows(paths, scope) {
       continue
     }
     const sources = discoverSourceFiles(paths.recordingRoot, datasetScope)
-    const states = paths.parquetEnabled && paths.parquetDir
+    const states = paths.cacheEnabled && paths.cacheDir
       ? inspectCachePartitions(expectedCachePartitions(paths, datasetScope))
       : []
     rows.push({
@@ -1111,7 +1111,7 @@ function statusRows(paths, scope) {
   for (const collection of collectionTablesForQuery(paths, scope)) {
     const datasetScope = { ...scope, datasets: [collection.table] }
     const partitions = expectedCollectionPartitions(paths, datasetScope)
-    const states = paths.parquetEnabled && paths.parquetDir
+    const states = paths.cacheEnabled && paths.cacheDir
       ? inspectCollectionCachePartitions(partitions)
       : []
     rows.push({

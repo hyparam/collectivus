@@ -1,9 +1,9 @@
 # Collectivus Query CLI Reference
 
-`ctvs query` reads local Collectivus recordings. It materializes JSONL source files into a local Parquet cache under:
+`ctvs query` reads local Collectivus recordings. It materializes JSONL source files into a local query cache under:
 
 ```text
-<recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet
+<recording-root>/.collectivus-query/cache/datasets/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/cursor.json
 ```
 
 External JSONL collections registered with `ctvs collect <file.jsonl> --name <name>` are recorded in:
@@ -12,15 +12,15 @@ External JSONL collections registered with `ctvs collect <file.jsonl> --name <na
 <recording-root>/.collectivus-query/collections.json
 ```
 
-Their Parquet cache lives under `<recording-root>/.collectivus-query/parquet/collections/<table>/data.parquet`. Names are normalized for SQL, so `--name random-log` exposes table `random_log`.
+Their query cache lives under `<recording-root>/.collectivus-query/cache/collections/<table>/source=<hash>/cursor.json`, with rows stored in local Iceberg tables below each source partition. Names are normalized for SQL, so `--name random-log` exposes table `random_log`.
 
 The cache is explicit. Query commands do not refresh it unless `--refresh always` is passed.
 
 Freshness is asymmetric (since v1.7.0):
 
 - `fresh` — query proceeds silently.
-- `stale` (Parquet exists but may be outdated) — query proceeds and writes a `warning: querying stale data; N partition(s) outdated [...] — run '...' to update` line to stderr. Stdout is unchanged.
-- `missing` (no Parquet at all) — query exits with the exact `ctvs query refresh ...` command to run.
+- `stale` (cache exists but may be outdated) — query proceeds and writes a `warning: querying stale data; N partition(s) outdated [...] — run '...' to update` line to stderr. Stdout is unchanged.
+- `missing` (no cache table/cursor) — query exits with the exact `ctvs query refresh ...` command to run.
 
 Pass `--strict-freshness` to restore the pre-1.7 behavior where stale partitions are a hard error.
 
@@ -29,7 +29,7 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 ## Shared Options
 
 - `--config <path|url>`: Collectivus config. Defaults to `~/.hyp/collectivus.json`.
-- `--parquet-dir <dir>`: Override the query cache directory.
+- `--cache-dir <dir>`: Override the query cache directory.
 - `--from <timestamp>` / `--to <timestamp>`: Inclusive timestamp bounds.
 - `--since <duration>`: Relative lower bound such as `15m`, `2h`, or `7d`.
 - `--date <YYYY-MM-DD>`: Restrict to one UTC date partition.
@@ -48,8 +48,8 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `ctvs query status`: Inspect source partitions and cache freshness.
 - `ctvs query catalog`: List logical datasets, columns, source partitions, and cached row counts.
 - `ctvs query schema <dataset>`: Print static schema for a logical dataset.
-- `ctvs query refresh <file.jsonl>... [--force]`: Materialize selected JSONL source files into query-cache Parquet.
-- `ctvs query refresh --all [dataset] [--force]`: Materialize all matching JSONL source files into query-cache Parquet.
+- `ctvs query refresh <file.jsonl>... [--force]`: Materialize selected JSONL source files into the query cache.
+- `ctvs query refresh --all [dataset] [--force]`: Materialize all matching JSONL source files into the query cache.
 - `ctvs query sample <dataset>`: Show sample rows.
 - `ctvs query sql <select-sql>`: Run read-only SQL over logical datasets.
 - `ctvs query logs [count|tail]`: List logs, count logs, or tail live JSONL without requiring cache.
@@ -71,9 +71,9 @@ ctvs collect --glob '/path/to/segments/**/*.jsonl' --name segments
 ctvs query sql "select * from random_log" --format json
 ```
 
-`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `ctvs query refresh <file.jsonl>` refreshes selected files. Use `--refresh always` to refresh before running the query.
+`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the query cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `ctvs query refresh <file.jsonl>` refreshes selected files. Use `--refresh always` to refresh before running the query.
 
-With `--glob`, one logical table is backed by many source files: each matched file becomes its own cache partition under `.collectivus-query/parquet/collections/<table>/source=<hash>/data.parquet`, and only files whose mtime/size changed re-materialize on refresh. Files that no longer match the glob are pruned from the cache on the next refresh. Inside SQL, use `_ctvs_source_path` to see which file a row came from.
+With `--glob`, one logical table is backed by many source files: each matched file becomes its own cache partition under `.collectivus-query/cache/collections/<table>/source=<hash>/cursor.json`, and refresh appends from each file's recorded cursor when possible. Files that no longer match the glob remain queryable as cache-only partitions. Inside SQL, use `_ctvs_source_path` to see which file a row came from.
 
 Collection tables always include `_ctvs_source_path`, `_ctvs_line_number`, and `_ctvs_raw`, plus inferred top-level JSON fields. Use `--timestamp-column <field>` when registering a file if `--from`, `--to`, `--since`, or `--date` should use a specific field.
 
@@ -82,7 +82,7 @@ Collection tables always include `_ctvs_source_path`, `_ctvs_line_number`, and `
 - `logs`: OTLP log records. Common columns include `gateway_id`, `date`, `timestamp`, `observedTimestamp`, `severityNumber`, `severityText`, `serviceName`, `body`, `traceId`, `spanId`, `resource`, `scope`, and `attributes`.
 - `traces`: OTLP spans. Common columns include `gateway_id`, `date`, `traceId`, `spanId`, `parentSpanId`, `name`, `kind`, `startTimestamp`, `endTimestamp`, `durationMs`, `status`, `serviceName`, `resource`, `scope`, and `attributes`.
 - `metrics`: OTLP metric points. Common columns include `gateway_id`, `date`, `metricName`, `metricType`, `timestamp`, `startTimestamp`, `serviceName`, `value`, `valueInt`, `count`, `sum`, `unit`, `resource`, `scope`, and `attributes`.
-- `proxy_messages`: One row per LLM proxy content part (text block, tool call, tool result, etc.), globally deduped by content-derived `message_id`. See **proxy_messages columns** below for the full 26-column schema; `gateway_id` and `date` are added as partition columns on the on-disk Parquet.
+- `proxy_messages`: One row per LLM proxy content part (text block, tool call, tool result, etc.), globally deduped by content-derived `message_id`. See **proxy_messages columns** below for the full 26-column schema; `gateway_id` and `date` are added as partition columns in the query cache.
 - `gascity_messages`: One row per content block from gascity-captured agent sessions (text, thinking, tool_use, tool_result, attachment). Captured by the `ctvs gascity` supervisor source — agent-attributed (`gascity_template` / `gascity_rig` / `gascity_alias`) and includes per-frame token usage with cache breakdown. Always fresh: the daemon writes Parquet directly to `~/.collectivus/sink/gascity_messages/date=<YYYY-MM-DD>/city=<name>/` (no JSONL stage, no `.meta.json` sidecar). The constant `gateway_id = 'gascity-scribe'` tags the source for cross-source UNIONs with `proxy_messages`. Run `ctvs query schema gascity_messages --format markdown` for the full 47-column schema.
 
 Run `ctvs query schema <dataset> --format json` for the exact columns in the installed version.
@@ -120,7 +120,7 @@ Grain is one row per content part. Rows are deduplicated by `message_id` so a si
 | 25 | `status` | JSON | yes | Sparse: `tool_status` on tool_result, `finish_reason` on the last assistant part, `error_code` / `error_message` on error blocks | `null` when no key applies. |
 | 26 | `attributes` | JSON | yes | `request` settings (`max_tokens`, `thinking`, `output_config`, `context_management`, `stream`), `usage` (assistant only — `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`), `timing.latency_ms`, `client.claude_version`, `provider_raw.metadata` | `null` when no key applies. |
 
-The on-disk Parquet additionally carries `gateway_id` (STRING, not null) as the leading column and `date` (STRING, not null) at the end. Both are partition keys; `date` is derived from `message_created_at` in UTC.
+The query-cache table additionally carries `gateway_id` (STRING, not null) as the leading column and `date` (STRING, not null) at the end. Both are partition keys; `date` is derived from `message_created_at` in UTC.
 
 ## Example SQL
 

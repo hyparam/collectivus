@@ -13,6 +13,8 @@ import {
   expectedCollectionPartitions,
   readCollectionCacheMeta,
 } from './collections.js'
+import { readCacheCursor } from './iceberg/cursor.js'
+import { readRowsFromCursor } from './iceberg/store.js'
 
 /**
  * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
@@ -94,7 +96,7 @@ export function buildTables(paths, scope) {
   /** @type {Record<string, AsyncDataSource>} */
   const tables = {}
   for (const dataset of builtinDatasets) {
-    tables[dataset] = parquetDataSource(dataset, byDataset[dataset] ?? [], scope)
+    tables[dataset] = cacheDataSource(dataset, byDataset[dataset] ?? [], scope)
   }
   /** @type {Record<string, import('./types.js').CollectionCachePartition[]>} */
   const byCollection = {}
@@ -115,7 +117,7 @@ export function buildTables(paths, scope) {
  * @param {QueryScope} scope
  * @returns {AsyncDataSource}
  */
-export function parquetDataSource(dataset, partitions, scope) {
+export function cacheDataSource(dataset, partitions, scope) {
   const columns = columnsForDataset(dataset).map((column) => column.name)
   // Gascity partitions don't carry a row-count sidecar (the daemon writes
   // Parquet directly without `.meta.json`). Skipping the hint forces
@@ -172,11 +174,20 @@ async function* scanRows(dataset, partitions, scope, options) {
   const requestedColumns = options.columns && options.columns.length > 0
     ? options.columns
     : columnsForDataset(dataset).map((column) => column.name)
+  /** @type {Set<string>} */
+  const seenRowIds = new Set()
   for (const partition of partitions) {
     if (options.signal?.aborted) return
-    const rows = await readParquetRows(partition)
+    const rows = dataset === 'gascity_messages'
+      ? await readGascityParquetRows(partition)
+      : await readIcebergRows(partition)
     for (const row of rows) {
       if (options.signal?.aborted) return
+      const rowId = row._ctvs_row_id
+      if (typeof rowId === 'string') {
+        if (seenRowIds.has(rowId)) continue
+        seenRowIds.add(rowId)
+      }
       const logical = normalizeLogicalRow(row, partition)
       if (!rowMatchesScope(dataset, logical, scope)) continue
       yield asyncRow(projectRow(logical, requestedColumns), requestedColumns)
@@ -195,12 +206,19 @@ async function* scanCollectionRows(table, partitions, scope, options) {
   const requestedColumns = options.columns && options.columns.length > 0
     ? options.columns
     : collectionColumns(partitions)
+  /** @type {Set<string>} */
+  const seenRowIds = new Set()
   for (const partition of partitions) {
     if (options.signal?.aborted) return
-    const meta = readCollectionCacheMeta(partition.metaPath)
-    const rows = await readParquetRows(partition)
+    const meta = readCollectionCacheMeta(partition.cursorPath)
+    const rows = await readIcebergRows(partition)
     for (const row of rows) {
       if (options.signal?.aborted) return
+      const rowId = row._ctvs_row_id
+      if (typeof rowId === 'string') {
+        if (seenRowIds.has(rowId)) continue
+        seenRowIds.add(rowId)
+      }
       const logical = normalizePlainRow(row)
       if (!collectionRowMatchesScope(table, logical, scope, meta)) continue
       yield asyncRow(projectRow(logical, requestedColumns), requestedColumns)
@@ -209,13 +227,23 @@ async function* scanCollectionRows(table, partitions, scope, options) {
 }
 
 /**
- * @param {{ parquetPath: string }} partition
+ * @param {CachePartition} partition
  * @returns {Promise<Record<string, unknown>[]>}
  */
-async function readParquetRows(partition) {
-  const buf = fs.readFileSync(partition.parquetPath)
+async function readGascityParquetRows(partition) {
+  const buf = fs.readFileSync(partition.cachePath)
   const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
   return parquetReadObjects({ file, compressors })
+}
+
+/**
+ * @param {{ cursorPath: string }} partition
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function readIcebergRows(partition) {
+  const cursor = readCacheCursor(partition.cursorPath)
+  if (!cursor) return []
+  return readRowsFromCursor(cursor)
 }
 
 /**
@@ -357,13 +385,8 @@ function timestampMs(value) {
  * @returns {number}
  */
 function readRowCountHint(partition) {
-  try {
-    const raw = fs.readFileSync(partition.metaPath, 'utf8')
-    const parsed = JSON.parse(raw)
-    return typeof parsed.row_count === 'number' ? parsed.row_count : 0
-  } catch {
-    return 0
-  }
+  const cursor = readCacheCursor(partition.cursorPath)
+  return cursor?.kind === 'builtin' ? cursor.row_count : 0
 }
 
 /**
@@ -371,7 +394,7 @@ function readRowCountHint(partition) {
  * @returns {number}
  */
 function readCollectionRowCountHint(partition) {
-  const meta = readCollectionCacheMeta(partition.metaPath)
+  const meta = readCollectionCacheMeta(partition.cursorPath)
   return meta?.row_count ?? 0
 }
 
@@ -380,11 +403,14 @@ function readCollectionRowCountHint(partition) {
  * @returns {string[]}
  */
 function collectionColumns(partitions) {
+  /** @type {Set<string>} */
+  const columns = new Set(['_ctvs_source_path', '_ctvs_line_number', '_ctvs_raw'])
   for (const partition of partitions) {
-    const meta = readCollectionCacheMeta(partition.metaPath)
-    if (meta) return meta.columns.map((column) => column.name)
+    const meta = readCollectionCacheMeta(partition.cursorPath)
+    if (!meta) continue
+    for (const column of meta.columns) columns.add(column.name)
   }
-  return ['_ctvs_source_path', '_ctvs_line_number', '_ctvs_raw']
+  return [...columns]
 }
 
 /**

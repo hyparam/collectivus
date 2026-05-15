@@ -206,7 +206,7 @@ async function runSingleUserFlow(args) {
   const config = {
     version: 1,
     sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }
 
   if (hasProxy) {
@@ -790,9 +790,9 @@ function printConfigSummary(stdout, config) {
     const time = u.time ?? DEFAULT_UPLOAD_TIME
     stdout.write(`  upload: s3://${u.bucket}/${prefix} daily at ${time} UTC\n`)
   }
-  if (config.query?.parquet) {
-    const enabled = config.query.parquet.enabled !== false
-    stdout.write(`  query:  parquet cache ${enabled ? 'enabled' : 'disabled'}\n`)
+  if (config.query?.cache) {
+    const enabled = config.query.cache.enabled !== false
+    stdout.write(`  query:  query cache ${enabled ? 'enabled' : 'disabled'}\n`)
   }
 }
 
@@ -936,7 +936,7 @@ async function runServerFlow(args) {
     version: 1,
     role: 'server',
     server: serverBlock,
-    query: { parquet: { enabled: true } },
+    query: { cache: { enabled: true } },
   }
 
   // Optional upload. Central server mode drains the multi-tenant ingest spool to S3.

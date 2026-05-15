@@ -72,6 +72,7 @@ describe('runInit', function() {
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        '', // default source selection (proxy)
         '', // accept default sink (resolves to override below)
         cfgPath, // save path
         'y', // confirm write
@@ -121,7 +122,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt } = scriptedPrompt([
-        '1', '', cfgPath, 'y', 'n',
+        '1', '', '', cfgPath, 'y', 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -135,6 +136,88 @@ describe('runInit', function() {
       expect(function() { loadConfig(cfgPath) }).not.toThrow()
     })
 
+    it('supports selecting all capture sources and auto-adds discovered gas cities', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'collectivus.json')
+      const sinkDir = path.join(tmpDir, 'sink')
+      const citiesRoot = path.join(tmpDir, 'cities')
+      const cityDir = path.join(citiesRoot, 'mycity')
+      fs.mkdirSync(cityDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(cityDir, 'city.toml'),
+        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
+        'utf8'
+      )
+      const { prompt, asked } = scriptedPrompt([
+        '1', // standalone
+        'all', // proxy + gascity + otel
+        '', // default sink
+        citiesRoot, // scan for gas cities
+        '', // add discovered city
+        '', // add no more cities
+        '', // default OTLP listen
+        cfgPath,
+        'y',
+        'n', // skip daemon
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultSinkDir: sinkDir,
+        defaultConfigPath: absentDefaultCfg,
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
+      expect(written.otel).toEqual({ listen: '127.0.0.1:4318' })
+      expect(asked).toContain('Enable sources [1]: ')
+      expect(stdout.value()).toMatch(/Discovered gas city supervisors/)
+    })
+
+    it('supports a gascity-only source without asking to attach Claude Code', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gascity.json')
+      const cityDir = path.join(tmpDir, 'mycity')
+      fs.mkdirSync(cityDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(cityDir, 'city.toml'),
+        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
+        'utf8'
+      )
+      const { prompt, asked } = scriptedPrompt([
+        '1', // standalone
+        '2', // gascity only
+        '', // default sink
+        cityDir,
+        '', // add discovered city
+        '', // add no more cities
+        cfgPath,
+        'y',
+        'y', // install daemon
+      ])
+      /** @type {string[][]} */
+      const installCalls = []
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
+        defaultConfigPath: absentDefaultCfg,
+        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.proxy).toBeUndefined()
+      expect(written.otel).toBeUndefined()
+      expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
+      expect(installCalls).toEqual([['--config', cfgPath, '--no']])
+      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
+    })
+
     it('defaults the save path to ~/.hyp/collectivus.json and creates the parent dir', async function() {
       const stdout = memo()
       const stderr = memo()
@@ -142,6 +225,7 @@ describe('runInit', function() {
       const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        '', // default source selection (proxy)
         '', // default sink
         '', // accept default save path
         'y', // confirm write
@@ -164,7 +248,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const { prompt } = scriptedPrompt([
-        '1', '', cfgPath, 'y', // single / default sink / save / confirm
+        '1', '', '', cfgPath, 'y', // single / default sources / sink / save / confirm
         'y', // install daemon
         'y', // attach Claude Code
       ])
@@ -187,7 +271,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', '', cfgPath, 'y',
+        '1', '', '', cfgPath, 'y',
         'y', // install daemon
         'n', // skip Claude Code
       ])
@@ -210,7 +294,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', cfgPath, 'y',
+        '1', '', '', cfgPath, 'y',
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -231,7 +315,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', '', cfgPath, 'n',
+        '1', '', '', cfgPath, 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -249,7 +333,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', cfgPath, 'y',
+        '1', '', '', cfgPath, 'y',
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -276,7 +360,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
         'oops', '7', '', // two bad answers, then accept default (1 = standalone)
-        '', cfgPath, 'y', 'n',
+        '', '', cfgPath, 'y', 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -487,6 +571,7 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '2', // reject reuse
         '1', // standalone
+        '', // default source selection (proxy)
         '', // default sink
         newCfgPath, // save to a new path
         'y', // confirm write
@@ -505,7 +590,7 @@ describe('runInit', function() {
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
     })
 
-    it('reusing an otel-only config skips the daemon prompt', async function() {
+    it('reusing an otel-only config offers the daemon prompt without Claude Code attach', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'existing.json')
@@ -517,6 +602,7 @@ describe('runInit', function() {
       }
       const { prompt, asked } = scriptedPrompt([
         '1', // reuse explicitly
+        'n', // skip daemon
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -526,7 +612,8 @@ describe('runInit', function() {
         readConfig() { return existing },
       })
       expect(code).toBe(0)
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
       expect(stdout.value()).toMatch(/Next steps:/)
     })
 

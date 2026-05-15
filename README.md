@@ -21,7 +21,7 @@ stay on this machine.
   per content block with agent identity and token usage.
 - **Application telemetry**: OTLP traces, metrics, and logs over HTTP,
   normalized to JSONL by signal and service.
-- **Local query**: Parquet-backed `ctvs query` commands and SQL over
+- **Local query**: Iceberg-backed `ctvs query` commands and SQL over
   `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and
   registered JSONL collections.
 - **Optional operations path**: export to local Parquet, archive daily
@@ -129,7 +129,7 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
     "redact_headers": ["authorization", "x-api-key", "anthropic-api-key", "cookie", "set-cookie"]
   },
   "sink": { "type": "file", "dir": "./collectivus-data" },
-  "query": { "parquet": { "enabled": true } }
+  "query": { "cache": { "enabled": true } }
 }
 ```
 
@@ -141,7 +141,7 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 | `sink`    | Root directory for Standalone JSONL recordings. Proxy rows land under `<sink.dir>/<gateway_id>/proxy/`; OTLP rows land under `<sink.dir>/<gateway_id>/<signal>/`. Required when `otel` or `proxy` is set in Standalone mode. Accepted but unused in Gateway mode. |
 | `central_server` | Gateway-mode Central server URL, identity settings, config poll interval, and optional `outbox_dir`. Gateway rows are first fsynced to this durable local outbox, then shipped to Central ingest. |
 | `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
-| `query`   | Optional. Configures the local `ctvs query` Parquet cache. `query.parquet.enabled` defaults to `true`; `query.parquet.dir` defaults to `<recording-root>/.collectivus-query/parquet`. |
+| `query`   | Optional. Configures the local `ctvs query` query cache. `query.cache.enabled` defaults to `true`; `query.cache.dir` defaults to `<recording-root>/.collectivus-query/cache`. |
 
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
@@ -268,7 +268,7 @@ and [provider fields](https://developers.openai.com/codex/config-reference#model
 ## Local query
 
 `ctvs query` reads local recordings only. It never contacts S3 and it does not
-auto-refresh its Parquet cache unless you ask for that explicitly.
+auto-refresh its query cache unless you ask for that explicitly.
 
 ```bash
 ctvs query refresh /path/to/gw1/logs/2026-05-11.jsonl --config collectivus.json
@@ -283,17 +283,19 @@ ctvs collect --glob '.gc/runtime/**/*.jsonl' --name session-segments --config co
 ctvs query sql "select * from random_log" --config collectivus.json
 ```
 
-Cache files are written under
-`<recording-root>/.collectivus-query/parquet/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/data.parquet`
-with `data.parquet.meta.json` sidecars.
+Cache cursors are written under
+`<recording-root>/.collectivus-query/cache/datasets/<dataset>/gateway_id=<id>/date=<YYYY-MM-DD>/cursor.json`.
+Rows live in local Iceberg tables under the same partition directory. Refreshes
+append from the last recorded JSONL cursor when possible; truncation, rewrite,
+or schema drift starts a new source epoch.
 
 Freshness is treated asymmetrically (since v1.7.0):
 
 | Partition state | Behavior |
 | --- | --- |
 | `fresh` | Query proceeds silently. |
-| `stale` (Parquet exists, may be outdated) | Query proceeds; a `warning: querying stale data; …` line is written to stderr. Stdout is unchanged. |
-| `missing` (no Parquet at all) | Query exits with the exact file-targeted `ctvs query refresh …` command to run when the source file is known. |
+| `stale` (cache exists, may be outdated) | Query proceeds; a `warning: querying stale data; …` line is written to stderr. Stdout is unchanged. |
+| `missing` (no cache table/cursor) | Query exits with the exact file-targeted `ctvs query refresh …` command to run when the source file is known. |
 
 Use `ctvs query refresh <file.jsonl>` to refresh selected source files, or
 `ctvs query refresh --all [dataset]` when you explicitly want the broader
@@ -308,7 +310,7 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; `ctvs collect --glob <pattern> --name <name>` backs one table with many JSONL files. Names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; `ctvs collect --glob '<pattern>' --name <name>` backs one table with many source files. Names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. Deleted glob sources remain queryable from their cache-only partitions until the collection is removed. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
 
 ### Conversation log model
 
@@ -617,7 +619,7 @@ supported in this build.
 | `ctvs detach [--client claude\|codex\|all]` | Revert Claude Code and/or Codex without uninstalling the daemon |
 | `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
-| `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
+| `ctvs query <command> [...]` | Query local recordings through the explicit query cache |
 | `ctvs collect <file.jsonl>\|--glob <pattern> --name <name>` | Register external JSONL as a dynamic query table |
 | `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
 

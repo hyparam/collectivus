@@ -1,11 +1,13 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import readline from 'node:readline'
 import { QUERY_CACHE_SCHEMA_VERSION, isQueryDataset } from './schema.js'
+import { readCacheCursor, stableFingerprint, writeCacheCursor } from './iceberg/cursor.js'
+import { readJsonlEntries } from './iceberg/jsonl.js'
+import { collectionColumnsToSpecs } from './iceberg/schema.js'
+import { appendRowsToTable, queryCacheTableExists, queryCacheTableUrl } from './iceberg/store.js'
 
 /**
- * @import { ColumnSource } from 'hyparquet-writer'
  * @import {
  *   CollectionCacheMeta,
  *   CollectionCachePartition,
@@ -16,6 +18,7 @@ import { QUERY_CACHE_SCHEMA_VERSION, isQueryDataset } from './schema.js'
  *   QueryScope,
  *   RefreshResult,
  * } from './types.js'
+ * @import { CollectionCacheCursor, JsonlEntry } from './iceberg/types.d.ts'
  */
 
 const MANIFEST_VERSION = 2
@@ -34,18 +37,9 @@ const RESERVED_SQL_WORDS = new Set([
 ])
 
 const TIMESTAMP_CANDIDATES = new Set([
-  'timestamp',
-  'time',
-  'ts',
-  'date',
-  'datetime',
-  'created_at',
-  'createdat',
-  'created',
-  'created_time',
-  'createdtime',
-  'observed_timestamp',
-  'observedtimestamp',
+  'timestamp', 'time', 'ts', 'date', 'datetime', 'created_at',
+  'createdat', 'created', 'created_time', 'createdtime',
+  'observed_timestamp', 'observedtimestamp',
 ])
 
 /**
@@ -57,30 +51,22 @@ export function collectionsManifestPath(recordingRoot) {
 }
 
 /**
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {string} table
  * @returns {string}
  */
-export function collectionTableDir(parquetDir, table) {
-  return path.join(parquetDir, 'collections', table)
+export function collectionTableDir(cacheDir, table) {
+  return path.join(cacheDir, 'collections', table)
 }
 
 /**
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {string} table
+ * @param {string} absSourcePath
  * @returns {string}
  */
-export function collectionParquetPath(parquetDir, table) {
-  return path.join(collectionTableDir(parquetDir, table), 'data.parquet')
-}
-
-/**
- * @param {string} parquetDir
- * @param {string} table
- * @returns {string}
- */
-export function collectionMetaPath(parquetDir, table) {
-  return `${collectionParquetPath(parquetDir, table)}.meta.json`
+function collectionSourceDir(cacheDir, table, absSourcePath) {
+  return path.join(collectionTableDir(cacheDir, table), `source=${collectionPartitionKey(absSourcePath)}`)
 }
 
 /**
@@ -89,16 +75,6 @@ export function collectionMetaPath(parquetDir, table) {
  */
 function collectionPartitionKey(absSourcePath) {
   return crypto.createHash('sha256').update(absSourcePath).digest('hex').slice(0, 12)
-}
-
-/**
- * @param {string} parquetDir
- * @param {string} table
- * @param {string} absSourcePath
- * @returns {string}
- */
-function collectionGlobParquetPath(parquetDir, table, absSourcePath) {
-  return path.join(collectionTableDir(parquetDir, table), `source=${collectionPartitionKey(absSourcePath)}`, 'data.parquet')
 }
 
 /**
@@ -135,20 +111,17 @@ export function readCollectionsManifest(recordingRoot) {
   try {
     raw = fs.readFileSync(manifestPath, 'utf8')
   } catch (err) {
-    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
-      return emptyManifest()
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return emptyManifest()
+    throw err
+  }
+  try {
+    return normalizeManifest(JSON.parse(raw), manifestPath)
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new Error(`collection manifest ${manifestPath} is not valid JSON: ${formatError(err)}`)
     }
     throw err
   }
-
-  /** @type {unknown} */
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch (err) {
-    throw new Error(`collection manifest ${manifestPath} is not valid JSON: ${formatError(err)}`)
-  }
-  return normalizeManifest(parsed, manifestPath)
 }
 
 /**
@@ -207,14 +180,10 @@ export function registerCollection(args) {
   const { recordingRoot, name, timestampColumn, replace = false } = args
   const hasPath = typeof args.filePath === 'string' && args.filePath.length > 0
   const hasGlob = typeof args.glob === 'string' && args.glob.length > 0
-  if (hasPath === hasGlob) {
-    throw new Error('registerCollection requires exactly one of filePath or glob')
-  }
+  if (hasPath === hasGlob) throw new Error('registerCollection requires exactly one of filePath or glob')
 
   const table = normalizeTableName(name)
-  if (isQueryDataset(table)) {
-    throw new Error(`collection table "${table}" conflicts with a built-in query dataset`)
-  }
+  if (isQueryDataset(table)) throw new Error(`collection table "${table}" conflicts with a built-in query dataset`)
 
   /** @type {string | undefined} */
   let sourcePath
@@ -223,9 +192,7 @@ export function registerCollection(args) {
   if (hasPath) {
     sourcePath = path.resolve(/** @type {string} */ (args.filePath))
     const stat = safeStat(sourcePath)
-    if (!stat || !stat.isFile()) {
-      throw new Error(`JSONL file not found: ${sourcePath}`)
-    }
+    if (!stat || !stat.isFile()) throw new Error(`JSONL file not found: ${sourcePath}`)
   } else {
     sourceGlob = path.isAbsolute(/** @type {string} */ (args.glob))
       ? /** @type {string} */ (args.glob)
@@ -234,12 +201,9 @@ export function registerCollection(args) {
 
   const manifest = readCollectionsManifest(recordingRoot)
   const existing = manifest.collections[table]
-  if (existing && !replace) {
-    throw new Error(`collection "${table}" already exists; pass --replace to update it`)
-  }
+  if (existing && !replace) throw new Error(`collection "${table}" already exists; pass --replace to update it`)
 
   const now = new Date().toISOString()
-  /** @type {JsonlCollection} */
   const collection = {
     name,
     table,
@@ -274,61 +238,56 @@ export function removeCollection(recordingRoot, nameOrTable) {
  * @returns {CollectionCachePartition[]}
  */
 export function expectedCollectionPartitions(paths, scope) {
-  if (!paths.parquetDir) return []
+  if (!paths.cacheDir) return []
   const manifest = readCollectionsManifest(paths.recordingRoot)
   const wanted = collectionTablesForScope(manifest, scope)
-  const { parquetDir } = paths
   const sourcePaths = sourcePathFilter(scope)
-  const partitions = wanted.flatMap((collection) => collectionPartitionsFor(parquetDir, collection))
+  const partitions = wanted.flatMap((collection) => collectionPartitionsFor(paths.cacheDir, collection))
   if (!sourcePaths) return partitions
   return partitions.filter((partition) => sourcePaths.has(path.resolve(partition.jsonlPath)))
 }
 
 /**
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {JsonlCollection} collection
  * @returns {CollectionCachePartition[]}
  */
-export function collectionPartitionsFor(parquetDir, collection) {
+export function collectionPartitionsFor(cacheDir, collection) {
+  /** @type {Set<string>} */
+  const paths = new Set()
   if (typeof collection.source_glob === 'string') {
-    const matches = resolveGlobMatches(collection.source_glob)
-    if (matches.length === 0) return []
-    return matches.map((absPath) => buildPartition(parquetDir, collection, absPath, true))
+    for (const match of resolveGlobMatches(collection.source_glob)) paths.add(match)
+    for (const cursor of listCollectionCursors(cacheDir, collection)) paths.add(path.resolve(cursor.source_path))
+  } else if (typeof collection.source_path === 'string') {
+    paths.add(path.resolve(collection.source_path))
+    for (const cursor of listCollectionCursors(cacheDir, collection)) paths.add(path.resolve(cursor.source_path))
   }
-  if (typeof collection.source_path === 'string') {
-    return [buildPartition(parquetDir, collection, collection.source_path, false)]
-  }
-  return []
+  return [...paths].sort().map((absPath) => buildPartition(cacheDir, collection, absPath))
 }
 
 /**
- * Legacy single-partition entry point retained for back-compat with internal
- * call sites (e.g. tests). New code should use `collectionPartitionsFor`.
- *
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {JsonlCollection} collection
  * @returns {CollectionCachePartition}
  */
-export function collectionPartitionFor(parquetDir, collection) {
-  const partitions = collectionPartitionsFor(parquetDir, collection)
-  if (partitions.length === 0) {
-    throw new Error(`collection "${collection.table}" has no resolvable source partitions`)
-  }
+export function collectionPartitionFor(cacheDir, collection) {
+  const partitions = collectionPartitionsFor(cacheDir, collection)
+  if (partitions.length === 0) throw new Error(`collection "${collection.table}" has no resolvable source partitions`)
   return partitions[0]
 }
 
 /**
- * @param {string} parquetDir
+ * @param {string} cacheDir
  * @param {JsonlCollection} collection
  * @param {string} absSourcePath
- * @param {boolean} globMode
  * @returns {CollectionCachePartition}
  */
-function buildPartition(parquetDir, collection, absSourcePath, globMode) {
+function buildPartition(cacheDir, collection, absSourcePath) {
+  const sourceDir = collectionSourceDir(cacheDir, collection.table, absSourcePath)
+  const cursorPath = path.join(sourceDir, 'cursor.json')
+  const cursor = readCollectionCursor(cursorPath)
+  const tablePath = cursor?.table_path ?? path.join(sourceDir, 'epoch=0')
   const stat = safeStat(absSourcePath)
-  const parquetPath = globMode
-    ? collectionGlobParquetPath(parquetDir, collection.table, absSourcePath)
-    : collectionParquetPath(parquetDir, collection.table)
   return {
     kind: 'collection',
     dataset: collection.table,
@@ -336,24 +295,252 @@ function buildPartition(parquetDir, collection, absSourcePath, globMode) {
     collection,
     jsonlPath: absSourcePath,
     sourceExists: Boolean(stat?.isFile()),
-    sourceSize: stat?.isFile() ? stat.size : -1,
-    sourceMtimeMs: stat?.isFile() ? stat.mtimeMs : -1,
-    parquetPath,
-    metaPath: `${parquetPath}.meta.json`,
+    sourceSize: stat?.isFile() ? stat.size : cursor?.source_size ?? -1,
+    sourceMtimeMs: stat?.isFile() ? stat.mtimeMs : cursor?.source_mtime_ms ?? -1,
+    cachePath: sourceDir,
+    cursorPath,
+    tablePath,
+    tableUrl: cursor?.table_url ?? queryCacheTableUrl(tablePath),
   }
 }
 
 /**
- * Resolve a glob pattern to a sorted, deduplicated list of absolute file
- * paths. Empty list when nothing matches or the pattern's root does not
- * exist. Errors during traversal are swallowed — the source is considered
- * empty rather than refusing to query.
- *
- * Supports `**` (any depth, including zero), `*` (anything except `/`),
- * `?` (single char except `/`), and literal segments. Anchored at the
- * longest non-glob prefix of the pattern. Rolled by hand so we don't
- * depend on Node 24's `fs.globSync`.
- *
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @returns {JsonlCollection[]}
+ */
+export function collectionTablesForQuery(paths, scope) {
+  const manifest = readCollectionsManifest(paths.recordingRoot)
+  return collectionTablesForScope(manifest, scope)
+}
+
+/**
+ * @param {CollectionCachePartition} partition
+ * @returns {{ partition: CollectionCachePartition, status: 'fresh' | 'missing' | 'stale', meta?: CollectionCacheMeta, reason?: string }}
+ */
+export function inspectCollectionCachePartition(partition) {
+  const cursor = readCollectionCursor(partition.cursorPath)
+  if (!cursor) return { partition, status: 'missing', reason: 'cache cursor is missing' }
+  const reason = collectionCursorIdentityReason(partition, cursor)
+  if (reason) return { partition, status: 'stale', meta: cursorToMeta(cursor), reason }
+  if (!queryCacheTableExists(cursor.table_path)) {
+    return { partition, status: 'stale', meta: cursorToMeta(cursor), reason: 'cache table is missing' }
+  }
+  if (!partition.sourceExists) return { partition, status: 'fresh', meta: cursorToMeta(cursor) }
+  if (partition.sourceSize < cursor.byte_offset) {
+    return { partition, status: 'stale', meta: cursorToMeta(cursor), reason: 'source was truncated' }
+  }
+  if (partition.sourceSize > cursor.byte_offset) {
+    return { partition, status: 'stale', meta: cursorToMeta(cursor), reason: 'source size changed' }
+  }
+  return { partition, status: 'fresh', meta: cursorToMeta(cursor) }
+}
+
+/**
+ * @param {CollectionCachePartition[]} partitions
+ * @returns {Array<ReturnType<typeof inspectCollectionCachePartition>>}
+ */
+export function inspectCollectionCachePartitions(partitions) {
+  return partitions.map((partition) => inspectCollectionCachePartition(partition))
+}
+
+/**
+ * @param {string} cacheDir
+ * @param {JsonlCollection} collection
+ * @returns {CollectionCacheMeta | undefined}
+ */
+export function readAnyCollectionMeta(cacheDir, collection) {
+  /** @type {CollectionCacheMeta | undefined} */
+  let base
+  /** @type {Map<string, CollectionColumnMeta>} */
+  const columns = new Map()
+  for (const partition of collectionPartitionsFor(cacheDir, collection)) {
+    const cursor = readCollectionCursor(partition.cursorPath)
+    if (!cursor) continue
+    const meta = cursorToMeta(cursor)
+    if (!base) base = meta
+    for (const column of meta.columns) {
+      if (!columns.has(column.name)) columns.set(column.name, column)
+    }
+  }
+  if (!base) return undefined
+  return { ...base, columns: [...columns.values()] }
+}
+
+/**
+ * @param {string} cursorPath
+ * @returns {CollectionCacheMeta | undefined}
+ */
+export function readCollectionCacheMeta(cursorPath) {
+  const cursor = readCollectionCursor(cursorPath)
+  return cursor ? cursorToMeta(cursor) : undefined
+}
+
+/**
+ * @param {{
+ *   paths: QueryPaths,
+ *   scope: QueryScope,
+ *   force?: boolean,
+ *   stdout?: { write: (s: string) => void },
+ * }} args
+ * @returns {Promise<RefreshResult>}
+ */
+export async function refreshCollectionCache(args) {
+  const { paths, scope, force = false, stdout } = args
+  if (!paths.cacheEnabled || !paths.cacheDir) {
+    throw new Error('query cache is disabled; pass --cache-dir to refresh explicitly')
+  }
+
+  /** @type {RefreshResult} */
+  const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
+  for (const partition of expectedCollectionPartitions(paths, scope)) {
+    const state = inspectCollectionCachePartition(partition)
+    if (!force && state.status === 'fresh') {
+      result.skipped++
+      result.files.push({
+        dataset: partition.table,
+        gatewayId: '',
+        date: '',
+        rows: state.meta?.row_count ?? 0,
+        cachePath: partition.cachePath,
+        status: 'skipped',
+      })
+      stdout?.write(`fresh ${partition.table}\n`)
+      continue
+    }
+
+    try {
+      if (!partition.sourceExists) throw new Error(`source JSONL file not found: ${partition.jsonlPath}`)
+      const materialized = await materializeCollectionIncremental(partition, force)
+      result.written++
+      result.rows += materialized.rows
+      result.files.push({
+        dataset: partition.table,
+        gatewayId: '',
+        date: '',
+        rows: materialized.rows,
+        cachePath: partition.cachePath,
+        status: 'written',
+      })
+      stdout?.write(`wrote ${partition.cachePath} (${materialized.rows} rows)\n`)
+    } catch (err) {
+      result.failures++
+      result.files.push({
+        dataset: partition.table,
+        gatewayId: '',
+        date: '',
+        rows: 0,
+        cachePath: partition.cachePath,
+        status: 'failed',
+        error: formatError(err),
+      })
+    }
+  }
+  return result
+}
+
+/**
+ * @param {CollectionCachePartition} partition
+ * @param {boolean} force
+ * @returns {Promise<{ rows: number }>}
+ */
+async function materializeCollectionIncremental(partition, force) {
+  const existing = readCollectionCursor(partition.cursorPath)
+  const sourceId = existing?.source_id ?? stableCollectionSourceId(partition)
+  let reset = force || !existing || existing.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION
+  if (existing && partition.sourceSize < existing.byte_offset) reset = true
+
+  let read = readJsonlEntries(
+    partition.jsonlPath,
+    reset ? 0 : existing?.byte_offset ?? 0,
+    reset ? 0 : existing?.line_number ?? 0
+  )
+  let columns = existing?.columns
+  let timestampColumn = existing?.timestamp_column
+  if (!reset && existing) {
+    const nextColumns = inferCollectionColumns(read.entries.map((entry) => entry.raw), partition.collection.timestamp_column)
+    if (!columnsCompatible(existing.columns, nextColumns)) {
+      reset = true
+      read = readJsonlEntries(partition.jsonlPath, 0, 0)
+    }
+  }
+  if (reset || !columns) {
+    columns = inferCollectionColumns(read.entries.map((entry) => entry.raw), partition.collection.timestamp_column)
+    timestampColumn = resolveTimestampColumn(columns, partition.collection.timestamp_column)
+  }
+
+  const epoch = reset ? (existing?.source_epoch ?? -1) + 1 : existing?.source_epoch ?? 0
+  const tablePath = reset ? path.join(partition.cachePath, `epoch=${epoch}`) : existing?.table_path ?? partition.tablePath
+  const tableUrl = queryCacheTableUrl(tablePath)
+  const rows = read.entries.map((entry) => materializeRow(entry, columns, partition.jsonlPath, sourceId, epoch))
+  if (!reset && read.nextByteOffset === existing?.byte_offset && rows.length === 0) return { rows: 0 }
+  await appendRowsToTable(tablePath, collectionColumnsToSpecs(columns), rows)
+  writeCacheCursor(partition.cursorPath, {
+    cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
+    kind: 'collection',
+    table: partition.table,
+    name: partition.collection.name,
+    source_id: sourceId,
+    source_path: partition.jsonlPath,
+    source_epoch: epoch,
+    table_path: tablePath,
+    table_url: tableUrl,
+    source_size: read.nextByteOffset,
+    source_mtime_ms: read.fileMtimeMs,
+    byte_offset: read.nextByteOffset,
+    line_number: read.nextLineNumber,
+    row_count: (reset ? 0 : existing?.row_count ?? 0) + rows.length,
+    schema_fingerprint: stableFingerprint(columns),
+    refreshed_at: new Date().toISOString(),
+    columns,
+    ...(timestampColumn ? { timestamp_column: timestampColumn } : {}),
+  })
+  return { rows: rows.length }
+}
+
+/**
+ * @param {CollectionColumnMeta[]} existing
+ * @param {CollectionColumnMeta[]} next
+ * @returns {boolean}
+ */
+function columnsCompatible(existing, next) {
+  const bySource = new Map(existing.filter((column) => column.source_field).map((column) => [column.source_field, column]))
+  for (const column of next) {
+    if (!column.source_field) continue
+    const prior = bySource.get(column.source_field)
+    if (!prior) return false
+    if (prior.type !== column.type && column.type !== 'JSON') return false
+  }
+  return true
+}
+
+/**
+ * @param {JsonlEntry} entry
+ * @param {CollectionColumnMeta[]} columns
+ * @param {string} sourcePath
+ * @param {string} sourceId
+ * @param {number} epoch
+ * @returns {Record<string, unknown>}
+ */
+function materializeRow(entry, columns, sourcePath, sourceId, epoch) {
+  /** @type {Record<string, unknown>} */
+  const out = {
+    _ctvs_source_path: sourcePath,
+    _ctvs_line_number: entry.lineNumber,
+    _ctvs_raw: entry.raw,
+    _ctvs_row_id: `${sourceId}:${epoch}:${entry.lineNumber}`,
+    _ctvs_source_id: sourceId,
+    _ctvs_source_epoch: epoch,
+    _ctvs_byte_offset: entry.byteOffset,
+  }
+  for (const column of columns) {
+    if (!column.source_field) continue
+    out[column.name] = entry.raw[column.source_field]
+  }
+  return out
+}
+
+/**
  * @param {string} pattern
  * @returns {string[]}
  */
@@ -380,22 +567,15 @@ function compileGlobPattern(absPattern) {
   const rootSegments = []
   let rootDone = false
   for (const seg of segments) {
-    if (!rootDone && !hasGlobChars(seg)) {
-      rootSegments.push(seg)
-    } else {
-      rootDone = true
-    }
+    if (!rootDone && !hasGlobChars(seg)) rootSegments.push(seg)
+    else rootDone = true
   }
   const root = rootSegments.join('/') || '/'
   /** @type {string[]} */
   const out = []
   for (let i = 0; i < absPattern.length; i++) {
     const ch = absPattern[i]
-    if (ch === '*' && absPattern[i + 1] === '*') {
-      out.push('.*')
-      i++
-      continue
-    }
+    if (ch === '*' && absPattern[i + 1] === '*') { out.push('.*'); i++; continue }
     if (ch === '*') { out.push('[^/]*'); continue }
     if (ch === '?') { out.push('[^/]'); continue }
     if (/[.+^$(){}|[\]\\]/.test(ch)) { out.push(`\\${ch}`); continue }
@@ -427,284 +607,9 @@ function walkDir(dir, onFile) {
   }
   for (const entry of entries) {
     const full = path.join(dir, entry.name)
-    if (entry.isDirectory()) {
-      walkDir(full, onFile)
-    } else if (entry.isFile()) {
-      onFile(full)
-    }
+    if (entry.isDirectory()) walkDir(full, onFile)
+    else if (entry.isFile()) onFile(full)
   }
-}
-
-/**
- * @param {QueryPaths} paths
- * @param {QueryScope} scope
- * @returns {JsonlCollection[]}
- */
-export function collectionTablesForQuery(paths, scope) {
-  const manifest = readCollectionsManifest(paths.recordingRoot)
-  return collectionTablesForScope(manifest, scope)
-}
-
-/**
- * @param {CollectionCachePartition} partition
- * @returns {{ partition: CollectionCachePartition, status: 'fresh' | 'missing' | 'stale', meta?: CollectionCacheMeta, reason?: string }}
- */
-export function inspectCollectionCachePartition(partition) {
-  const parquetExists = isFile(partition.parquetPath)
-  const meta = readCollectionCacheMeta(partition.metaPath)
-  if (!parquetExists && !meta) {
-    return { partition, status: 'missing', reason: 'parquet and metadata are missing' }
-  }
-  if (!parquetExists) {
-    return { partition, status: 'stale', meta, reason: 'parquet file is missing' }
-  }
-  if (!meta) {
-    return { partition, status: 'stale', reason: 'metadata sidecar is missing or invalid' }
-  }
-  const reason = collectionStaleReason(partition, meta)
-  if (reason) return { partition, status: 'stale', meta, reason }
-  return { partition, status: 'fresh', meta }
-}
-
-/**
- * @param {CollectionCachePartition[]} partitions
- * @returns {Array<ReturnType<typeof inspectCollectionCachePartition>>}
- */
-export function inspectCollectionCachePartitions(partitions) {
-  return partitions.map((partition) => inspectCollectionCachePartition(partition))
-}
-
-/**
- * Read any cached meta for the given collection — useful for catalog and
- * schema commands where any partition's columns describe the table. For
- * single-file collections this is the canonical meta; for glob collections
- * it returns the first partition's meta that exists on disk.
- *
- * @param {string} parquetDir
- * @param {JsonlCollection} collection
- * @returns {CollectionCacheMeta | undefined}
- */
-export function readAnyCollectionMeta(parquetDir, collection) {
-  if (typeof collection.source_path === 'string') {
-    return readCollectionCacheMeta(collectionMetaPath(parquetDir, collection.table))
-  }
-  for (const partition of collectionPartitionsFor(parquetDir, collection)) {
-    const meta = readCollectionCacheMeta(partition.metaPath)
-    if (meta) return meta
-  }
-  return undefined
-}
-
-/**
- * @param {string} metaPath
- * @returns {CollectionCacheMeta | undefined}
- */
-export function readCollectionCacheMeta(metaPath) {
-  try {
-    const raw = fs.readFileSync(metaPath, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return
-    const meta = /** @type {Partial<CollectionCacheMeta>} */ (parsed)
-    if (meta.kind !== 'collection') return
-    if (typeof meta.cache_schema_version !== 'number') return
-    if (typeof meta.table !== 'string') return
-    if (typeof meta.name !== 'string') return
-    if (typeof meta.source_path !== 'string') return
-    if (typeof meta.source_size !== 'number') return
-    if (typeof meta.source_mtime_ms !== 'number') return
-    if (typeof meta.row_count !== 'number') return
-    if (typeof meta.refreshed_at !== 'string') return
-    if (!Array.isArray(meta.columns)) return
-    for (const column of meta.columns) {
-      if (!column || typeof column !== 'object') return
-      const col = /** @type {Partial<CollectionColumnMeta>} */ (column)
-      if (typeof col.name !== 'string') return
-      if (col.source_field !== undefined && typeof col.source_field !== 'string') return
-      if (typeof col.type !== 'string') return
-      if (typeof col.nullable !== 'boolean') return
-    }
-    if (meta.timestamp_column !== undefined && typeof meta.timestamp_column !== 'string') return
-    return /** @type {CollectionCacheMeta} */ (parsed)
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Delete cached parquet partitions whose source file no longer matches the
- * collection (file deleted, or glob no longer matches it). Only runs for
- * glob-mode collections — single-file collections leave their parquet in
- * place even if the source disappears, matching pre-glob behavior.
- *
- * @param {QueryPaths} paths
- * @param {QueryScope} scope
- * @param {{ write: (s: string) => void } | undefined} stdout
- * @returns {void}
- */
-function pruneOrphanCollectionPartitions(paths, scope, stdout) {
-  if (!paths.parquetDir) return
-  if (scope.sourcePaths && scope.sourcePaths.length > 0) return
-  const manifest = readCollectionsManifest(paths.recordingRoot)
-  const wanted = collectionTablesForScope(manifest, scope)
-  for (const collection of wanted) {
-    if (typeof collection.source_glob !== 'string') continue
-    const tableDir = collectionTableDir(paths.parquetDir, collection.table)
-    if (!isDir(tableDir)) continue
-    const live = new Set(resolveGlobMatches(collection.source_glob))
-    /** @type {fs.Dirent[]} */
-    let entries
-    try {
-      entries = fs.readdirSync(tableDir, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue
-      if (!entry.name.startsWith('source=')) continue
-      const partitionDir = path.join(tableDir, entry.name)
-      const metaPath = path.join(partitionDir, 'data.parquet.meta.json')
-      const meta = readCollectionCacheMeta(metaPath)
-      const sourcePath = meta?.source_path
-      if (sourcePath && live.has(path.resolve(sourcePath))) continue
-      try {
-        fs.rmSync(partitionDir, { recursive: true, force: true })
-        stdout?.write(`pruned orphan partition ${partitionDir}\n`)
-      } catch {
-        // best-effort cleanup
-      }
-    }
-  }
-}
-
-/**
- * @param {{
- *   paths: QueryPaths,
- *   scope: QueryScope,
- *   force?: boolean,
- *   stdout?: { write: (s: string) => void },
- * }} args
- * @returns {Promise<RefreshResult>}
- */
-export async function refreshCollectionCache(args) {
-  const { paths, scope, force = false, stdout } = args
-  if (!paths.parquetEnabled || !paths.parquetDir) {
-    throw new Error('query parquet cache is disabled; pass --parquet-dir to refresh explicitly')
-  }
-
-  /** @type {RefreshResult} */
-  const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
-  pruneOrphanCollectionPartitions(paths, scope, stdout)
-  const partitions = expectedCollectionPartitions(paths, scope)
-  for (const partition of partitions) {
-    const state = inspectCollectionCachePartition(partition)
-    if (!force && state.status === 'fresh') {
-      result.skipped++
-      result.files.push({
-        dataset: /** @type {import('./types.js').QueryDataset} */ (partition.table),
-        gatewayId: '',
-        date: '',
-        rows: state.meta?.row_count ?? 0,
-        parquetPath: partition.parquetPath,
-        status: 'skipped',
-      })
-      stdout?.write(`fresh ${partition.table}\n`)
-      continue
-    }
-
-    try {
-      if (!partition.sourceExists) throw new Error(`source JSONL file not found: ${partition.jsonlPath}`)
-      const materialized = await materializeCollection(partition.collection, partition.jsonlPath)
-      writeCollectionParquetAndMeta(partition, materialized)
-      result.written++
-      result.rows += materialized.rows.length
-      result.files.push({
-        dataset: /** @type {import('./types.js').QueryDataset} */ (partition.table),
-        gatewayId: '',
-        date: '',
-        rows: materialized.rows.length,
-        parquetPath: partition.parquetPath,
-        status: 'written',
-      })
-      stdout?.write(`wrote ${partition.parquetPath} (${materialized.rows.length} rows)\n`)
-    } catch (err) {
-      result.failures++
-      result.files.push({
-        dataset: /** @type {import('./types.js').QueryDataset} */ (partition.table),
-        gatewayId: '',
-        date: '',
-        rows: 0,
-        parquetPath: partition.parquetPath,
-        status: 'failed',
-        error: formatError(err),
-      })
-    }
-  }
-  return result
-}
-
-/**
- * @param {CollectionCachePartition} partition
- * @param {{ rows: Record<string, unknown>[], columns: CollectionColumnMeta[], timestampColumn?: string, parquet: Uint8Array }} materialized
- * @returns {void}
- */
-function writeCollectionParquetAndMeta(partition, materialized) {
-  fs.mkdirSync(path.dirname(partition.parquetPath), { recursive: true })
-  fs.writeFileSync(partition.parquetPath, materialized.parquet)
-  /** @type {CollectionCacheMeta} */
-  const meta = {
-    cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
-    kind: 'collection',
-    table: partition.table,
-    name: partition.collection.name,
-    source_path: partition.jsonlPath,
-    source_size: partition.sourceSize,
-    source_mtime_ms: partition.sourceMtimeMs,
-    row_count: materialized.rows.length,
-    refreshed_at: new Date().toISOString(),
-    columns: materialized.columns,
-    ...(materialized.timestampColumn ? { timestamp_column: materialized.timestampColumn } : {}),
-  }
-  fs.writeFileSync(partition.metaPath, JSON.stringify(meta, null, 2) + '\n')
-}
-
-/**
- * @param {JsonlCollection} collection
- * @param {string} sourcePath
- * @returns {Promise<{ rows: Record<string, unknown>[], columns: CollectionColumnMeta[], timestampColumn?: string, parquet: Uint8Array }>}
- */
-async function materializeCollection(collection, sourcePath) {
-  const rawRows = await readCollectionRows(sourcePath)
-  const columns = inferCollectionColumns(rawRows.map((row) => row.raw), collection.timestamp_column)
-  const timestampColumn = resolveTimestampColumn(columns, collection.timestamp_column)
-  const rows = rawRows.map((entry) => materializeRow(entry, columns, sourcePath))
-  const parquet = await rowsToCollectionParquet(rows, columns)
-  return { rows, columns, timestampColumn, parquet }
-}
-
-/**
- * @param {string} filePath
- * @returns {Promise<Array<{ lineNumber: number, raw: Record<string, unknown> }>>}
- */
-async function readCollectionRows(filePath) {
-  const stream = fs.createReadStream(filePath, { encoding: 'utf8' })
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
-  /** @type {Array<{ lineNumber: number, raw: Record<string, unknown> }>} */
-  const rows = []
-  let lineNumber = 0
-  for await (const line of rl) {
-    lineNumber++
-    if (!line) continue
-    try {
-      const parsed = JSON.parse(line)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        rows.push({ lineNumber, raw: /** @type {Record<string, unknown>} */ (parsed) })
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.warn(`[collectivus] skipping malformed JSONL line ${filePath}:${lineNumber}: ${message}`)
-    }
-  }
-  return rows
 }
 
 /**
@@ -724,20 +629,12 @@ function inferCollectionColumns(rawRows, requestedTimestampColumn) {
     for (const [sourceField, value] of Object.entries(raw)) {
       let stat = stats.get(sourceField)
       if (!stat) {
-        stat = {
-          sourceField,
-          values: [],
-          present: 0,
-          nullable: false,
-        }
+        stat = { sourceField, values: [], present: 0, nullable: false }
         stats.set(sourceField, stat)
       }
       stat.present++
-      if (value === undefined || value === null) {
-        stat.nullable = true
-      } else {
-        stat.values.push(value)
-      }
+      if (value === undefined || value === null) stat.nullable = true
+      else stat.values.push(value)
     }
   }
 
@@ -745,12 +642,11 @@ function inferCollectionColumns(rawRows, requestedTimestampColumn) {
     const baseName = normalizeColumnName(stat.sourceField)
     const name = uniqueName(baseName, usedNames)
     usedNames.add(name)
-    const nullable = stat.nullable || stat.present < rawRows.length
     columns.push({
       name,
       source_field: stat.sourceField,
       type: inferColumnType(stat.sourceField, name, stat.values, requestedTimestampColumn),
-      nullable,
+      nullable: stat.nullable || stat.present < rawRows.length,
     })
   }
   return columns
@@ -769,9 +665,7 @@ function inferColumnType(sourceField, columnName, values, requestedTimestampColu
     requestedTimestampColumn === sourceField ||
     normalizeColumnName(requestedTimestampColumn) === columnName
   )
-  if ((requested || isTimestampCandidate(sourceField) || isTimestampCandidate(columnName)) && values.every(isTimestampValue)) {
-    return 'TIMESTAMP'
-  }
+  if ((requested || isTimestampCandidate(sourceField) || isTimestampCandidate(columnName)) && values.every(isTimestampValue)) return 'TIMESTAMP'
   if (values.every((value) => typeof value === 'boolean')) return 'BOOLEAN'
   if (values.every((value) => typeof value === 'number' && Number.isFinite(value))) return 'DOUBLE'
   if (values.every((value) => typeof value === 'string')) return 'STRING'
@@ -801,88 +695,68 @@ function resolveTimestampColumn(columns, requestedTimestampColumn) {
 }
 
 /**
- * @param {{ lineNumber: number, raw: Record<string, unknown> }} entry
- * @param {CollectionColumnMeta[]} columns
- * @param {string} sourcePath
- * @returns {Record<string, unknown>}
+ * @param {CollectionCachePartition} partition
+ * @returns {string}
  */
-function materializeRow(entry, columns, sourcePath) {
-  /** @type {Record<string, unknown>} */
-  const out = {
-    _ctvs_source_path: sourcePath,
-    _ctvs_line_number: entry.lineNumber,
-    _ctvs_raw: entry.raw,
-  }
-  for (const column of columns) {
-    if (!column.source_field) continue
-    out[column.name] = entry.raw[column.source_field]
-  }
-  return out
+function stableCollectionSourceId(partition) {
+  return crypto.createHash('sha256').update(`${partition.table}\0${path.resolve(partition.jsonlPath)}`).digest('hex').slice(0, 16)
 }
 
 /**
- * @param {Record<string, unknown>[]} rows
- * @param {CollectionColumnMeta[]} columns
- * @returns {Promise<Uint8Array>}
+ * @param {string} cacheDir
+ * @param {JsonlCollection} collection
+ * @returns {CollectionCacheCursor[]}
  */
-async function rowsToCollectionParquet(rows, columns) {
-  const { parquetWriteBuffer } = await import('hyparquet-writer')
-  /** @type {ColumnSource[]} */
-  const columnData = columns.map((column) => ({
-    name: column.name,
-    type: column.type,
-    nullable: column.nullable,
-    data: rows.map((row) => coerceCollectionCell(column, row[column.name])),
-  }))
-  const arrayBuffer = parquetWriteBuffer({ columnData })
-  return new Uint8Array(arrayBuffer)
+function listCollectionCursors(cacheDir, collection) {
+  const tableDir = collectionTableDir(cacheDir, collection.table)
+  /** @type {CollectionCacheCursor[]} */
+  const out = []
+  for (const entry of safeReadDir(tableDir)) {
+    if (!entry.startsWith('source=')) continue
+    const cursor = readCollectionCursor(path.join(tableDir, entry, 'cursor.json'))
+    if (cursor) out.push(cursor)
+  }
+  return out.sort((a, b) => a.source_path < b.source_path ? -1 : a.source_path > b.source_path ? 1 : 0)
 }
 
 /**
- * @param {CollectionColumnMeta} column
- * @param {unknown} value
- * @returns {unknown}
+ * @param {string} cursorPath
+ * @returns {CollectionCacheCursor | undefined}
  */
-function coerceCollectionCell(column, value) {
-  if (value === undefined || value === null) {
-    if (!column.nullable) {
-      throw new Error(`required column "${column.name}" got null`)
-    }
-    return undefined
-  }
-  switch (column.type) {
-  case 'STRING':
-    return typeof value === 'string' ? value : String(value)
-  case 'INT32':
-    return coerceInt32(value, column.name)
-  case 'INT64':
-    return coerceInt64(value, column.name)
-  case 'DOUBLE':
-    return coerceDouble(value, column.name)
-  case 'BOOLEAN':
-    return Boolean(value)
-  case 'TIMESTAMP':
-    return coerceTimestamp(value, column.name)
-  case 'JSON':
-    return value
-  default:
-    return value
+function readCollectionCursor(cursorPath) {
+  const cursor = readCacheCursor(cursorPath)
+  return cursor?.kind === 'collection' ? cursor : undefined
+}
+
+/**
+ * @param {CollectionCacheCursor} cursor
+ * @returns {CollectionCacheMeta}
+ */
+function cursorToMeta(cursor) {
+  return {
+    cache_schema_version: cursor.cache_schema_version,
+    kind: 'collection',
+    table: cursor.table,
+    name: cursor.name,
+    source_path: cursor.source_path,
+    source_size: cursor.source_size,
+    source_mtime_ms: cursor.source_mtime_ms,
+    row_count: cursor.row_count,
+    refreshed_at: cursor.refreshed_at,
+    columns: cursor.columns,
+    ...(cursor.timestamp_column ? { timestamp_column: cursor.timestamp_column } : {}),
   }
 }
 
 /**
  * @param {CollectionCachePartition} partition
- * @param {CollectionCacheMeta} meta
+ * @param {CollectionCacheCursor} cursor
  * @returns {string | undefined}
  */
-function collectionStaleReason(partition, meta) {
-  if (meta.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION) return 'cache schema version changed'
-  if (meta.kind !== 'collection') return 'metadata kind does not match partition'
-  if (meta.table !== partition.table) return 'metadata table does not match partition'
-  if (path.resolve(meta.source_path) !== path.resolve(partition.jsonlPath)) return 'metadata source path does not match source'
-  if (!partition.sourceExists) return 'source file is missing'
-  if (meta.source_size !== partition.sourceSize) return 'source size changed'
-  if (meta.source_mtime_ms !== partition.sourceMtimeMs) return 'source mtime changed'
+function collectionCursorIdentityReason(partition, cursor) {
+  if (cursor.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION) return 'cache schema version changed'
+  if (cursor.table !== partition.table) return 'cache cursor table does not match partition'
+  if (path.resolve(cursor.source_path) !== path.resolve(partition.jsonlPath)) return 'cache cursor source path does not match source'
 }
 
 /**
@@ -930,7 +804,6 @@ function normalizeManifest(parsed, manifestPath) {
   if (!obj.collections || typeof obj.collections !== 'object' || Array.isArray(obj.collections)) {
     throw new Error(`collection manifest ${manifestPath} is missing an object collections field`)
   }
-  /** @type {CollectionsManifest} */
   const manifest = emptyManifest()
   for (const [table, value] of Object.entries(/** @type {Record<string, unknown>} */ (obj.collections))) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
@@ -990,66 +863,8 @@ function isTimestampCandidate(value) {
  */
 function isTimestampValue(value) {
   if (value instanceof Date) return !Number.isNaN(value.getTime())
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
-    return Number.isFinite(Date.parse(String(value)))
-  }
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') return Number.isFinite(Date.parse(String(value)))
   return false
-}
-
-/**
- * @param {unknown} value
- * @param {string} name
- * @returns {number}
- */
-function coerceInt32(value, name) {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
-  if (typeof value === 'bigint') return Number(value)
-  if (typeof value === 'string') {
-    const n = Number(value)
-    if (Number.isFinite(n)) return Math.trunc(n)
-  }
-  throw new Error(`column "${name}" expected INT32, got ${typeof value}`)
-}
-
-/**
- * @param {unknown} value
- * @param {string} name
- * @returns {bigint}
- */
-function coerceInt64(value, name) {
-  if (typeof value === 'bigint') return value
-  if (typeof value === 'number' && Number.isFinite(value)) return BigInt(Math.trunc(value))
-  if (typeof value === 'string') return BigInt(value)
-  throw new Error(`column "${name}" expected INT64, got ${typeof value}`)
-}
-
-/**
- * @param {unknown} value
- * @param {string} name
- * @returns {number}
- */
-function coerceDouble(value, name) {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'bigint') return Number(value)
-  if (typeof value === 'string') {
-    const n = Number(value)
-    if (Number.isFinite(n)) return n
-  }
-  throw new Error(`column "${name}" expected DOUBLE, got ${typeof value}`)
-}
-
-/**
- * @param {unknown} value
- * @param {string} name
- * @returns {Date}
- */
-function coerceTimestamp(value, name) {
-  if (value instanceof Date) return value
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
-    const date = new Date(typeof value === 'bigint' ? Number(value) : value)
-    if (!Number.isNaN(date.getTime())) return date
-  }
-  throw new Error(`column "${name}" expected TIMESTAMP, got ${typeof value}`)
 }
 
 /**
@@ -1065,14 +880,14 @@ function safeStat(p) {
 }
 
 /**
- * @param {string} p
- * @returns {boolean}
+ * @param {string} dir
+ * @returns {string[]}
  */
-function isFile(p) {
+function safeReadDir(dir) {
   try {
-    return fs.statSync(p).isFile()
+    return fs.readdirSync(dir).sort()
   } catch {
-    return false
+    return []
   }
 }
 

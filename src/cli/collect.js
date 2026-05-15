@@ -28,7 +28,7 @@ single logical table with many files (one cache partition per matched file).
 
 Options:
   --config <path|url>            Config path or URL (default: ~/.hyp/collectivus.json)
-  --parquet-dir <dir>            Query-cache directory
+  --cache-dir <dir>              Query-cache directory
   --name <name>                  User-facing collection name; normalized to a SQL table name
   --glob <pattern>               Absolute glob (or one resolved against cwd) matching JSONL files
   --replace                      Replace an existing collection with the same normalized table name
@@ -41,7 +41,7 @@ Options:
  * @returns {CollectParseResult}
  */
 export function parseCollectArgs(argv) {
-  /** @type {{ kind: 'add' | 'list' | 'remove', configPath: string, parquetDir?: string, filePath?: string, glob?: string, name?: string, nameOrTable?: string, replace: boolean, timestampColumn?: string, format: QueryFormat }} */
+  /** @type {{ kind: 'add' | 'list' | 'remove', configPath: string, cacheDir?: string, filePath?: string, glob?: string, name?: string, nameOrTable?: string, replace: boolean, timestampColumn?: string, format: QueryFormat }} */
   const out = {
     kind: 'add',
     configPath: defaultConfigPath(),
@@ -82,10 +82,10 @@ export function parseCollectArgs(argv) {
       out.configPath = configPath
       continue
     }
-    const parquetDir = readValue('--parquet-dir')
-    if (parquetDir !== undefined) {
-      if (!parquetDir) return { kind: 'error', message: '--parquet-dir requires a directory', exitCode: 2 }
-      out.parquetDir = parquetDir
+    const cacheDir = readValue('--cache-dir')
+    if (cacheDir !== undefined) {
+      if (!cacheDir) return { kind: 'error', message: '--cache-dir requires a directory', exitCode: 2 }
+      out.cacheDir = cacheDir
       continue
     }
     const name = readValue('--name')
@@ -173,7 +173,7 @@ export async function runCollect(argv, hooks = {}) {
 
   let paths
   try {
-    paths = resolveQueryPaths(config, parsed.configPath, parsed.parquetDir)
+    paths = resolveQueryPaths(config, parsed.configPath, parsed.cacheDir)
   } catch (err) {
     stderr.write(`error: ${formatError(err)}\n`)
     return 1
@@ -202,8 +202,8 @@ export async function runCollect(argv, hooks = {}) {
       return 0
     }
     case 'add': {
-      if (!paths.parquetEnabled || !paths.parquetDir) {
-        stderr.write('error: query parquet cache is disabled; pass --parquet-dir to collect explicitly\n')
+      if (!paths.cacheEnabled || !paths.cacheDir) {
+        stderr.write('error: query cache is disabled; pass --cache-dir to collect explicitly\n')
         return 1
       }
       const table = normalizeTableName(parsed.name)

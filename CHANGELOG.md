@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- Local `ctvs query` cache storage now uses local Iceberg tables under
+  `.collectivus-query/cache` instead of Parquet sidecars under
+  `.collectivus-query/parquet`. Config is now `query.cache.enabled` /
+  `query.cache.dir`, and the CLI override is `--cache-dir`.
+- Refreshes keep per-source JSONL cursors and append from the last processed
+  byte where possible. Source truncation/rewrite or collection schema drift
+  starts a new source epoch instead of recreating every cache partition.
+- Glob-backed collection sources that disappear remain queryable as cache-only
+  partitions instead of being pruned on refresh.
+
 ## [2.2.0] — 2026-05-14
 
 ### Added
@@ -76,7 +88,7 @@ new schema reference, working SQL patterns, and dataset semantics.
 
 ### Changed (breaking)
 
-- **`ctvs query` allows stale Parquet cache by default.** Stale partitions
+- **`ctvs query` allows stale query cache by default.** Stale partitions
   (Parquet exists but may be outdated) now query successfully and emit a
   `warning: querying stale data; …` line to stderr instead of exiting non-zero.
   Stdout output (table, json, jsonl, markdown) is unchanged.

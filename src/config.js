@@ -30,8 +30,8 @@ const ALLOWED_SINK_KEYS = new Set(['type', 'dir'])
 const ALLOWED_UPLOAD_KEYS = new Set([
   'bucket', 'prefix', 'region', 'time', 'signals', 'catchupDays', 'endpoint',
 ])
-const ALLOWED_QUERY_KEYS = new Set(['parquet'])
-const ALLOWED_QUERY_PARQUET_KEYS = new Set(['enabled', 'dir'])
+const ALLOWED_QUERY_KEYS = new Set(['cache'])
+const ALLOWED_QUERY_CACHE_KEYS = new Set(['enabled', 'dir'])
 const ALLOWED_SERVER_KEYS = new Set([
   'control_plane_listen', 'public_url', 'identity_issuer', 'data_dir', 'sink_dir', 'ingest',
   'admin', 'enrollment', 'rendezvous',
@@ -730,20 +730,20 @@ function validateUpload(upload) {
 function validateQuery(query) {
   assertObject(query, '/query')
   assertOnlyKeys(query, ALLOWED_QUERY_KEYS, '/query')
-  if (query.parquet !== undefined) validateQueryParquet(query.parquet)
+  if (query.cache !== undefined) validateQueryCache(query.cache)
 }
 
 /**
- * @param {unknown} parquet
+ * @param {unknown} cache
  */
-function validateQueryParquet(parquet) {
-  assertObject(parquet, '/query/parquet')
-  assertOnlyKeys(parquet, ALLOWED_QUERY_PARQUET_KEYS, '/query/parquet')
-  if (parquet.enabled !== undefined && typeof parquet.enabled !== 'boolean') {
-    throw new ConfigError('must be a boolean', { pointer: '/query/parquet/enabled' })
+function validateQueryCache(cache) {
+  assertObject(cache, '/query/cache')
+  assertOnlyKeys(cache, ALLOWED_QUERY_CACHE_KEYS, '/query/cache')
+  if (cache.enabled !== undefined && typeof cache.enabled !== 'boolean') {
+    throw new ConfigError('must be a boolean', { pointer: '/query/cache/enabled' })
   }
-  if (parquet.dir !== undefined) {
-    assertNonEmptyString(parquet.dir, '/query/parquet/dir')
+  if (cache.dir !== undefined) {
+    assertNonEmptyString(cache.dir, '/query/cache/dir')
   }
 }
 

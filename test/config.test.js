@@ -149,35 +149,41 @@ describe('loadConfig - schema errors', () => {
     expect(() => loadConfig(p, { stderr: memoStderr() })).toThrow(/unknown key "upsteams"/)
   })
 
-  it('accepts optional query.parquet config', () => {
+  it('accepts optional query.cache config', () => {
     const p = writeJson('query.json', {
       version: 1,
-      query: { parquet: { enabled: true, dir: '/tmp/collectivus-query' } },
+      query: { cache: { enabled: true, dir: '/tmp/collectivus-query' } },
     })
     expect(loadConfig(p)).toEqual({
       version: 1,
-      query: { parquet: { enabled: true, dir: '/tmp/collectivus-query' } },
+      query: { cache: { enabled: true, dir: '/tmp/collectivus-query' } },
     })
   })
 
-  it('rejects unknown query keys and invalid query.parquet types', () => {
+  it('rejects unknown query keys and invalid query.cache types', () => {
     const unknown = writeJson('query-unknown.json', {
       version: 1,
       query: { mystery: true },
     })
     expect(() => loadConfig(unknown)).toThrow(/\/query\/mystery.*unknown key/)
 
+    const oldParquetKey = writeJson('query-parquet.json', {
+      version: 1,
+      query: { parquet: { enabled: true } },
+    })
+    expect(() => loadConfig(oldParquetKey)).toThrow(/\/query\/parquet.*unknown key/)
+
     const badEnabled = writeJson('query-enabled.json', {
       version: 1,
-      query: { parquet: { enabled: 'yes' } },
+      query: { cache: { enabled: 'yes' } },
     })
-    expect(() => loadConfig(badEnabled)).toThrow(/\/query\/parquet\/enabled.*boolean/)
+    expect(() => loadConfig(badEnabled)).toThrow(/\/query\/cache\/enabled.*boolean/)
 
     const badDir = writeJson('query-dir.json', {
       version: 1,
-      query: { parquet: { dir: '' } },
+      query: { cache: { dir: '' } },
     })
-    expect(() => loadConfig(badDir)).toThrow(/\/query\/parquet\/dir.*non-empty string/)
+    expect(() => loadConfig(badDir)).toThrow(/\/query\/cache\/dir.*non-empty string/)
   })
 
   it('requires sink when proxy is present', () => {

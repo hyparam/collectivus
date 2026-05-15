@@ -118,7 +118,7 @@ export type CollectParseResult =
   | {
     kind: 'add'
     configPath: string
-    parquetDir?: string
+    cacheDir?: string
     filePath?: string
     glob?: string
     name?: string
@@ -129,14 +129,14 @@ export type CollectParseResult =
   | {
     kind: 'list'
     configPath: string
-    parquetDir?: string
+    cacheDir?: string
     replace: boolean
     format: 'table' | 'json' | 'jsonl' | 'markdown'
   }
   | {
     kind: 'remove'
     configPath: string
-    parquetDir?: string
+    cacheDir?: string
     nameOrTable?: string
     replace: boolean
     format: 'table' | 'json' | 'jsonl' | 'markdown'

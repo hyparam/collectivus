@@ -62,6 +62,7 @@ export interface JsonlReadResult {
 export interface JsonlReadOptions {
   startByteOffset?: number
   startLineNumber?: number
+  endByteOffset?: number
   batchRows?: number
   batchBytes?: number
 }

@@ -166,7 +166,7 @@ describe('ctvs collect', function() {
       stderr: staleErr,
     })).toBe(0)
     expect(staleOut.value()).toMatch(/\b1\b/)
-    expect(staleErr.value()).toMatch(/warning: querying stale data/)
+    expect(staleErr.value()).toMatch(/warning: query cache last refreshed at /)
     expect(staleErr.value()).toMatch(/events \(source size changed|events \(source mtime changed/)
 
     const refreshedOut = memo()

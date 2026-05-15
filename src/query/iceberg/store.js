@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileCatalog, icebergAppend, icebergCreateTable, icebergRead, loadLatestFileCatalogMetadata } from 'icebird'
+import { fileCatalog, icebergAppend, icebergCreateTable, icebergDataSource, icebergRead, loadLatestFileCatalogMetadata } from 'icebird'
 import { createLocalIcebergIO, tableUrlForDir } from './resolver.js'
 import { icebergSchemaForColumns, rowsToIcebergRecords } from './schema.js'
 
@@ -80,4 +80,37 @@ export async function readRowsFromCursor(cursor) {
   if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return []
   const rows = await icebergRead({ tableUrl, metadata, resolver })
   return /** @type {Record<string, unknown>[]} */ (rows)
+}
+
+/**
+ * @param {QueryCacheCursor} cursor
+ * @param {string[]} columns
+ * @returns {AsyncGenerator<Record<string, unknown>>}
+ */
+export async function* scanRowsFromCursor(cursor, columns) {
+  if (!queryCacheTableExists(cursor.table_path)) return
+  const { resolver, lister } = await createLocalIcebergIO()
+  const tableUrl = cursor.table_url || queryCacheTableUrl(cursor.table_path)
+  const { metadata } = await loadLatestFileCatalogMetadata({ tableUrl, resolver, lister })
+  if (metadata['current-snapshot-id'] === undefined || !metadata.snapshots?.length) return
+  const source = await icebergDataSource({ tableUrl, metadata, resolver, lister })
+  const scan = source.scan({ columns })
+  for await (const row of scan.rows()) {
+    yield await resolveAsyncRow(row, columns)
+  }
+}
+
+/**
+ * @param {import('squirreling').AsyncRow} row
+ * @param {string[]} columns
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function resolveAsyncRow(row, columns) {
+  /** @type {Record<string, unknown>} */
+  const out = row.resolved ? { ...row.resolved } : {}
+  for (const column of columns) {
+    if (Object.prototype.hasOwnProperty.call(out, column)) continue
+    out[column] = await row.cells[column]?.()
+  }
+  return out
 }

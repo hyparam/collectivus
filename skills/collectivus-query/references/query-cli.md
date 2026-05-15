@@ -19,7 +19,7 @@ The cache is explicit. Query commands do not refresh it unless `--refresh always
 Freshness is asymmetric (since v1.7.0):
 
 - `fresh` — query proceeds silently.
-- `stale` (cache exists but may be outdated) — query proceeds and writes a `warning: querying stale data; N partition(s) outdated [...] — run '...' to update` line to stderr. Stdout is unchanged.
+- `stale` (cache exists, source changed since refresh) — query proceeds and writes a `warning: query cache last refreshed at ...; N partition(s) differ from source [...] — run '...' to refresh` line to stderr. Stdout is unchanged.
 - `missing` (no cache table/cursor) — query exits with the exact `ctvs query refresh ...` command to run.
 
 Pass `--strict-freshness` to restore the pre-1.7 behavior where stale partitions are a hard error.

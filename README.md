@@ -551,7 +551,7 @@ Freshness is treated asymmetrically (since v1.7.0):
 | Partition state | Behavior |
 | --- | --- |
 | `fresh` | Query proceeds silently. |
-| `stale` (cache exists, may be outdated) | Query proceeds; a `warning: querying stale data; …` line is written to stderr. Stdout is unchanged. |
+| `stale` (cache exists, source changed since refresh) | Query proceeds; a `warning: query cache last refreshed at …` line is written to stderr. Stdout is unchanged. |
 | `missing` (no cache table/cursor) | Query exits with the exact file-targeted `ctvs query refresh …` command to run when the source file is known. |
 
 Use `ctvs query refresh <file.jsonl>` to refresh selected source files, or

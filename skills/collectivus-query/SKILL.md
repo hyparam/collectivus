@@ -12,7 +12,7 @@ Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL r
 1. Run `ctvs query doctor` or `ctvs query status` first to verify the recording root and cache state.
 2. If the command cannot find the intended config, discover the service config once with `ctvs status`, a LaunchAgent/systemd unit, or the user, then reuse `--config <path>` only for that setup.
 3. Cache freshness is handled asymmetrically:
-   - **Stale partitions are queried by default** and the CLI prints a `warning: querying stale data; …` line to stderr. Read stderr alongside stdout, and surface any stale warning to the user so they know the data may be outdated. Prefer the file-targeted `ctvs query refresh <file.jsonl>` command the CLI prints when updating cache data; use `--refresh always` only when the query should refresh before it runs.
+   - **Stale partitions are queried by default** and the CLI prints a `warning: query cache last refreshed at …` line to stderr. Read stderr alongside stdout, and surface the refresh timestamp to the user so they know the cache may not include newer source rows. Prefer the file-targeted `ctvs query refresh <file.jsonl>` command the CLI prints when updating cache data; use `--refresh always` only when the query should refresh before it runs.
    - **Missing partitions still error.** Run the exact `ctvs query refresh …` command the CLI prints, or rerun the target query with `--refresh always`.
    - Broad manual refreshes are explicit: `ctvs query refresh --all [dataset]`. Do not run a broad refresh when the printed file-targeted command is enough.
    - Pass `--strict-freshness` only when the user explicitly needs the pre-1.7 strict mode (e.g., scheduled checks that must never read stale data); it turns stale partitions back into a hard error.
@@ -107,7 +107,7 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 ## Guardrails
 
 - Do not assume the cache auto-refreshes. Query commands default to `--refresh never`, and stale partitions return data with a stderr warning rather than refreshing themselves.
-- Always read stderr. A successful exit code does not mean the data is fresh — a `warning: querying stale data; …` line on stderr means stdout reflects outdated cache rows, and the user should be told before drawing conclusions.
+- Always read stderr. A successful exit code does not mean the cache is current — a `warning: query cache last refreshed at …` line on stderr means stdout reflects cache rows from that refresh, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
 - Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and registered collection tables from `ctvs query catalog`.

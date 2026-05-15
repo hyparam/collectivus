@@ -837,7 +837,7 @@ async function ensureCacheReady(paths, scope, parsed) {
     const more = stale.length > 3 ? `, +${stale.length - 3} more` : ''
     return {
       ok: true,
-      warnings: [`warning: querying stale data; ${stale.length} partition(s) outdated [${summary}${more}] — run '${refreshCommand(parsed, stale, scope)}' to update`],
+      warnings: [`warning: query cache ${refreshTimeSummary(stale)}; ${stale.length} partition(s) differ from source [${summary}${more}] — run '${refreshCommand(parsed, stale, scope)}' to refresh`],
     }
   }
 
@@ -1244,6 +1244,28 @@ function partitionLabel(state) {
   const partition = /** @type {Record<string, unknown>} */ (state.partition)
   if (partition.kind === 'collection') return String(partition.table)
   return `${String(partition.dataset)}/${String(partition.gatewayId)}/${String(partition.date)}`
+}
+
+/**
+ * @param {Array<{ meta?: unknown }>} states
+ * @returns {string}
+ */
+function refreshTimeSummary(states) {
+  const times = [...new Set(states.map(refreshedAtForState).filter((time) => time !== undefined))].sort()
+  if (times.length === 0) return 'refresh time unavailable'
+  if (times.length === 1) return `last refreshed at ${times[0]}`
+  return `last refreshed between ${times[0]} and ${times[times.length - 1]}`
+}
+
+/**
+ * @param {{ meta?: unknown }} state
+ * @returns {string | undefined}
+ */
+function refreshedAtForState(state) {
+  const meta = /** @type {{ refreshed_at?: unknown } | undefined} */ (state.meta)
+  return typeof meta?.refreshed_at === 'string' && meta.refreshed_at.length > 0
+    ? meta.refreshed_at
+    : undefined
 }
 
 /**

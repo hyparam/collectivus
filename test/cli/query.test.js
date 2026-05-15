@@ -462,7 +462,7 @@ describe('ctvs query', function() {
     const code = await runQuery(['sql', 'select count(*) as n from logs', '--config', configPath], { stdout, stderr })
     expect(code).toBe(0)
     expect(stdout.value()).toMatch(/\b1\b/)
-    expect(stderr.value()).toMatch(/warning: querying stale data/)
+    expect(stderr.value()).toMatch(/warning: query cache last refreshed at /)
     expect(stderr.value()).toMatch(/source size changed|source mtime changed/)
   })
 
@@ -565,9 +565,8 @@ describe('ctvs query freshness gate', function() {
       const code = await runQuery(['logs', '--config', configPath], { stdout, stderr })
       expect(code).toBe(0)
       expect(stdout.value()).toMatch(/\ba\b/)
-      // Warning shape from co-g835 spec.
-      expect(stderr.value()).toMatch(/^warning: querying stale data; 1 partition\(s\) outdated \[logs\/gw1\/2026-05-11/)
-      expect(stderr.value()).toMatch(/run 'ctvs query refresh .*\/gw1\/logs\/2026-05-11\.jsonl --config /)
+      expect(stderr.value()).toMatch(/^warning: query cache last refreshed at .+; 1 partition\(s\) differ from source \[logs\/gw1\/2026-05-11/)
+      expect(stderr.value()).toMatch(/run 'ctvs query refresh .*\/gw1\/logs\/2026-05-11\.jsonl --config .*' to refresh/)
     })
 
     it('stale cache + --strict-freshness → exit 1, error message, empty stdout', async function() {
@@ -624,7 +623,7 @@ describe('ctvs query freshness gate', function() {
         expect(code).toBe(0)
 
         // Warning on stderr.
-        expect(stderr.value()).toMatch(/warning: querying stale data/)
+        expect(stderr.value()).toMatch(/warning: query cache last refreshed at /)
         // Warning never bleeds into stdout.
         expect(stdout.value()).not.toMatch(/warning:/)
 

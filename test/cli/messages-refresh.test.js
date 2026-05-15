@@ -76,6 +76,16 @@ function writeProxyJsonl(gatewayId, date, rows) {
 }
 
 /**
+ * @param {string} gatewayId
+ * @param {string} date
+ * @param {Record<string, unknown>[]} rows
+ */
+function appendProxyJsonl(gatewayId, date, rows) {
+  const filePath = path.join(sinkDir, gatewayId, 'proxy', `${date}.jsonl`)
+  fs.appendFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+}
+
+/**
  * Build a non-streaming exchange row with the given conversation_id (in
  * `metadata.user_id.session_id`), user content, and assistant text.
  *
@@ -249,6 +259,46 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
     expect(stdout.value()).toMatch(/wrote .*date=2026-05-14/)
     const day1MtimeAfter = fs.statSync(day1CursorPath).mtimeMs
     expect(day1MtimeAfter).toBe(day1MtimeBefore)
+  })
+
+  it('appends only new rows when the current day proxy JSONL grows', async function() {
+    writeProxyJsonl('gw-test', '2026-05-15', [
+      buildExchange({
+        exchangeId: 'ex-today-1',
+        tsStart: '2026-05-15T10:00:00.000Z',
+        sessionId: 'sess-today',
+        userContent: 'first',
+        assistant: { content: 'first reply' },
+      }),
+    ])
+    await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout: memo() })
+    const firstRows = await readMessagesPartition('gw-test', '2026-05-15')
+    expect(firstRows).toHaveLength(2)
+
+    appendProxyJsonl('gw-test', '2026-05-15', [
+      buildExchange({
+        exchangeId: 'ex-today-2',
+        tsStart: '2026-05-15T10:05:00.000Z',
+        sessionId: 'sess-today',
+        userContent: 'second',
+        history: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'first reply' },
+        ],
+        assistant: { content: 'second reply' },
+      }),
+    ])
+
+    const stdout = memo()
+    const second = await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout })
+    expect(second.failures).toBe(0)
+    expect(second.written).toBe(1)
+    expect(stdout.value()).toMatch(/priorSeen proxy_messages\/gw-test\/2026-05-15: 2 messages/)
+
+    const rows = await readMessagesPartition('gw-test', '2026-05-15')
+    const messageIds = new Set(rows.map((row) => row.message_id))
+    expect(rows).toHaveLength(4)
+    expect(messageIds.size).toBe(4)
   })
 
   it('dedupes cross-day messages: a resent user message lives only in its first day', async function() {

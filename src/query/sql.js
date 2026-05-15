@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import { asyncRow, collect, executeSql, extractTables, parseSql } from 'squirreling'
 import { parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
+import { icebergDataSource, loadLatestFileCatalogMetadata } from 'icebird'
 import {
   QUERY_DATASETS,
   columnsForDataset,
@@ -14,11 +15,13 @@ import {
   readCollectionCacheMeta,
 } from './collections.js'
 import { readCacheCursor } from './iceberg/cursor.js'
-import { readRowsFromCursor } from './iceberg/store.js'
+import { createLocalIcebergIO } from './iceberg/resolver.js'
+import { queryCacheTableExists } from './iceberg/store.js'
 
 /**
  * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
  * @import { CachePartition, QueryDataset, QueryPaths, QueryResultSet, QueryScope } from './types.js'
+ * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
 /**
@@ -62,10 +65,9 @@ export function prepareReadOnlySql(sql, defaultLimit, collectionTables = []) {
  * @returns {Promise<QueryResultSet>}
  */
 export async function executeLogicalSql(args) {
-  const tables = buildTables(args.paths, {
-    ...args.scope,
-    ...(args.datasets.length === 0 ? {} : { datasets: args.datasets }),
-  })
+  const tables = args.datasets.length === 0
+    ? {}
+    : await buildTables(args.paths, { ...args.scope, datasets: args.datasets })
   const results = executeSql({ tables, query: args.statement })
   const rows = await collect(results)
   return { columns: results.columns, rows }
@@ -74,9 +76,9 @@ export async function executeLogicalSql(args) {
 /**
  * @param {QueryPaths} paths
  * @param {QueryScope} scope
- * @returns {Record<string, AsyncDataSource>}
+ * @returns {Promise<Record<string, AsyncDataSource>>}
  */
-export function buildTables(paths, scope) {
+export async function buildTables(paths, scope) {
   const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const builtinDatasets = requested ? requested.filter(isQueryDataset) : [...QUERY_DATASETS]
   const collectionDatasets = requested
@@ -95,8 +97,16 @@ export function buildTables(paths, scope) {
 
   /** @type {Record<string, AsyncDataSource>} */
   const tables = {}
+  /** @type {Promise<{ resolver: Resolver, lister: Lister }> | undefined} */
+  let localIcebergIO
+  function getLocalIcebergIO() {
+    localIcebergIO ??= createLocalIcebergIO()
+    return localIcebergIO
+  }
   for (const dataset of builtinDatasets) {
-    tables[dataset] = cacheDataSource(dataset, byDataset[dataset] ?? [], scope)
+    tables[dataset] = dataset === 'gascity_messages'
+      ? gascityDataSource(dataset, byDataset[dataset] ?? [], scope)
+      : buildCacheDataSource(dataset, byDataset[dataset] ?? [], scope, await getLocalIcebergIO())
   }
   /** @type {Record<string, import('./types.js').CollectionCachePartition[]>} */
   const byCollection = {}
@@ -106,7 +116,7 @@ export function buildTables(paths, scope) {
     byCollection[partition.table].push(partition)
   }
   for (const dataset of collectionDatasets) {
-    tables[dataset] = collectionDataSource(dataset, byCollection[dataset] ?? [], scope)
+    tables[dataset] = buildCollectionDataSource(dataset, byCollection[dataset] ?? [], scope, await getLocalIcebergIO())
   }
   return tables
 }
@@ -115,23 +125,34 @@ export function buildTables(paths, scope) {
  * @param {QueryDataset} dataset
  * @param {CachePartition[]} partitions
  * @param {QueryScope} scope
+ * @returns {Promise<AsyncDataSource>}
+ */
+export async function cacheDataSource(dataset, partitions, scope) {
+  if (dataset === 'gascity_messages') return gascityDataSource(dataset, partitions, scope)
+  return buildCacheDataSource(dataset, partitions, scope, await createLocalIcebergIO())
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {CachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @param {{ resolver: Resolver, lister: Lister }} io
  * @returns {AsyncDataSource}
  */
-export function cacheDataSource(dataset, partitions, scope) {
+function buildCacheDataSource(dataset, partitions, scope, io) {
   const columns = columnsForDataset(dataset).map((column) => column.name)
-  // Gascity partitions don't carry a row-count sidecar (the daemon writes
-  // Parquet directly without `.meta.json`). Skipping the hint forces
-  // squirreling to fall back to scan-based COUNT(*) for `gascity_messages`,
-  // which is correct rather than silently optimised down to zero.
-  const numRows = dataset === 'gascity_messages'
-    ? undefined
-    : partitions.reduce((sum, partition) => sum + readRowCountHint(partition), 0)
+  const sources = /** @type {Promise<Array<{ partition: CachePartition, source: AsyncDataSource }>>} */ (
+    loadIcebergPartitionSources(partitions, io, 'builtin')
+  )
+  const numRows = canUseBuiltinRowCount(scope)
+    ? partitions.reduce((sum, partition) => sum + readRowCountHint(partition), 0)
+    : undefined
   /** @type {AsyncDataSource} */
   const source = {
     columns,
     scan(options) {
       return {
-        rows: () => scanRows(dataset, partitions, scope, options),
+        rows: () => scanBuiltinIcebergRows(dataset, sources, columns, scope, options),
         appliedWhere: false,
         appliedLimitOffset: false,
       }
@@ -142,20 +163,56 @@ export function cacheDataSource(dataset, partitions, scope) {
 }
 
 /**
- * @param {string} table
- * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryDataset} dataset
+ * @param {CachePartition[]} partitions
  * @param {QueryScope} scope
  * @returns {AsyncDataSource}
  */
-export function collectionDataSource(table, partitions, scope) {
-  const columns = collectionColumns(partitions)
-  const numRows = partitions.reduce((sum, partition) => sum + readCollectionRowCountHint(partition), 0)
+function gascityDataSource(dataset, partitions, scope) {
+  const columns = columnsForDataset(dataset).map((column) => column.name)
   return {
     columns,
-    numRows,
     scan(options) {
       return {
-        rows: () => scanCollectionRows(table, partitions, scope, options),
+        rows: () => scanGascityRows(dataset, partitions, scope, options),
+        appliedWhere: false,
+        appliedLimitOffset: false,
+      }
+    },
+  }
+}
+
+/**
+ * @param {string} table
+ * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @returns {Promise<AsyncDataSource>}
+ */
+export async function collectionDataSource(table, partitions, scope) {
+  return buildCollectionDataSource(table, partitions, scope, await createLocalIcebergIO())
+}
+
+/**
+ * @param {string} table
+ * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryScope} scope
+ * @param {{ resolver: Resolver, lister: Lister }} io
+ * @returns {AsyncDataSource}
+ */
+function buildCollectionDataSource(table, partitions, scope, io) {
+  const columns = collectionColumns(partitions)
+  const sources = /** @type {Promise<Array<{ partition: import('./types.js').CollectionCachePartition, source: AsyncDataSource, meta?: import('./types.js').CollectionCacheMeta }>>} */ (
+    loadIcebergPartitionSources(partitions, io, 'collection')
+  )
+  const numRows = canUseCollectionRowCount(scope)
+    ? partitions.reduce((sum, partition) => sum + readCollectionRowCountHint(partition), 0)
+    : undefined
+  return {
+    columns,
+    ...(numRows === undefined ? {} : { numRows }),
+    scan(options) {
+      return {
+        rows: () => scanCollectionIcebergRows(table, sources, columns, scope, options),
         appliedWhere: false,
         appliedLimitOffset: false,
       }
@@ -170,7 +227,7 @@ export function collectionDataSource(table, partitions, scope) {
  * @param {ScanOptions} options
  * @returns {AsyncGenerator<AsyncRow>}
  */
-async function* scanRows(dataset, partitions, scope, options) {
+async function* scanGascityRows(dataset, partitions, scope, options) {
   const requestedColumns = options.columns && options.columns.length > 0
     ? options.columns
     : columnsForDataset(dataset).map((column) => column.name)
@@ -178,9 +235,7 @@ async function* scanRows(dataset, partitions, scope, options) {
   const seenRowIds = new Set()
   for (const partition of partitions) {
     if (options.signal?.aborted) return
-    const rows = dataset === 'gascity_messages'
-      ? await readGascityParquetRows(partition)
-      : await readIcebergRows(partition)
+    const rows = await readGascityParquetRows(partition)
     for (const row of rows) {
       if (options.signal?.aborted) return
       const rowId = row._ctvs_row_id
@@ -196,24 +251,67 @@ async function* scanRows(dataset, partitions, scope, options) {
 }
 
 /**
- * @param {string} table
- * @param {import('./types.js').CollectionCachePartition[]} partitions
+ * @param {QueryDataset} dataset
+ * @param {Promise<Array<{ partition: CachePartition, source: AsyncDataSource }>>} sourcesPromise
+ * @param {string[]} columns
  * @param {QueryScope} scope
  * @param {ScanOptions} options
  * @returns {AsyncGenerator<AsyncRow>}
  */
-async function* scanCollectionRows(table, partitions, scope, options) {
+async function* scanBuiltinIcebergRows(dataset, sourcesPromise, columns, scope, options) {
   const requestedColumns = options.columns && options.columns.length > 0
     ? options.columns
-    : collectionColumns(partitions)
+    : columns
+  const innerColumns = scanColumnsWithPrivateColumns(
+    requestedColumns,
+    builtinScopeColumns(dataset, scope)
+  )
   /** @type {Set<string>} */
   const seenRowIds = new Set()
-  for (const partition of partitions) {
+  const sources = await sourcesPromise
+  for (const { partition, source } of sources) {
     if (options.signal?.aborted) return
-    const meta = readCollectionCacheMeta(partition.cursorPath)
-    const rows = await readIcebergRows(partition)
-    for (const row of rows) {
+    const scan = source.scan({ columns: innerColumns, where: options.where, signal: options.signal })
+    for await (const sourceRow of scan.rows()) {
       if (options.signal?.aborted) return
+      const row = await resolveAsyncRow(sourceRow)
+      const rowId = row._ctvs_row_id
+      if (typeof rowId === 'string') {
+        if (seenRowIds.has(rowId)) continue
+        seenRowIds.add(rowId)
+      }
+      const logical = normalizeLogicalRow(row, partition)
+      if (!rowMatchesScope(dataset, logical, scope)) continue
+      yield asyncRow(projectRow(logical, requestedColumns), requestedColumns)
+    }
+  }
+}
+
+/**
+ * @param {string} table
+ * @param {Promise<Array<{ partition: import('./types.js').CollectionCachePartition, source: AsyncDataSource, meta?: import('./types.js').CollectionCacheMeta }>>} sourcesPromise
+ * @param {string[]} columns
+ * @param {QueryScope} scope
+ * @param {ScanOptions} options
+ * @returns {AsyncGenerator<AsyncRow>}
+ */
+async function* scanCollectionIcebergRows(table, sourcesPromise, columns, scope, options) {
+  const requestedColumns = options.columns && options.columns.length > 0
+    ? options.columns
+    : columns
+  /** @type {Set<string>} */
+  const seenRowIds = new Set()
+  const sources = await sourcesPromise
+  for (const { source, meta } of sources) {
+    if (options.signal?.aborted) return
+    const innerColumns = scanColumnsWithPrivateColumns(
+      requestedColumns,
+      collectionScopeColumns(meta, scope)
+    )
+    const scan = source.scan({ columns: innerColumns, where: options.where, signal: options.signal })
+    for await (const sourceRow of scan.rows()) {
+      if (options.signal?.aborted) return
+      const row = await resolveAsyncRow(sourceRow)
       const rowId = row._ctvs_row_id
       if (typeof rowId === 'string') {
         if (seenRowIds.has(rowId)) continue
@@ -233,17 +331,119 @@ async function* scanCollectionRows(table, partitions, scope, options) {
 async function readGascityParquetRows(partition) {
   const buf = fs.readFileSync(partition.cachePath)
   const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
-  return parquetReadObjects({ file, compressors })
+  return await parquetReadObjects({ file, compressors })
 }
 
 /**
- * @param {{ cursorPath: string }} partition
- * @returns {Promise<Record<string, unknown>[]>}
+ * @param {Array<CachePartition | import('./types.js').CollectionCachePartition>} partitions
+ * @param {{ resolver: Resolver, lister: Lister }} io
+ * @param {'builtin' | 'collection'} kind
+ * @returns {Promise<Array<{ partition: CachePartition | import('./types.js').CollectionCachePartition, source: AsyncDataSource, meta?: import('./types.js').CollectionCacheMeta }>>}
  */
-async function readIcebergRows(partition) {
-  const cursor = readCacheCursor(partition.cursorPath)
-  if (!cursor) return []
-  return readRowsFromCursor(cursor)
+async function loadIcebergPartitionSources(partitions, io, kind) {
+  const loaded = await Promise.all(partitions.map(async (partition) => {
+    const cursor = readCacheCursor(partition.cursorPath)
+    if (!cursor || cursor.kind !== kind) return undefined
+    if (!queryCacheTableExists(cursor.table_path)) return undefined
+    const tableUrl = cursor.table_url || partition.tableUrl
+    const { metadata } = await loadLatestFileCatalogMetadata({
+      tableUrl,
+      resolver: io.resolver,
+      lister: io.lister,
+    })
+    if (!hasCurrentSnapshot(metadata)) return undefined
+    const source = await icebergDataSource({
+      tableUrl,
+      metadata,
+      resolver: io.resolver,
+      lister: io.lister,
+    })
+    return {
+      partition,
+      source,
+      ...(kind === 'collection' ? { meta: readCollectionCacheMeta(partition.cursorPath) } : {}),
+    }
+  }))
+  return loaded.filter((entry) => entry !== undefined)
+}
+
+/**
+ * @param {TableMetadata} metadata
+ * @returns {boolean}
+ */
+function hasCurrentSnapshot(metadata) {
+  const snapshotId = metadata['current-snapshot-id']
+  return snapshotId !== undefined &&
+    snapshotId !== null &&
+    Boolean(metadata.snapshots?.some((snapshot) => snapshot['snapshot-id'] === snapshotId))
+}
+
+/**
+ * @param {AsyncRow} row
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function resolveAsyncRow(row) {
+  /** @type {Record<string, unknown>} */
+  const out = row.resolved ? { ...row.resolved } : {}
+  for (const column of row.columns) {
+    if (Object.prototype.hasOwnProperty.call(out, column)) continue
+    out[column] = await row.cells[column]?.()
+  }
+  return out
+}
+
+/**
+ * @param {string[]} requestedColumns
+ * @param {string[]} scopeColumns
+ * @returns {string[]}
+ */
+function scanColumnsWithPrivateColumns(requestedColumns, scopeColumns) {
+  return [...new Set([...requestedColumns, ...scopeColumns, '_ctvs_row_id'])]
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @param {QueryScope} scope
+ * @returns {string[]}
+ */
+function builtinScopeColumns(dataset, scope) {
+  /** @type {string[]} */
+  const columns = []
+  if (scope.service) columns.push('serviceName')
+  if (scope.from || scope.to) columns.push(...fallbackTimestampColumns(dataset))
+  return columns
+}
+
+/**
+ * @param {import('./types.js').CollectionCacheMeta | undefined} meta
+ * @param {QueryScope} scope
+ * @returns {string[]}
+ */
+function collectionScopeColumns(meta, scope) {
+  /** @type {string[]} */
+  const columns = []
+  if (scope.service) columns.push('serviceName', 'service_name')
+  if (scope.date || scope.from || scope.to) {
+    if (meta?.timestamp_column) columns.push(meta.timestamp_column)
+    columns.push('timestamp', 'time', 'ts', 'created_at', 'createdat', 'date')
+  }
+  return columns
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function canUseBuiltinRowCount(scope) {
+  return !scope.service && !scope.from && !scope.to
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function canUseCollectionRowCount(scope) {
+  return !scope.service && !scope.date && !scope.from && !scope.to
 }
 
 /**

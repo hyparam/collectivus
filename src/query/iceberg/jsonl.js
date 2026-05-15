@@ -27,6 +27,7 @@ export async function readJsonlEntryBatches(filePath, options = {}, onBatch = ()
   const {
     startByteOffset = 0,
     startLineNumber = 0,
+    endByteOffset,
     batchRows = DEFAULT_BATCH_ROWS,
     batchBytes = DEFAULT_BATCH_BYTES,
   } = options
@@ -34,6 +35,9 @@ export async function readJsonlEntryBatches(filePath, options = {}, onBatch = ()
   if (startByteOffset > stat.size) {
     throw new Error(`source JSONL was truncated: ${filePath}`)
   }
+  const readEndOffset = endByteOffset === undefined
+    ? stat.size
+    : Math.max(startByteOffset, Math.min(endByteOffset, stat.size))
 
   /** @type {JsonlEntry[]} */
   let entries = []
@@ -59,10 +63,10 @@ export async function readJsonlEntryBatches(filePath, options = {}, onBatch = ()
     await onBatch(batch)
   }
 
-  if (startByteOffset < stat.size) {
+  if (startByteOffset < readEndOffset) {
     const stream = fs.createReadStream(filePath, {
       start: startByteOffset,
-      end: stat.size - 1,
+      end: readEndOffset - 1,
       highWaterMark: STREAM_HIGH_WATER_MARK,
     })
     for await (const chunk of stream) {

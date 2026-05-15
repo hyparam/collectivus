@@ -6,14 +6,27 @@
 [![minzipped](https://img.shields.io/bundlephobia/minzip/collectivus)](https://www.npmjs.com/package/collectivus)
 [![workflow status](https://github.com/hyparam/collectivus/actions/workflows/ci.yml/badge.svg)](https://github.com/hyparam/collectivus/actions)
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
-[![dependencies](https://img.shields.io/badge/Dependencies-0-blueviolet)](https://www.npmjs.com/package/collectivus?activeTab=dependencies)
 [![container](https://img.shields.io/badge/container-ghcr.io%2Fhyparam%2Fcollectivus-blue)](https://github.com/orgs/hyparam/packages/container/package/collectivus)
 
-Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two listeners in one process record everything to local JSONL: an OpenTelemetry receiver that normalizes traces, metrics, and logs by signal and service, and a transparent reverse proxy for LLM APIs that captures every request and SSE event. Pick one or run both.
+Collectivus records AI-agent and application telemetry into local files you
+can query. Run it as a transparent LLM proxy for Claude Code, Codex,
+Anthropic, and OpenAI-compatible APIs; accept OTLP traces, metrics, and logs;
+subscribe to gascity supervisor transcripts; or register arbitrary JSONL as a
+SQL table. The default path is Standalone: config, recordings, and query cache
+stay on this machine.
 
-- **OTLP receiver**: traces, metrics, and logs over HTTP, normalized to JSONL
-- **LLM proxy**: transparent pass-through for Anthropic Messages and OpenAI-compatible APIs, full request/response capture
-- **Zero dependencies**: Node built-ins only, single binary, instant startup
+- **LLM proxy capture**: full request/response and SSE event recordings for
+  Claude Code, Codex, Anthropic, and OpenAI-compatible APIs.
+- **Agent transcripts**: gascity supervisor capture writes one queryable row
+  per content block with agent identity and token usage.
+- **Application telemetry**: OTLP traces, metrics, and logs over HTTP,
+  normalized to JSONL by signal and service.
+- **Local query**: Parquet-backed `ctvs query` commands and SQL over
+  `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and
+  registered JSONL collections.
+- **Optional operations path**: export to local Parquet, archive daily
+  snapshots to S3, or run Gateway/Central server deployments when many hosts
+  need one control plane.
 
 ## Installation
 
@@ -21,66 +34,22 @@ Collectivus is an OTLP collector and pass-through LLM proxy in pure Node.js. Two
 npm install collectivus
 ```
 
-Or run the container image published from this repo:
+Or run it without adding it to the current project:
 
 ```bash
-docker pull ghcr.io/hyparam/collectivus:latest
-docker run --rm ghcr.io/hyparam/collectivus:latest --help
+npx -p collectivus ctvs --help
 ```
 
-The image entrypoint is the `ctvs` CLI. Choose what the container runs by
-passing the same arguments you would pass to `ctvs`:
+The GHCR image is available for containerized Standalone, Gateway, Central
+server, and rendezvous deployments. See
+[Advanced deployments](#advanced-deployments) when you need that path.
 
-```bash
-# Central server, gateway, or standalone: selected by role in the config file.
-docker run --rm ghcr.io/hyparam/collectivus:latest --config /config/collectivus.json
-
-# Same, but with config JSON injected as an environment variable.
-docker run --rm -e COLLECTIVUS_CONFIG_JSON ghcr.io/hyparam/collectivus:latest \
-  --config-env COLLECTIVUS_CONFIG_JSON
-
-# Hosted-discovery rendezvous server: selected by the rendezvous subcommand.
-docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
-```
-
-To run Central server and rendezvous on the same host, run two containers from
-the same image with separate commands, ports, and data volumes.
-
-### Self-hosting
-
-The repo ships a reference [`docker-compose.yml`](docker-compose.yml) and a
-matching [`.env.example`](.env.example) that bring up the central server and
-rendezvous together so the `ctvs invite create` → `ctvs join` flow works end
-to end:
-
-```bash
-cp .env.example .env
-# fill in three high-entropy secrets (openssl rand -hex 32) and two public URLs:
-#   COLLECTIVUS_ADMIN_TOKEN, COLLECTIVUS_IDENTITY_SECRET,
-#   COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN, COLLECTIVUS_RENDEZVOUS_URL,
-#   COLLECTIVUS_PUBLIC_URL
-docker compose up -d
-```
-
-See [`docs/self-hosting-docker.md`](docs/self-hosting-docker.md) for the full
-walkthrough — TLS termination (Caddy / nginx / Traefik), token rotation,
-volume backup, and a troubleshooting checklist.
-
-### AWS ECS (optional)
-
-An AWS CDK app under [`infra/aws/`](infra/aws/) deploys the same two services
-as ECS Fargate tasks behind ALBs, backed by encrypted EFS state and a private
-S3 archive bucket. The compose path above is the supported default; reach for
-the CDK app only if you already have an AWS deployment target.
-
-## Quick start: record claude-code
+## Quick start: record Claude Code
 
 The fastest path is the interactive walkthrough. Run `ctvs` with no
-arguments and choose Standalone or Central server. Standalone keeps config and
-recordings on this machine; Central server vendors per-gateway config and
-receives shipped ingest.
-For Standalone, the walkthrough also asks where to write recordings and
-whether to install as a daemon and attach Claude Code:
+arguments and choose Standalone. The walkthrough writes a local proxy config,
+asks where to store recordings, and can install a background daemon and attach
+Claude Code:
 
 ```bash
 npx -p collectivus ctvs
@@ -149,23 +118,6 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 | `upload`  | Optional. Enables the daily S3 parquet drain. See [S3 upload](#s3-upload). |
 | `query`   | Optional. Configures the local `ctvs query` Parquet cache. `query.parquet.enabled` defaults to `true`; `query.parquet.dir` defaults to `<recording-root>/.collectivus-query/parquet`. |
 
-Add an `upload` block to drain JSONL to S3 once a day:
-
-```json
-{
-  "version": 1,
-  "proxy": { "listen": "127.0.0.1:8787", "upstreams": [] },
-  "sink":   { "type": "file", "dir": "./collectivus-data" },
-  "upload": {
-    "bucket": "my-collectivus-archive",
-    "prefix": "collectivus",
-    "region": "us-east-1",
-    "time":   "00:10",
-    "signals": ["logs", "traces", "metrics", "proxy"]
-  }
-}
-```
-
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
 ```bash
@@ -179,247 +131,12 @@ and makes `sink` mandatory whenever `otel` or `proxy` is set in Standalone
 mode. v0 configs (missing the `version` field) hard-fail with a clear error —
 the walkthrough writes v1 only.
 
-## Config vending (multi-host deployments)
-
-For fleets of gateways behind a single audit/storage backend, run one
-collectivus host as the central server (`role: "server"`) and point each
-managed host at it as a gateway (`role: "gateway"`). The central server vendors
-per-gateway configs over `GET /v1/config` (with `If-None-Match` / `ETag`) and
-accepts ingest from each gateway. Gateways pull their config every
-`central_server.poll_interval_seconds` (default 30, range 5–3600) and
-hot-reload only the listener whose section changed.
-
-Run `npx collectivus` interactively and choose Central server to write a
-server config. That flow asks for `server.public_url`, which should be the URL
-gateways can actually reach (for ECS/Docker, usually the load balancer URL).
-Start the server with either npm or a container:
-
-```bash
-npx -p collectivus ctvs --config /etc/collectivus-server.json
-# or after npm install -g collectivus:
-ctvs --config /etc/collectivus-server.json
-# or in Docker/ECS, mount the config + data_dir and pass:
-docker run --rm -p 8788:8788 \
-  -v /host/config:/config:ro \
-  -v collectivus-server-data:/data \
-  ghcr.io/hyparam/collectivus:latest \
-  --config /config/collectivus-server.json
-```
-
-When using the container, set `server.data_dir`,
-`server.identity_issuer.bootstrap_store_path`, and any ingest `sink_dir` under
-the mounted `/data` volume, and make sure that volume is writable by UID 1000
-(`node` inside the image).
-
-Gateway mode treats Central server as the canonical recording store. Proxy and
-OTLP rows are written first to a durable delivery outbox under
-`central_server.outbox_dir` (default: `<dirname(identity.json)>/outbox`) and
-then shipped to `POST /v1/ingest/<signal>`. The outbox is a transient retry
-spool, not a local queryable archive; deleted gateway configs stop old JWTs
-from ingesting or refreshing.
-
-Operator workflow on the server host:
-
-```bash
-# 1. Issue a one-shot bootstrap token for a new gateway. If server.public_url is
-#    set, stderr also prints the one-line gateway setup command.
-ctvs config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
-# stdout → bt_abc123...
-# stderr → npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
-
-# 2. Register the per-gateway config the gateway will pull. Validated server-
-#    side; an invalid file is rejected before any bytes hit disk.
-ctvs config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
-
-# 3. Operator inspection / cleanup tools.
-ctvs config get gw-prod-1 --server-config /etc/collectivus-server.json
-ctvs config list --server-config /etc/collectivus-server.json
-ctvs config delete gw-prod-1 --server-config /etc/collectivus-server.json
-```
-
-These commands are local operator tools for the central server host. They read
-the server config only to find the same on-disk config registry and bootstrap
-token store used by the running central server.
-
-When the Central server config is injected through an environment variable
-(for example Docker/ECS with `--config-env COLLECTIVUS_SERVER_CONFIG`), use the
-matching operator flag:
-
-```bash
-ctvs config bootstrap-token issue gw-prod-1 \
-  --server-config-env COLLECTIVUS_SERVER_CONFIG
-```
-
-Gateway side, run the setup command printed by the token issuer:
-
-```bash
-npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
-# → fetches the registered gateway config with the bootstrap token overlaid,
-#   exchanges the token for a 30-day JWT, persists it to
-#   ~/.hyp/collectivus/identity.json, then begins polling /v1/config.
-```
-
-The config endpoint does not consume the token; the token is consumed only when
-the gateway posts to `/v1/identity/bootstrap`. Once the gateway has a JWT, the
-persisted identity handles refresh until the JWT itself rotates.
-
-### Hosted discovery rendezvous
-
-For private Central server URLs that are hard to type or distribute, you can
-run a hosted-discovery rendezvous service. Rendezvous stores only
-`sha256(join_code)`, the Central server connect URL, gateway id, expiry, and
-optional display metadata; it never stores plaintext join codes, configs,
-telemetry, JWTs, issuer secrets, or bootstrap tokens. With rendezvous, the
-short join key is not the bootstrap token; Central mints a fresh one-shot
-bootstrap token after the key is resolved.
-
-Start rendezvous with a shared registration bearer token:
-
-```bash
-ctvs rendezvous --listen 0.0.0.0:8789 --data-dir ~/.hyp/collectivus/rendezvous \
-  --registration-token "$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN"
-```
-
-The same service can run directly from the GHCR image:
-
-```bash
-docker volume create collectivus-rendezvous
-docker run --rm -p 8789:8789 \
-  -e COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN="$COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN" \
-  -v collectivus-rendezvous:/data \
-  ghcr.io/hyparam/collectivus:latest \
-  rendezvous --listen 0.0.0.0:8789 --data-dir /data/rendezvous
-```
-
-Then issue a short join key and register its hash with rendezvous in one step:
-
-```bash
-ctvs config bootstrap-token issue acme-gateway \
-  --server-config /etc/collectivus-server.json \
-  --rendezvous https://join.collectivus.example \
-  --max-uses 25
-```
-
-`--rendezvous-token` can be passed explicitly; otherwise the operator CLI reads
-`COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN`. The short join key prints on
-stdout for scripts. `--max-uses` defaults to 1; values greater than 1 enroll
-gateways as `<gateway-id>-1`, `<gateway-id>-2`, and so on. `--ttl-seconds`
-controls the key expiry. Stderr prints the gateway command:
-
-```bash
-npx collectivus join <join-code> --rendezvous https://join.collectivus.example
-```
-
-When invoked through `npx`, `ctvs join` submits the join code in a POST body,
-resolves the Central server URL, asks that server to mint a one-shot bootstrap
-token for this enrollment, runs `npm install -g collectivus`, exchanges the
-bootstrap token for a long-lived JWT, writes the authenticated Central-vended config to
-`~/.hyp/collectivus.json`, and installs the background daemon against that
-config. The JWT is persisted to `~/.hyp/collectivus/identity.json` before the
-daemon starts. If the vended config has a proxy listener, `join` also points
-Claude Code at that local proxy. A globally installed `ctvs join` still runs the
-gateway in the foreground for debugging.
-
-Security note: in v1, rendezvous does not pin or cryptographically verify the
-Central server URL it returns. This is appropriate when gateways can reach the
-Central server only through private/VPC networking or constrained egress. If a
-gateway can reach arbitrary internet destinations, a compromised rendezvous
-server could return a fake Central URL that the gateway would trust.
-
-The interactive walkthrough builds Standalone and Central server configs.
-Gateway hosts use the one-line setup command printed by the Central server
-bootstrap-token issuer.
-
-## S3 upload
-
-Standalone and Central server modes write JSONL to their configured local
-recording root. When the `upload` block is configured, a daily scheduler drains
-the previous day's JSONL into Parquet partitions in S3. Object keys are
-Hive-partitioned:
-
-```
-<prefix>/<gateway_id>/<signal-or-dataset>/date=<YYYY-MM-DD>/data.parquet
-```
-
-OTLP signals use `logs`, `traces`, or `metrics` as the middle segment. Proxy
-traffic is materialized as the `proxy_messages` dataset.
-
-This is useful for long-term retention, columnar queries with
-Athena / DuckDB / Snowflake, and offsite backup of recordings that would
-otherwise live only on the daemon host. The local JSONL is the source of
-truth; the S3 drain is additive and idempotent (a per-(gateway_id, signal,
-date) ledger and a HEAD check on the destination key prevent duplicate
-uploads).
-
-| Field         | Required | Default     | Notes                                         |
-|---------------|----------|-------------|-----------------------------------------------|
-| `bucket`      | yes      | —           | Destination S3 bucket name.                   |
-| `prefix`      | no       | `collectivus` | Key prefix under the bucket.               |
-| `region`      | no       | `AWS_REGION` env, or `us-east-1` | AWS region. |
-| `time`        | no       | `00:10`     | Daily run time, `HH:MM` UTC.                  |
-| `signals`     | no       | all four    | Subset of `logs`, `traces`, `metrics`, `proxy`. |
-| `catchupDays` | no       | `30`        | Look back this many days for unuploaded JSONL. |
-| `endpoint`    | no       | —           | Custom S3-compatible endpoint (e.g. MinIO).   |
-
-### Credentials
-
-Credentials are never stored in the config. They are resolved at daemon start
-from one of these sources:
-
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for local/dev or explicit
-  static credentials.
-- ECS task-role credentials exposed through
-  `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
-  `AWS_CONTAINER_CREDENTIALS_FULL_URI`.
-- `AWS_CONTAINER_AUTHORIZATION_TOKEN` or
-  `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` when the container credential
-  endpoint requires an auth token.
-- `AWS_SESSION_TOKEN` (optional, for temporary credentials)
-- `AWS_REGION` (optional; the `upload.region` config field overrides this)
-
-When `upload` is set in the config but no supported AWS credential source is
-available, the daemon fails fast at startup rather than at the first daily tick.
-
-## OTLP receiver
-
-The OTLP receiver accepts JSON and protobuf payloads on the standard endpoints:
-
-- `POST /v1/traces`
-- `POST /v1/metrics`
-- `POST /v1/logs`
-
-Output layout under `sink.dir`:
-
-```
-collectivus-data/
-└── <gateway_id>/
-    ├── raw/
-    │   ├── traces/<UTC-date>.jsonl       # raw export envelope
-    │   ├── metrics/<UTC-date>.jsonl
-    │   └── logs/<UTC-date>.jsonl
-    ├── traces/<UTC-date>.jsonl           # one row per span
-    ├── metrics/<UTC-date>.jsonl          # one row per data point
-    └── logs/<UTC-date>.jsonl             # one row per log record
-```
-
-Each normalized row includes the source `service.name`, while files are
-partitioned by `gateway_id`, signal, and date.
-
-### Verify the OTLP receiver
-
-```bash
-npx -p collectivus ctvs --config collectivus.json &
-curl -X POST localhost:4318/v1/traces \
-  -H 'Content-Type: application/json' \
-  -d '{"resourceSpans":[]}'
-```
-
 ## LLM proxy mode
 
-The proxy is a transparent reverse proxy for Anthropic's Messages API. With
-`ANTHROPIC_BASE_URL=http://127.0.0.1:8787`, every claude-code call routes
-through collectivus, gets forwarded to `https://api.anthropic.com`, and is
-recorded to JSONL.
+The proxy is a transparent reverse proxy for Anthropic's Messages API and
+OpenAI-compatible APIs. With `ANTHROPIC_BASE_URL=http://127.0.0.1:8787`,
+every Claude Code call routes through collectivus, gets forwarded to
+`https://api.anthropic.com`, and is recorded to JSONL.
 
 Two row kinds in `<sink.dir>/<gateway_id>/proxy/<UTC-date>.jsonl`:
 
@@ -537,6 +254,7 @@ ctvs query metrics series latency.ms --config collectivus.json
 ctvs query proxy get <conversation-id> --config collectivus.json --format json
 ctvs query sql "select serviceName, count(*) as logs from logs group by serviceName"
 ctvs collect random-log.jsonl --name random-log --config collectivus.json
+ctvs collect --glob '.gc/runtime/**/*.jsonl' --name session-segments --config collectivus.json
 ctvs query sql "select * from random_log" --config collectivus.json
 ```
 
@@ -565,7 +283,7 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; `ctvs collect --glob <pattern> --name <name>` backs one table with many JSONL files. Names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
 
 ### Conversation log model
 
@@ -621,13 +339,48 @@ ctvs skills install --client all
 The skill assumes the default `~/.hyp/collectivus.json` config unless the agent
 discovers a non-default service config from `ctvs status` or the service unit.
 
+## OTLP receiver
+
+The OTLP receiver accepts JSON and protobuf payloads on the standard endpoints:
+
+- `POST /v1/traces`
+- `POST /v1/metrics`
+- `POST /v1/logs`
+
+Output layout under `sink.dir`:
+
+```
+collectivus-data/
+└── <gateway_id>/
+    ├── raw/
+    │   ├── traces/<UTC-date>.jsonl       # raw export envelope
+    │   ├── metrics/<UTC-date>.jsonl
+    │   └── logs/<UTC-date>.jsonl
+    ├── traces/<UTC-date>.jsonl           # one row per span
+    ├── metrics/<UTC-date>.jsonl          # one row per data point
+    └── logs/<UTC-date>.jsonl             # one row per log record
+```
+
+Each normalized row includes the source `service.name`, while files are
+partitioned by `gateway_id`, signal, and date.
+
+### Verify the OTLP receiver
+
+```bash
+npx -p collectivus ctvs --config collectivus.json &
+curl -X POST localhost:4318/v1/traces \
+  -H 'Content-Type: application/json' \
+  -d '{"resourceSpans":[]}'
+```
+
 ## CLI
 
 ```text
 ctvs --config <path>                         Run with config file
 ctvs --config <path> --print-config          Validate + print resolved config
 ctvs query <command> [...]                   Query local recordings
-ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
+ctvs collect <file.jsonl>|--glob <pattern> --name <name>
+                                             Add external JSONL as a query table
 ctvs export --config <path> [...]            Convert recorded JSONL to local Parquet (one-shot)
 ctvs --help                                  Show usage
 ```
@@ -662,6 +415,73 @@ ctvs export --config <path> [--out <dir>] [--date YYYY-MM-DD]
 
 `--date`, `--gateway-id`, and `--signal` only filter the OTLP path; proxy
 JSONL is always drained when present.
+
+## S3 upload
+
+Standalone and Central server modes write JSONL to their configured local
+recording root. When the `upload` block is configured, a daily scheduler drains
+the previous day's JSONL into Parquet partitions in S3. Object keys are
+Hive-partitioned:
+
+```
+<prefix>/<gateway_id>/<signal-or-dataset>/date=<YYYY-MM-DD>/data.parquet
+```
+
+OTLP signals use `logs`, `traces`, or `metrics` as the middle segment. Proxy
+traffic is materialized as the `proxy_messages` dataset.
+
+This is useful for long-term retention, columnar queries with
+Athena / DuckDB / Snowflake, and offsite backup of recordings that would
+otherwise live only on the daemon host. The local JSONL is the source of
+truth; the S3 drain is additive and idempotent (a per-(gateway_id, signal,
+date) ledger and a HEAD check on the destination key prevent duplicate
+uploads).
+
+Add an `upload` block to drain JSONL to S3 once a day:
+
+```json
+{
+  "version": 1,
+  "proxy": { "listen": "127.0.0.1:8787", "upstreams": [] },
+  "sink":   { "type": "file", "dir": "./collectivus-data" },
+  "upload": {
+    "bucket": "my-collectivus-archive",
+    "prefix": "collectivus",
+    "region": "us-east-1",
+    "time":   "00:10",
+    "signals": ["logs", "traces", "metrics", "proxy"]
+  }
+}
+```
+
+| Field         | Required | Default     | Notes                                         |
+|---------------|----------|-------------|-----------------------------------------------|
+| `bucket`      | yes      | -           | Destination S3 bucket name.                   |
+| `prefix`      | no       | `collectivus` | Key prefix under the bucket.               |
+| `region`      | no       | `AWS_REGION` env, or `us-east-1` | AWS region. |
+| `time`        | no       | `00:10`     | Daily run time, `HH:MM` UTC.                  |
+| `signals`     | no       | all four    | Subset of `logs`, `traces`, `metrics`, `proxy`. |
+| `catchupDays` | no       | `30`        | Look back this many days for unuploaded JSONL. |
+| `endpoint`    | no       | -           | Custom S3-compatible endpoint (e.g. MinIO).   |
+
+### Credentials
+
+Credentials are never stored in the config. They are resolved at daemon start
+from one of these sources:
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for local/dev or explicit
+  static credentials.
+- ECS task-role credentials exposed through
+  `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI`.
+- `AWS_CONTAINER_AUTHORIZATION_TOKEN` or
+  `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` when the container credential
+  endpoint requires an auth token.
+- `AWS_SESSION_TOKEN` (optional, for temporary credentials)
+- `AWS_REGION` (optional; the `upload.region` config field overrides this)
+
+When `upload` is set in the config but no supported AWS credential source is
+available, the daemon fails fast at startup rather than at the first daily tick.
 
 ## Programmatic use
 
@@ -754,7 +574,7 @@ the binary into a per-invocation cache that is not stable across runs.
 | `ctvs status` | Print daemon (loaded / PID) and Claude Code (attached) state |
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 | `ctvs query <command> [...]` | Query local recordings through the explicit Parquet cache |
-| `ctvs collect <file.jsonl> --name <name>` | Register external JSONL as a dynamic query table |
+| `ctvs collect <file.jsonl>\|--glob <pattern> --name <name>` | Register external JSONL as a dynamic query table |
 | `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
@@ -793,3 +613,84 @@ ctvs uninstall                                   # remove daemon and revert atta
 ```
 
 All revert paths are idempotent and tolerate already-reverted state.
+
+## Advanced deployments
+
+Standalone is the default mode: one machine owns its config, local proxy,
+recordings, and query cache. Use Gateway and Central server only when a fleet
+needs central config vending, durable gateway outboxes, and one canonical
+ingest store. The JSON schema still uses `role: "server"` for the Central
+server role and `role: "gateway"` for managed hosts.
+
+### Containers
+
+The GHCR image uses `ctvs` as its entrypoint, so container commands mirror the
+CLI:
+
+```bash
+docker pull ghcr.io/hyparam/collectivus:latest
+docker run --rm ghcr.io/hyparam/collectivus:latest --help
+
+# Standalone, Gateway, or Central server: selected by role in the config file.
+docker run --rm ghcr.io/hyparam/collectivus:latest --config /config/collectivus.json
+
+# Same, but with config JSON injected as an environment variable.
+docker run --rm -e COLLECTIVUS_CONFIG_JSON ghcr.io/hyparam/collectivus:latest \
+  --config-env COLLECTIVUS_CONFIG_JSON
+
+# Hosted-discovery rendezvous service.
+docker run --rm ghcr.io/hyparam/collectivus:latest rendezvous --help
+```
+
+### Config vending (multi-host deployments)
+
+Central server vendors per-gateway configs over `GET /v1/config`, accepts
+gateway ingest, and can print one-line setup commands for Gateway hosts.
+Gateways poll `central_server.poll_interval_seconds` and hot-reload only the
+listener whose section changed.
+
+```bash
+# Central server host.
+npx -p collectivus ctvs --config /etc/collectivus-server.json
+
+# Operator workflow on the Central server host.
+ctvs config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json
+ctvs config set gw-prod-1 --server-config /etc/collectivus-server.json --file gw-prod-1.json
+ctvs config list --server-config /etc/collectivus-server.json
+
+# Gateway host, using the command printed by the token issuer.
+npx collectivus --config-endpoint='https://collectivus.internal:8788/v1/bootstrap-config?token=bt_abc123...'
+```
+
+Gateway mode treats Central server as the canonical recording store. Proxy and
+OTLP rows are first fsynced to `central_server.outbox_dir`, then shipped to
+`POST /v1/ingest/<signal>`.
+
+### Self-hosting and rendezvous
+
+The repo ships a reference [`docker-compose.yml`](docker-compose.yml) and
+[`.env.example`](.env.example) that run Central server plus hosted-discovery
+rendezvous for the `ctvs invite create` to `ctvs join` flow:
+
+```bash
+cp .env.example .env
+# Fill in COLLECTIVUS_ADMIN_TOKEN, COLLECTIVUS_IDENTITY_SECRET,
+# COLLECTIVUS_RENDEZVOUS_REGISTRATION_TOKEN, COLLECTIVUS_RENDEZVOUS_URL,
+# and COLLECTIVUS_PUBLIC_URL.
+docker compose up -d
+```
+
+Rendezvous stores only join-code hashes and Central server connect metadata;
+it does not store plaintext join codes, configs, telemetry, JWTs, issuer
+secrets, or bootstrap tokens. The full Docker walkthrough covers TLS,
+secret rotation, backups, and troubleshooting in
+[`docs/self-hosting-docker.md`](docs/self-hosting-docker.md). The Claude Code
+walkthrough has the shorter Gateway/Central path in
+[`docs/walkthrough-claude-code.md`](docs/walkthrough-claude-code.md#multi-host-gateway-pulling-its-config-from-a-central-server).
+
+### AWS ECS
+
+An optional CDK app under [`infra/aws/`](infra/aws/) deploys Central server and
+rendezvous as ECS Fargate tasks behind ALBs, with encrypted EFS state and a
+private S3 archive bucket. Use it only when AWS is already the deployment
+target; the Docker Compose path is the simpler self-hosting default.

@@ -28,42 +28,41 @@ stay on this machine.
   snapshots to S3, or run Gateway/Central server deployments when many hosts
   need one control plane.
 
-## Installation
-
-```bash
-npm install collectivus
-```
-
-Or run it without adding it to the current project:
-
-```bash
-npx -p collectivus ctvs --help
-```
-
-The GHCR image is available for containerized Standalone, Gateway, Central
-server, and rendezvous deployments. See
-[Advanced deployments](#advanced-deployments) when you need that path.
-
 ## Quick start: record Claude Code
 
-The fastest path is the interactive walkthrough. Run `ctvs` with no
-arguments and choose Standalone. The walkthrough writes a local proxy config,
-asks where to store recordings, and can install a background daemon and attach
-Claude Code:
+The fastest path is the `npx` walkthrough:
 
 ```bash
-npx -p collectivus ctvs
+npx collectivus
 ```
 
-By default it writes the config to `~/.hyp/collectivus.json`, the sink to
-`~/.hyp/collectivus/`, and (if you opt in) installs a LaunchAgent / systemd
-user unit that boots at login.
+Choose Standalone and keep Proxy enabled. The walkthrough writes
+`~/.hyp/collectivus.json`, stores recordings under `~/.hyp/collectivus/`, and
+offers to install a background daemon and attach Claude Code.
+
+If you skip the daemon, run the proxy in the foreground:
+
+```bash
+npx collectivus --config ~/.hyp/collectivus.json
+```
+
+Then point Claude Code at it from another terminal:
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
+```
+
+After a prompt, inspect the JSONL recording:
+
+```bash
+tail -f "$HOME/.hyp/collectivus/$USER/proxy/$(date -u +%F).jsonl"
+```
 
 Or write a config by hand:
 
 ```bash
 # 1. Save examples/claude-code.json (proxy on 127.0.0.1:8787 → api.anthropic.com)
-npx -p collectivus ctvs --config examples/claude-code.json
+npx collectivus --config examples/claude-code.json
 
 # 2. In another terminal:
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude
@@ -78,11 +77,37 @@ To capture agent-attributed transcripts from a gascity supervisor (separate
 from the proxy capture above), attach a city to the same daemon:
 
 ```bash
-ctvs gascity attach hyptown --api-url http://127.0.0.1:8372
-ctvs query sql "select gascity_template, count(*) as parts from gascity_messages group by 1 order by parts desc"
+npx collectivus gascity attach hyptown --api-url http://127.0.0.1:8372
+npx collectivus query sql "select gascity_template, count(*) as parts from gascity_messages group by 1 order by parts desc"
 ```
 
 See [Gascity source (`gascity_messages`)](#gascity-source-gascity_messages) below.
+
+## Installation
+
+Use `npx collectivus` for first-run setup and foreground CLI commands:
+
+```bash
+npx collectivus --help
+```
+
+The package also publishes the shorter `ctvs` binary. Install globally only
+when you want to run `ctvs` directly:
+
+```bash
+npm install -g collectivus
+ctvs install --config ~/.hyp/collectivus.json
+```
+
+Install as a project dependency when you want the programmatic API:
+
+```bash
+npm install collectivus
+```
+
+The GHCR image is available for containerized Standalone, Gateway, Central
+server, and rendezvous deployments. See
+[Advanced deployments](#advanced-deployments) when you need that path.
 
 ## Configuration
 
@@ -121,7 +146,7 @@ Pass a JSON config with `--config <path>` (a local path or url). The schema:
 `--print-config` loads, validates, and pretty-prints the resolved config:
 
 ```bash
-npx -p collectivus ctvs --config collectivus.json --print-config
+npx collectivus --config collectivus.json --print-config
 ```
 
 ### v1 schema
@@ -367,7 +392,7 @@ partitioned by `gateway_id`, signal, and date.
 ### Verify the OTLP receiver
 
 ```bash
-npx -p collectivus ctvs --config collectivus.json &
+npx collectivus --config collectivus.json &
 curl -X POST localhost:4318/v1/traces \
   -H 'Content-Type: application/json' \
   -d '{"resourceSpans":[]}'
@@ -506,6 +531,19 @@ through the proxy in the same step.
 
 ### Quickstart (macOS)
 
+The recommended path is the top-level walkthrough:
+
+```bash
+npx collectivus
+# Choose Standalone, keep Proxy enabled, then answer:
+# Install as background daemon? [Y/n] y
+# Configure Claude Code to use this proxy? [Y/n] y
+# ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
+# ✓ Claude Code attached (~/.claude/settings.json)
+```
+
+If you prefer direct `ctvs` commands:
+
 ```bash
 npm install -g collectivus
 ctvs install --config /path/to/collectivus.json
@@ -523,6 +561,19 @@ daemon starts at login and launchd restarts it if it exits. Logs land in
 - `collectivus.err.log` — stderr
 
 ### Quickstart (Linux, systemd)
+
+The same walkthrough creates the systemd user unit:
+
+```bash
+npx collectivus
+# Choose Standalone, keep Proxy enabled, then answer:
+# Install as background daemon? [Y/n] y
+# Configure Claude Code to use this proxy? [Y/n] y
+# ✓ Daemon installed (systemd unit: com.hyparam.collectivus.service)
+# ✓ Claude Code attached (~/.claude/settings.json)
+```
+
+Or use direct `ctvs` commands:
 
 ```bash
 npm install -g collectivus
@@ -555,13 +606,6 @@ defaults to `~/.hyp/collectivus`).
 System-level systemd units (root-owned, in `/etc/systemd/system/`) and
 non-systemd init systems (Alpine's OpenRC, Void's runit, etc.) are not
 supported in this build.
-
-### Why a global install
-
-`install` requires a global binary (`npm install -g collectivus`) so the
-LaunchAgent's `ProgramArguments` can point at a stable path. Running
-`install` via `npx` is rejected with a clear error, because `npx` resolves
-the binary into a per-invocation cache that is not stable across runs.
 
 ### Subcommands
 
@@ -651,7 +695,7 @@ listener whose section changed.
 
 ```bash
 # Central server host.
-npx -p collectivus ctvs --config /etc/collectivus-server.json
+npx collectivus --config /etc/collectivus-server.json
 
 # Operator workflow on the Central server host.
 ctvs config bootstrap-token issue gw-prod-1 --server-config /etc/collectivus-server.json

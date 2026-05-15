@@ -1,9 +1,13 @@
-import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { runWithConfig } from '../cli.js'
-import { defaultConfigPath, isNpxBinPath } from './common.js'
+import {
+  defaultConfigPath,
+  installGlobalCollectivus,
+  isNpxBinPath,
+  resolveGlobalCollectivusBinPath,
+} from './common.js'
 import { validateCollectivusConfig } from '../config.js'
 import { IdentityClient } from '../gateway/identity.js'
 
@@ -155,8 +159,8 @@ export async function runJoin(argv, env, hooks = {}) {
  */
 async function installJoinedGateway(config, resolved, opts) {
   const configPath = opts.configPath ?? defaultConfigPath()
-  const installGlobal = opts.installGlobal ?? defaultInstallGlobalCollectivus
-  const resolveGlobalBinPath = opts.resolveGlobalBinPath ?? defaultResolveGlobalBinPath
+  const installGlobal = opts.installGlobal ?? installGlobalCollectivus
+  const resolveGlobalBinPath = opts.resolveGlobalBinPath ?? resolveGlobalCollectivusBinPath
   const writeConfig = opts.writeConfig ?? writeConfigAtomic
 
   const display = resolved.display_name ? ` (${resolved.display_name})` : ''
@@ -541,41 +545,6 @@ function joinUrl(base, suffix) {
 }
 
 /**
- * Install the current published package into npm's global prefix.
- *
- * @returns {Promise<boolean>}
- */
-async function defaultInstallGlobalCollectivus() {
-  const exitCode = await runInherited(defaultNpmPath(), ['install', '-g', 'collectivus'])
-  return exitCode === 0
-}
-
-/**
- * @returns {Promise<string>}
- */
-async function defaultResolveGlobalBinPath() {
-  const result = await runCaptured(defaultNpmPath(), ['root', '-g'])
-  if (result.exitCode !== 0) {
-    throw new Error(result.stderr.trim() || `npm root -g exited ${result.exitCode}`)
-  }
-  const root = result.stdout.trim()
-  if (!root) throw new Error('npm root -g returned an empty path')
-  const binPath = path.join(root, 'collectivus', 'bin', 'cli.js')
-  if (!fs.existsSync(binPath)) {
-    throw new Error(`${binPath} does not exist after npm install -g collectivus`)
-  }
-  return binPath
-}
-
-/**
- * @returns {string}
- */
-function defaultNpmPath() {
-  const name = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  return path.join(path.dirname(process.execPath), name)
-}
-
-/**
  * @param {string} configPath
  * @param {CollectivusConfig} config
  * @returns {void}
@@ -596,36 +565,6 @@ function isNpxCollectivusBinPath(binPath) {
   if (!isNpxBinPath(binPath)) return false
   return /[/\\]node_modules[/\\]collectivus[/\\]bin[/\\]cli\.js$/.test(binPath) ||
     /[/\\]node_modules[/\\]\.bin[/\\](collectivus|ctvs)(\.cmd)?$/.test(binPath)
-}
-
-/**
- * @param {string} command
- * @param {string[]} args
- * @returns {Promise<number>}
- */
-function runInherited(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'inherit' })
-    child.once('error', reject)
-    child.once('exit', (code) => resolve(code === null ? -1 : code))
-  })
-}
-
-/**
- * @param {string} command
- * @param {string[]} args
- * @returns {Promise<{ exitCode: number, stdout: string, stderr: string }>}
- */
-function runCaptured(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8') })
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
-    child.once('error', reject)
-    child.once('exit', (code) => resolve({ exitCode: code === null ? -1 : code, stdout, stderr }))
-  })
 }
 
 /**

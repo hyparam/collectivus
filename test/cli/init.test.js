@@ -328,28 +328,37 @@ describe('runInit', function() {
       expect(stdout.value()).toMatch(/Aborted/)
     })
 
-    it('skips daemon install offer when running via npx and prints global-install hint', async function() {
+    it('bootstraps global install when running via npx and daemon install is selected', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y',
+        '1', '', '', cfgPath, 'y', 'y', 'y',
       ])
-      /** @type {string[][]} */
+      /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
+      let globalInstallCalls = 0
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
         binPath: '/Users/test/.npm/_npx/abc123/node_modules/.bin/collectivus',
-        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+        installGlobal() { globalInstallCalls++; return Promise.resolve(true) },
+        resolveGlobalBinPath() { return Promise.resolve('/usr/local/lib/node_modules/collectivus/bin/cli.js') },
+        runInstall(args, hooks) {
+          installCalls.push({ args, binPath: hooks?.binPath })
+          return Promise.resolve(0)
+        },
       })
       expect(code).toBe(0)
-      expect(installCalls).toHaveLength(0)
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
-      expect(stdout.value()).toMatch(/npx -p collectivus ctvs --config/)
-      expect(stdout.value()).toMatch(/npm install -g collectivus/)
+      expect(globalInstallCalls).toBe(1)
+      expect(installCalls).toEqual([{
+        args: ['--config', cfgPath, '--yes'],
+        binPath: '/usr/local/lib/node_modules/collectivus/bin/cli.js',
+      }])
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(stdout.value()).toMatch(/Installing collectivus globally with npm/)
     })
   })
 
@@ -521,7 +530,7 @@ describe('runInit', function() {
       expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
     })
 
-    it('skips daemon install offer when reusing an existing config via npx', async function() {
+    it('bootstraps global install when reusing an existing config via npx', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'existing.json')
@@ -536,9 +545,12 @@ describe('runInit', function() {
       }
       const { prompt, asked } = scriptedPrompt([
         '', // accept reuse
+        'y', // install daemon
+        'y', // attach Claude Code
       ])
-      /** @type {string[][]} */
+      /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
+      let globalInstallCalls = 0
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
@@ -546,12 +558,21 @@ describe('runInit', function() {
         defaultConfigPath: cfgPath,
         binPath: '/Users/test/.npm/_npx/abc123/node_modules/.bin/collectivus',
         readConfig() { return existing },
-        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+        installGlobal() { globalInstallCalls++; return Promise.resolve(true) },
+        resolveGlobalBinPath() { return Promise.resolve('/usr/local/lib/node_modules/collectivus/bin/cli.js') },
+        runInstall(args, hooks) {
+          installCalls.push({ args, binPath: hooks?.binPath })
+          return Promise.resolve(0)
+        },
       })
       expect(code).toBe(0)
-      expect(installCalls).toHaveLength(0)
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
-      expect(stdout.value()).toMatch(/npm install -g collectivus/)
+      expect(globalInstallCalls).toBe(1)
+      expect(installCalls).toEqual([{
+        args: ['--config', cfgPath, '--yes'],
+        binPath: '/usr/local/lib/node_modules/collectivus/bin/cli.js',
+      }])
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(stdout.value()).toMatch(/Installing collectivus globally with npm/)
     })
 
     it('declining the existing config falls through to the question flow', async function() {

@@ -4,12 +4,18 @@ import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 import { defaultServerDataDir } from '../server/config_registry.js'
-import { defaultConfigPath, defaultPrompt, isNpxBinPath } from './common.js'
+import {
+  defaultConfigPath,
+  defaultPrompt,
+  installGlobalCollectivus,
+  isNpxBinPath,
+  resolveGlobalCollectivusBinPath,
+} from './common.js'
 import { getInitPreset, isInitPreset, listInitPresets } from './init_presets/index.js'
 
 /**
  * @import { CollectivusConfig, FileSinkConfig, ServerConfig, UploadConfig } from '../types.js'
- * @import { InitHooks } from './types.d.ts'
+ * @import { InitHooks, InstallHooks } from './types.d.ts'
  */
 
 const PROVIDERS = [
@@ -131,7 +137,9 @@ export async function runInit(hooks = {}) {
     if (choice === 'use') {
       return useExistingConfig({
         config: existing, configPath: defaultCfgPath,
-        stdout, prompt, platform, binPath,
+        stdout, stderr, prompt, platform, binPath,
+        installGlobal: hooks.installGlobal,
+        resolveGlobalBinPath: hooks.resolveGlobalBinPath,
         runInstall: hooks.runInstall,
       })
     }
@@ -158,7 +166,10 @@ export async function runInit(hooks = {}) {
   if (kind === 'single') {
     return runSingleUserFlow({
       stdout, stderr, prompt, writeFile, platform, binPath, cwd,
-      defaultCfgPath, defaultSink, runInstall: hooks.runInstall,
+      defaultCfgPath, defaultSink,
+      installGlobal: hooks.installGlobal,
+      resolveGlobalBinPath: hooks.resolveGlobalBinPath,
+      runInstall: hooks.runInstall,
     })
   }
   return runServerFlow({
@@ -184,7 +195,9 @@ export async function runInit(hooks = {}) {
  *   cwd: string,
  *   defaultCfgPath: string,
  *   defaultSink: string,
- *   runInstall?: (args: string[]) => Promise<number>,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
  * }} args
  * @returns {Promise<number>}
  */
@@ -245,7 +258,9 @@ async function runSingleUserFlow(args) {
 
   return offerDaemonInstall({
     configPath: cfgPath, wantDaemon: true,
-    stdout, prompt, platform, binPath,
+    stdout, stderr, prompt, platform, binPath,
+    installGlobal: args.installGlobal,
+    resolveGlobalBinPath: args.resolveGlobalBinPath,
     runInstall: args.runInstall,
     offerClaudeCode: hasProxy,
   })
@@ -656,32 +671,35 @@ async function askUpload(prompt, stdout, stderr) {
  * supports it and the config has a long-running Standalone listener.
  * Otherwise prints next-step hints.
  *
- * Skips the daemon install offer when running via npx. Daemonizing requires a
- * persistent binary, which an npx-resolved path under `_npx/` is not.
+ * When invoked through npx, bootstraps the daemon install through the global
+ * package before chaining into `ctvs install`.
  *
  * @param {{
  *   configPath: string,
  *   wantDaemon: boolean,
  *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
  *   binPath: string,
- *   runInstall?: (args: string[]) => Promise<number>,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
  *   offerClaudeCode: boolean,
  * }} args
  * @returns {Promise<number>}
  */
 async function offerDaemonInstall(args) {
-  const { configPath, wantDaemon, stdout, prompt, platform, binPath, offerClaudeCode } = args
+  const { configPath, wantDaemon, stdout, stderr, prompt, platform, binPath, offerClaudeCode } = args
   const viaNpx = isNpxBinPath(binPath)
-  if (wantDaemon && (platform === 'darwin' || platform === 'linux') && !viaNpx) {
+  if (wantDaemon && (platform === 'darwin' || platform === 'linux')) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
     stdout.write('\nRun ctvs as a background daemon?\n')
     stdout.write(`  Yes → installs a ${daemonKind} that starts at login and respawns\n`)
-    stdout.write('        if it crashes. Logs go to ~/.hyp/collectivus/. Reversible\n')
-    stdout.write('        with `ctvs uninstall`.\n')
+    stdout.write('        if it crashes.\n')
+    stdout.write('        Logs go to ~/.hyp/collectivus/. Reversible with `ctvs uninstall`.\n')
     stdout.write('  No  → only runs while you launch it manually with\n')
-    stdout.write('        `ctvs --config <path>` in a terminal.\n')
+    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n`)
     const dAns = (await prompt('Install as background daemon? [Y/n]: ')).trim()
     if (isYes(dAns)) {
       let installFlag
@@ -698,23 +716,45 @@ async function offerDaemonInstall(args) {
         // Non-proxy configs do not need client attach; install the daemon only.
         installFlag = '--no'
       }
+      let installBinPath = binPath
+      if (viaNpx) {
+        const installGlobal = args.installGlobal ?? installGlobalCollectivus
+        const resolveGlobalBinPath = args.resolveGlobalBinPath ?? resolveGlobalCollectivusBinPath
+        stdout.write('\nInstalling collectivus globally with npm...\n')
+        let installed
+        try {
+          installed = await installGlobal()
+        } catch (err) {
+          stderr.write(`error: failed to install collectivus globally: ${formatError(err)}\n`)
+          return 1
+        }
+        if (!installed) {
+          stderr.write('error: npm install -g collectivus failed\n')
+          return 1
+        }
+        try {
+          installBinPath = await resolveGlobalBinPath()
+        } catch (err) {
+          stderr.write(`error: failed to locate globally installed collectivus: ${formatError(err)}\n`)
+          return 1
+        }
+      }
       const installArgs = ['--config', configPath, installFlag]
       const runInstallFn = args.runInstall ?? await loadRunInstall()
-      return runInstallFn(installArgs)
+      return runInstallFn(installArgs, { stdout, stderr, binPath: installBinPath })
     }
   }
 
   stdout.write('\nNext steps:\n')
   if (viaNpx) {
-    stdout.write(`  npx -p collectivus ctvs --config ${configPath}\n`)
+    stdout.write(`  npx collectivus --config ${configPath}\n`)
   } else {
     stdout.write(`  ctvs --config ${configPath}\n`)
   }
   if (wantDaemon && (platform === 'darwin' || platform === 'linux')) {
     if (viaNpx) {
-      stdout.write('\nTo run ctvs as a background daemon, install it globally first:\n')
-      stdout.write('  npm install -g collectivus\n')
-      stdout.write(`  ctvs install --config ${configPath}\n`)
+      stdout.write('\nTo set up the background daemon later, run the walkthrough again:\n')
+      stdout.write('  npx collectivus\n')
     } else {
       stdout.write(`  ctvs install --config ${configPath}   (run as a background daemon)\n`)
     }
@@ -731,10 +771,13 @@ async function offerDaemonInstall(args) {
  *   config: CollectivusConfig,
  *   configPath: string,
  *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
  *   binPath: string,
- *   runInstall?: (args: string[]) => Promise<number>,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
  * }} args
  * @returns {Promise<number>}
  */
@@ -748,8 +791,10 @@ function useExistingConfig(args) {
   )
   return offerDaemonInstall({
     configPath: args.configPath, wantDaemon,
-    stdout: args.stdout, prompt: args.prompt, platform: args.platform,
+    stdout: args.stdout, stderr: args.stderr, prompt: args.prompt, platform: args.platform,
     binPath: args.binPath,
+    installGlobal: args.installGlobal,
+    resolveGlobalBinPath: args.resolveGlobalBinPath,
     runInstall: args.runInstall,
     offerClaudeCode: wantProxy,
   })
@@ -817,11 +862,11 @@ function defaultReadConfig(p) {
 }
 
 /**
- * @returns {Promise<(args: string[]) => Promise<number>>}
+ * @returns {Promise<(args: string[], hooks?: InstallHooks) => Promise<number>>}
  */
 async function loadRunInstall() {
   const mod = await import('./install.js')
-  return function(args) { return mod.runInstall(args) }
+  return function(args, hooks) { return mod.runInstall(args, hooks) }
 }
 
 /**
@@ -953,7 +998,7 @@ async function runServerFlow(args) {
   }
 
   stdout.write('\nStart the central server:\n')
-  stdout.write(`  npx -p collectivus ctvs --config ${cfgPath}\n`)
+  stdout.write(`  npx collectivus --config ${cfgPath}\n`)
   stdout.write(`  ctvs --config ${cfgPath}    (after npm install -g collectivus)\n`)
   stdout.write('  Docker/ECS: run the collectivus image with this config and data_dir mounted,\n')
   stdout.write('              then pass --config <container-config-path>.\n\n')

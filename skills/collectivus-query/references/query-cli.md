@@ -38,6 +38,8 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `--limit <n>`: Maximum rows to render. Default `100`, maximum `1000`.
 - `--format <fmt>`: `table`, `json`, `jsonl`, or `markdown`.
 - `--refresh <mode>`: `never` or `always`. Default `never`.
+- `--all`: Refresh all matching source files for `ctvs query refresh`.
+- `--force`: Rebuild fresh cache partitions too for `ctvs query refresh`.
 - `--strict-freshness`: Treat stale partitions as a hard error (pre-1.7 behavior). Off by default.
 
 ## Commands
@@ -46,7 +48,8 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `ctvs query status`: Inspect source partitions and cache freshness.
 - `ctvs query catalog`: List logical datasets, columns, source partitions, and cached row counts.
 - `ctvs query schema <dataset>`: Print static schema for a logical dataset.
-- `ctvs query refresh [dataset] [--force]`: Materialize local JSONL into query-cache Parquet.
+- `ctvs query refresh <file.jsonl>... [--force]`: Materialize selected JSONL source files into query-cache Parquet.
+- `ctvs query refresh --all [dataset] [--force]`: Materialize all matching JSONL source files into query-cache Parquet.
 - `ctvs query sample <dataset>`: Show sample rows.
 - `ctvs query sql <select-sql>`: Run read-only SQL over logical datasets.
 - `ctvs query logs [count|tail]`: List logs, count logs, or tail live JSONL without requiring cache.
@@ -68,7 +71,7 @@ ctvs collect --glob '/path/to/segments/**/*.jsonl' --name segments
 ctvs query sql "select * from random_log" --format json
 ```
 
-`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `--refresh always` refreshes before running the query.
+`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the Parquet cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `ctvs query refresh <file.jsonl>` refreshes selected files. Use `--refresh always` to refresh before running the query.
 
 With `--glob`, one logical table is backed by many source files: each matched file becomes its own cache partition under `.collectivus-query/parquet/collections/<table>/source=<hash>/data.parquet`, and only files whose mtime/size changed re-materialize on refresh. Files that no longer match the glob are pruned from the cache on the next refresh. Inside SQL, use `_ctvs_source_path` to see which file a row came from.
 

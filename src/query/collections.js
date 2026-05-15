@@ -277,8 +277,11 @@ export function expectedCollectionPartitions(paths, scope) {
   if (!paths.parquetDir) return []
   const manifest = readCollectionsManifest(paths.recordingRoot)
   const wanted = collectionTablesForScope(manifest, scope)
-  const parquetDir = paths.parquetDir
-  return wanted.flatMap((collection) => collectionPartitionsFor(parquetDir, collection))
+  const { parquetDir } = paths
+  const sourcePaths = sourcePathFilter(scope)
+  const partitions = wanted.flatMap((collection) => collectionPartitionsFor(parquetDir, collection))
+  if (!sourcePaths) return partitions
+  return partitions.filter((partition) => sourcePaths.has(path.resolve(partition.jsonlPath)))
 }
 
 /**
@@ -540,6 +543,7 @@ export function readCollectionCacheMeta(metaPath) {
  */
 function pruneOrphanCollectionPartitions(paths, scope, stdout) {
   if (!paths.parquetDir) return
+  if (scope.sourcePaths && scope.sourcePaths.length > 0) return
   const manifest = readCollectionsManifest(paths.recordingRoot)
   const wanted = collectionTablesForScope(manifest, scope)
   for (const collection of wanted) {
@@ -892,6 +896,15 @@ function collectionTablesForScope(manifest, scope) {
   if (!requested) return all
   const wanted = new Set(requested.filter((dataset) => !isQueryDataset(dataset)))
   return all.filter((collection) => wanted.has(collection.table))
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {Set<string> | undefined}
+ */
+function sourcePathFilter(scope) {
+  if (!scope.sourcePaths) return undefined
+  return new Set(scope.sourcePaths.map((sourcePath) => path.resolve(sourcePath)))
 }
 
 /**

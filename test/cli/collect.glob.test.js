@@ -113,7 +113,7 @@ describe('ctvs collect --glob', function() {
     fs.unlinkSync(fileB)
 
     const refreshOut = memo()
-    expect(await runQuery(['refresh', 'segs', '--config', configPath], {
+    expect(await runQuery(['refresh', '--all', 'segs', '--config', configPath], {
       stdout: refreshOut,
       stderr: memo(),
     })).toBe(0)
@@ -144,7 +144,7 @@ describe('ctvs collect --glob', function() {
       { ts: '2026-05-14T00:02:00Z', n: 3 },
     ])
 
-    expect(await runQuery(['refresh', 'segs', '--config', configPath], {
+    expect(await runQuery(['refresh', '--all', 'segs', '--config', configPath], {
       stdout: memo(),
       stderr: memo(),
     })).toBe(0)
@@ -158,6 +158,39 @@ describe('ctvs collect --glob', function() {
     }
     expect(changed).toBe(1)
     expect(unchanged).toBe(1)
+  })
+
+  it('refreshes one glob-backed collection source file by path', async function() {
+    const fileA = path.join(sourceRoot, 'a', 'segment-001.jsonl')
+    const fileB = path.join(sourceRoot, 'a', 'segment-002.jsonl')
+    writeJsonl(fileA, [{ ts: '2026-05-14T00:00:00Z', n: 1 }])
+    writeJsonl(fileB, [{ ts: '2026-05-14T00:01:00Z', n: 2 }])
+
+    const glob = path.join(sourceRoot, '**/*.jsonl')
+    expect(await runCollect(['--glob', glob, '--name', 'segs', '--config', configPath], {
+      stdout: memo(),
+      stderr: memo(),
+    })).toBe(0)
+
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    writeJsonl(fileB, [
+      { ts: '2026-05-14T00:01:00Z', n: 2 },
+      { ts: '2026-05-14T00:02:00Z', n: 3 },
+    ])
+
+    const refreshOut = memo()
+    expect(await runQuery(['refresh', fileB, '--config', configPath], {
+      stdout: refreshOut,
+      stderr: memo(),
+    })).toBe(0)
+    expect(refreshOut.value()).toMatch(/Done\. 1 file\(s\) written/)
+
+    const sqlOut = memo()
+    expect(await runQuery(['sql', 'select count(*) as c from segs', '--config', configPath, '--format', 'json'], {
+      stdout: sqlOut,
+      stderr: memo(),
+    })).toBe(0)
+    expect(JSON.parse(sqlOut.value())).toEqual([{ c: 3 }])
   })
 
   it('rejects mixing positional path and --glob', async function() {

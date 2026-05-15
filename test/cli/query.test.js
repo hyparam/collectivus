@@ -170,11 +170,14 @@ function makeGascityRow(overrides) {
  * @param {'logs' | 'traces' | 'metrics' | 'proxy'} signal
  * @param {string} date
  * @param {Record<string, unknown>[]} rows
+ * @returns {string}
  */
 function writeJsonl(gatewayId, signal, date, rows) {
   const dir = path.join(sinkDir, gatewayId, signal)
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(path.join(dir, `${date}.jsonl`), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const filePath = path.join(dir, `${date}.jsonl`)
+  fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  return filePath
 }
 
 function writeAllSignals() {
@@ -239,7 +242,7 @@ describe('ctvs query', function() {
     writeAllSignals()
     const stdout = memo()
     const stderr = memo()
-    const code = await runQuery(['refresh', '--config', configPath], { stdout, stderr })
+    const code = await runQuery(['refresh', '--all', '--config', configPath], { stdout, stderr })
     expect(code).toBe(0)
     expect(stderr.value()).toBe('')
     // proxy now materialises a single `proxy_messages` partition (was
@@ -258,6 +261,40 @@ describe('ctvs query', function() {
     })
   })
 
+  it('refreshes only explicit JSONL files by default', async function() {
+    writeAllSignals()
+    const logPath = path.join(sinkDir, 'gw1', 'logs', '2026-05-11.jsonl')
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(['refresh', logPath, '--config', configPath], { stdout, stderr })
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    expect(stdout.value()).toMatch(/Done\. 1 file\(s\) written/)
+
+    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'logs', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(true)
+    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'traces', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
+    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'metrics', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
+    expect(fs.existsSync(path.join(sinkDir, '.collectivus-query', 'parquet', 'proxy_messages', 'gateway_id=gw1', 'date=2026-05-11', 'data.parquet'))).toBe(false)
+  })
+
+  it('requires source files or --all for explicit refresh', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(['refresh', '--config', configPath], { stdout, stderr })
+    expect(code).toBe(2)
+    expect(stdout.value()).toBe('')
+    expect(stderr.value()).toMatch(/refresh requires one or more JSONL files/)
+
+    const datasetStdout = memo()
+    const datasetStderr = memo()
+    expect(await runQuery(['refresh', 'logs', '--config', configPath], {
+      stdout: datasetStdout,
+      stderr: datasetStderr,
+    })).toBe(2)
+    expect(datasetStdout.value()).toBe('')
+    expect(datasetStderr.value()).toMatch(/pass --all to refresh all logs sources/)
+  })
+
   it('does not auto-refresh by default and prints the refresh command', async function() {
     writeJsonl('gw1', 'logs', '2026-05-11', [
       { serviceName: 'svc-a', timestamp: '2026-05-11T10:00:00.000Z', body: 'hi', resource: {}, scope: { attributes: {} }, attributes: {} },
@@ -268,7 +305,7 @@ describe('ctvs query', function() {
     expect(code).toBe(1)
     expect(stdout.value()).toBe('')
     expect(stderr.value()).toMatch(/query cache is missing/)
-    expect(stderr.value()).toMatch(/Run: ctvs query refresh --config/)
+    expect(stderr.value()).toMatch(/Run: ctvs query refresh .*\/gw1\/logs\/2026-05-11\.jsonl --config/)
   })
 
   it('supports --refresh always for sql and rejects arbitrary file paths', async function() {
@@ -300,7 +337,7 @@ describe('ctvs query', function() {
 
   it('surfaces cache-only partitions whose source JSONL was drained', async function() {
     writeAllSignals()
-    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
     // Simulate a drain: remove the source JSONLs but keep the parquet+meta.
     for (const signal of /** @type {const} */ (['logs', 'traces', 'metrics', 'proxy'])) {
@@ -347,7 +384,7 @@ describe('ctvs query', function() {
 
   it('warns when a drained source reappears with a different size', async function() {
     writeAllSignals()
-    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
     // Drain logs only, then later re-create with different content (different size).
     fs.unlinkSync(path.join(sinkDir, 'gw1', 'logs', '2026-05-11.jsonl'))
@@ -372,7 +409,7 @@ describe('ctvs query', function() {
 
   it('runs high-level metrics, proxy, tail, and schema commands', async function() {
     writeAllSignals()
-    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
     const metricsOut = memo()
     expect(await runQuery(['metrics', 'list', '--config', configPath], { stdout: metricsOut, stderr: memo() })).toBe(0)
@@ -445,14 +482,14 @@ describe('ctvs query freshness gate', function() {
    */
   async function makeStaleLogs() {
     writeJsonl('gw1', 'logs', '2026-05-11', [logRow('a')])
-    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
     writeJsonl('gw1', 'logs', '2026-05-11', [logRow('a'), logRow('bb-longer-body')])
   }
 
   describe('ensureCacheReady (via runQuery)', function() {
     it('fresh cache → query runs with empty stderr', async function() {
       writeJsonl('gw1', 'logs', '2026-05-11', [logRow('hi')])
-      expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+      expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
 
       const stdout = memo()
       const stderr = memo()
@@ -471,7 +508,7 @@ describe('ctvs query freshness gate', function() {
       expect(stdout.value()).toMatch(/\ba\b/)
       // Warning shape from co-g835 spec.
       expect(stderr.value()).toMatch(/^warning: querying stale data; 1 partition\(s\) outdated \[logs\/gw1\/2026-05-11/)
-      expect(stderr.value()).toMatch(/run 'ctvs query refresh --config /)
+      expect(stderr.value()).toMatch(/run 'ctvs query refresh .*\/gw1\/logs\/2026-05-11\.jsonl --config /)
     })
 
     it('stale cache + --strict-freshness → exit 1, error message, empty stdout', async function() {
@@ -483,7 +520,7 @@ describe('ctvs query freshness gate', function() {
       expect(stdout.value()).toBe('')
       expect(stderr.value()).toMatch(/^error: query cache is stale for logs\/gw1\/2026-05-11/)
       expect(stderr.value()).toMatch(/--strict-freshness set/)
-      expect(stderr.value()).toMatch(/Run: ctvs query refresh --config /)
+      expect(stderr.value()).toMatch(/Run: ctvs query refresh .*\/gw1\/logs\/2026-05-11\.jsonl --config /)
     })
 
     it('missing cache → exit 1 regardless of --strict-freshness', async function() {
@@ -692,7 +729,7 @@ describe('ctvs query gascity_messages', function() {
     const stdout = memo()
     const stderr = memo()
     const code = await runQuery(
-      ['refresh', 'gascity_messages', '--config', configPath],
+      ['refresh', '--all', 'gascity_messages', '--config', configPath],
       { stdout, stderr }
     )
     expect(code).toBe(0)
@@ -723,7 +760,7 @@ describe('ctvs query gascity_messages', function() {
         stream_event_count: 0,
       },
     ])
-    expect(await runQuery(['refresh', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
     await writeGascityFixtures([
       {
         city: 'hyptown',

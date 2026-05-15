@@ -12,8 +12,9 @@ Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL r
 1. Run `ctvs query doctor` or `ctvs query status` first to verify the recording root and cache state.
 2. If the command cannot find the intended config, discover the service config once with `ctvs status`, a LaunchAgent/systemd unit, or the user, then reuse `--config <path>` only for that setup.
 3. Cache freshness is handled asymmetrically:
-   - **Stale partitions are queried by default** and the CLI prints a `warning: querying stale data; …` line to stderr. Read stderr alongside stdout, and surface any stale warning to the user so they know the data may be outdated (and can rerun with `--refresh always` to update).
+   - **Stale partitions are queried by default** and the CLI prints a `warning: querying stale data; …` line to stderr. Read stderr alongside stdout, and surface any stale warning to the user so they know the data may be outdated. Prefer the file-targeted `ctvs query refresh <file.jsonl>` command the CLI prints when updating cache data; use `--refresh always` only when the query should refresh before it runs.
    - **Missing partitions still error.** Run the exact `ctvs query refresh …` command the CLI prints, or rerun the target query with `--refresh always`.
+   - Broad manual refreshes are explicit: `ctvs query refresh --all [dataset]`. Do not run a broad refresh when the printed file-targeted command is enough.
    - Pass `--strict-freshness` only when the user explicitly needs the pre-1.7 strict mode (e.g., scheduled checks that must never read stale data); it turns stale partitions back into a hard error.
 4. Prefer structured output for analysis: use `--format json` for follow-up reasoning, `--format markdown` when showing a table to the user, and `--limit` to keep output bounded.
 5. Use high-level query commands before custom SQL. Switch to `ctvs query sql` only when the built-in commands cannot answer the question.
@@ -32,6 +33,8 @@ ctvs query metrics series <metric-name> --format json
 ctvs query proxy get <conversation-id> --format json
 ctvs query proxy stats --format json
 ctvs query errors --since 24h --format json
+ctvs query refresh <file.jsonl>
+ctvs query refresh --all logs
 ctvs collect <file.jsonl> --name <name>
 ctvs collect --glob '<pattern>' --name <name>
 ```

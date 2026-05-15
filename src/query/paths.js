@@ -150,6 +150,7 @@ export function discoverSourceFiles(root, scope) {
   const wantedSignals = datasets
     ? new Set(datasets.map((dataset) => sourceSignalForDataset(dataset)))
     : new Set(['logs', 'traces', 'metrics', 'proxy'])
+  const sourcePaths = sourcePathFilter(scope)
   /** @type {SourceFile[]} */
   const files = []
   const gatewayIds = scope.gatewayId ? [scope.gatewayId] : safeReadDir(root)
@@ -166,6 +167,7 @@ export function discoverSourceFiles(root, scope) {
         const date = match[1]
         if (scope.date && date !== scope.date) continue
         const jsonlPath = path.join(signalDir, entry)
+        if (sourcePaths && !sourcePaths.has(path.resolve(jsonlPath))) continue
         const stat = safeStat(jsonlPath)
         if (!stat || !stat.isFile()) continue
         files.push({
@@ -430,6 +432,7 @@ function staleReason(partition, meta) {
 export function listCacheMetas(parquetDir, scope) {
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const datasets = requestedDatasets ? requestedDatasets.filter(isQueryDataset) : QUERY_DATASETS
+  const sourcePaths = sourcePathFilter(scope)
   /** @type {CacheMeta[]} */
   const out = []
   for (const dataset of datasets) {
@@ -446,6 +449,7 @@ export function listCacheMetas(parquetDir, scope) {
         const date = dateMatch[1]
         if (scope.date && date !== scope.date) continue
         const meta = readCacheMeta(path.join(gatewayDir, dateEntry, 'data.parquet.meta.json'))
+        if (meta && sourcePaths && !sourcePaths.has(path.resolve(meta.source_path))) continue
         if (meta) out.push(meta)
       }
     }
@@ -511,6 +515,15 @@ function isDirectory(p) {
  */
 function isFile(p) {
   return safeStat(p)?.isFile() ?? false
+}
+
+/**
+ * @param {QueryScope} scope
+ * @returns {Set<string> | undefined}
+ */
+function sourcePathFilter(scope) {
+  if (!scope.sourcePaths) return undefined
+  return new Set(scope.sourcePaths.map((sourcePath) => path.resolve(sourcePath)))
 }
 
 /**

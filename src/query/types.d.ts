@@ -14,6 +14,8 @@ export type QueryRefreshMode = 'never' | 'always'
 export interface QueryScope {
   dataset?: string
   datasets?: string[]
+  /** Absolute source JSONL paths to include when refreshing or inspecting a narrow cache scope. */
+  sourcePaths?: string[]
   gatewayId?: string
   date?: string
   from?: string

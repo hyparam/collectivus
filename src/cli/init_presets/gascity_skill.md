@@ -161,11 +161,11 @@ ORDER BY source, idx;
 
 ## Freshness
 
-`session_segments` is glob-backed: new segment files only appear in the cache after a refresh. Run `ctvs query refresh session_segments` to pick up new segments, or use `--refresh always` on any query. Deleted segment files are pruned from the cache on the next refresh.
+`session_segments` is glob-backed: new segment files only appear in the cache after a refresh. Run `ctvs query refresh <segment-file.jsonl>` for selected segment files, `ctvs query refresh --all session_segments` to pick up every matching segment, or use `--refresh always` on any query. Deleted segment files are pruned from the cache on the next `--all` refresh.
 
 `events` is append-only single-file; mtime/size changes trigger re-materialization on refresh.
 
-`gascity_messages` is **always fresh** — the daemon writes Parquet directly into the sink (no JSONL stage, no `.meta.json` sidecar), so query-time discovery picks up every part-file the writer has flushed. `ctvs query refresh gascity_messages` is a documented no-op (it lists existing partitions as already-fresh). To pull in newly-flushed rows simply rerun the query.
+`gascity_messages` is **always fresh** — the daemon writes Parquet directly into the sink (no JSONL stage, no `.meta.json` sidecar), so query-time discovery picks up every part-file the writer has flushed. `ctvs query refresh --all gascity_messages` is a documented no-op (it lists existing partitions as already-fresh). To pull in newly-flushed rows simply rerun the query.
 
 Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema session_segments --format markdown`, `ctvs query schema gascity_messages --format markdown`. Catalog: `ctvs query catalog --format markdown`.
 
@@ -176,5 +176,5 @@ Refreshing isn't free. `events.jsonl` and the `session_segments/**/*.jsonl` file
 Recommended workflow:
 
 1. Run `ctvs query status` first. The summary shows which date ranges are already cached and which are stale; cheap queries against a covered range never need a refresh.
-2. Only invoke `--refresh always` or `ctvs query refresh <dataset>` when a needed date range is missing or `status` reports staleness in the window you care about.
+2. Only invoke `--refresh always`, `ctvs query refresh <file.jsonl>`, or `ctvs query refresh --all <dataset>` when a needed date range is missing or `status` reports staleness in the window you care about.
 3. Do not reflexively pass `--refresh always` "just in case". Stale-data queries print a warning to stderr (the default behavior); reading that warning is cheaper than re-materializing the cache. Treat refresh as a deliberate step, not a default.

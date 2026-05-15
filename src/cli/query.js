@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { defaultConfigPath } from './common.js'
@@ -47,7 +48,8 @@ Commands:
   status                         Inspect JSONL sources and query-cache freshness
   catalog                        List logical datasets and cached row counts
   schema <dataset>               Print the static logical schema
-  refresh [dataset] [--force]    Materialize local JSONL into query-cache Parquet
+  refresh <file.jsonl>...        Materialize selected JSONL source files into Parquet
+  refresh --all [dataset]        Materialize all matching JSONL into query-cache Parquet
   sql <select-sql>               Run read-only SELECT SQL over logical datasets
   sample <dataset>               Show sample rows
   doctor                         Check query prerequisites
@@ -75,6 +77,8 @@ Shared options:
   --refresh <mode>               never or always (default: never).
                                  Stale partitions query with a stderr warning;
                                  missing partitions always error.
+  --all                          Refresh all matching source files (refresh command only)
+  --force                        Rebuild fresh cache partitions too (refresh command only)
   --strict-freshness             Treat stale partitions as errors (pre-1.7 behavior)
   --help, -h                     Show this help`
 
@@ -191,6 +195,7 @@ export async function runQuery(argv, hooks = {}) {
  *   limit: number,
  *   format: QueryFormat,
  *   refresh: QueryRefreshMode,
+ *   all: boolean,
  *   force: boolean,
  *   strictFreshness: boolean,
  *   error?: string,
@@ -205,12 +210,14 @@ export function parseQueryArgs(argv) {
     limit: DEFAULT_LIMIT,
     format: 'table',
     refresh: 'never',
+    all: false,
     force: false,
     strictFreshness: false,
   }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--help' || arg === '-h') { out.help = true; return out }
+    if (arg === '--all') { out.all = true; continue }
     if (arg === '--force') { out.force = true; continue }
     if (arg === '--strict-freshness') { out.strictFreshness = true; continue }
     /**
@@ -393,7 +400,7 @@ function handleSchema(paths, parsed, stdout, stderr) {
   }
   const meta = readAnyCollectionMeta(paths.parquetDir, collection)
   if (!meta) {
-    stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed)}\n`)
+    stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed, undefined, { ...baseScope(parsed), datasets: [collection.table] })}\n`)
     return 1
   }
   const rows = meta.columns.map((column) => ({
@@ -414,10 +421,30 @@ function handleSchema(paths, parsed, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function handleRefresh(paths, parsed, stdout, stderr) {
-  const scope = scopeWithOptionalDataset(paths, parsed, parsed.positionals[1])
   if (!paths.parquetEnabled || !paths.parquetDir) {
     stderr.write('error: query parquet cache is disabled; pass --parquet-dir to refresh explicitly\n')
     return 1
+  }
+  const targets = parsed.positionals.slice(1)
+  /** @type {QueryScope} */
+  let scope
+  if (parsed.all) {
+    if (targets.length > 1) {
+      stderr.write('error: refresh --all accepts at most one dataset\n')
+      return 2
+    }
+    scope = scopeWithOptionalDataset(paths, parsed, targets[0])
+  } else {
+    if (targets.length === 0) {
+      stderr.write('error: refresh requires one or more JSONL files; pass --all to refresh all matching sources\n')
+      return 2
+    }
+    const datasetTarget = targets.length === 1 ? resolveQueryTable(paths, targets[0]) : undefined
+    if (datasetTarget) {
+      stderr.write(`error: refresh ${targets[0]} targets a dataset; pass --all to refresh all ${datasetTarget} sources\n`)
+      return 2
+    }
+    scope = refreshScopeForSourceFiles(paths, parsed, targets)
   }
   const result = await refreshAllCaches({ paths, scope, force: parsed.force, stdout })
   if (result.written === 0 && result.skipped === 0 && result.failures === 0) {
@@ -793,7 +820,7 @@ async function ensureCacheReady(paths, scope, parsed) {
     const detail = `${partitionLabel(first)}: missing${first.reason ? ` (${first.reason})` : ''}`
     return {
       ok: false,
-      message: `error: query cache is missing for ${detail}. Run: ${refreshCommand(parsed)}`,
+      message: `error: query cache is missing for ${detail}. Run: ${refreshCommand(parsed, missing, scope)}`,
     }
   }
 
@@ -803,14 +830,14 @@ async function ensureCacheReady(paths, scope, parsed) {
       const detail = `${partitionLabel(first)}: stale${first.reason ? ` (${first.reason})` : ''}`
       return {
         ok: false,
-        message: `error: query cache is stale for ${detail} (--strict-freshness set). Run: ${refreshCommand(parsed)}`,
+        message: `error: query cache is stale for ${detail} (--strict-freshness set). Run: ${refreshCommand(parsed, stale, scope)}`,
       }
     }
     const summary = stale.slice(0, 3).map((state) => `${partitionLabel(state)}${state.reason ? ` (${state.reason})` : ''}`).join(', ')
     const more = stale.length > 3 ? `, +${stale.length - 3} more` : ''
     return {
       ok: true,
-      warnings: [`warning: querying stale data; ${stale.length} partition(s) outdated [${summary}${more}] — run '${refreshCommand(parsed)}' to update`],
+      warnings: [`warning: querying stale data; ${stale.length} partition(s) outdated [${summary}${more}] — run '${refreshCommand(parsed, stale, scope)}' to update`],
     }
   }
 
@@ -819,15 +846,48 @@ async function ensureCacheReady(paths, scope, parsed) {
 
 /**
  * @param {ReturnType<typeof parseQueryArgs>} parsed
+ * @param {Array<{ partition: unknown }>} [states]
+ * @param {QueryScope} [scope]
  * @returns {string}
  */
-function refreshCommand(parsed) {
+function refreshCommand(parsed, states, scope) {
   const parts = ['ctvs', 'query', 'refresh']
+  const sourcePaths = states ? refreshableSourcePaths(states) : []
+  if (sourcePaths.length > 0 && sourcePaths.length <= 5) {
+    parts.push(...sourcePaths.map(shellQuote))
+  } else {
+    parts.push('--all')
+    const datasets = scope?.datasets ?? (scope?.dataset ? [scope.dataset] : undefined)
+    if (datasets?.length === 1) parts.push(datasets[0])
+  }
   if (parsed.configPath) parts.push('--config', shellQuote(parsed.configPath))
   if (parsed.parquetDir) parts.push('--parquet-dir', shellQuote(parsed.parquetDir))
   if (parsed.gatewayId) parts.push('--gateway-id', shellQuote(parsed.gatewayId))
   if (parsed.date) parts.push('--date', parsed.date)
   return parts.join(' ')
+}
+
+/**
+ * @param {Array<{ partition: unknown }>} states
+ * @returns {string[]}
+ */
+function refreshableSourcePaths(states) {
+  const seen = new Set()
+  /** @type {string[]} */
+  const out = []
+  for (const state of states) {
+    const { partition: rawPartition } = state
+    const partition = /** @type {Record<string, unknown>} */ (rawPartition)
+    const sourcePath = partition.jsonlPath
+    if (typeof sourcePath !== 'string') continue
+    if (!sourcePath.endsWith('.jsonl')) continue
+    if (!fs.existsSync(sourcePath)) continue
+    const abs = path.resolve(sourcePath)
+    if (seen.has(abs)) continue
+    seen.add(abs)
+    out.push(abs)
+  }
+  return out
 }
 
 /**
@@ -1095,6 +1155,53 @@ function scopeWithOptionalDataset(paths, parsed, rawDataset) {
     scope.dataset = table
   }
   return scope
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {ReturnType<typeof parseQueryArgs>} parsed
+ * @param {string[]} targets
+ * @returns {QueryScope}
+ */
+function refreshScopeForSourceFiles(paths, parsed, targets) {
+  /** @type {string[]} */
+  const sourcePaths = []
+  const seenTargets = new Set()
+  for (const target of targets) {
+    const abs = path.resolve(target)
+    if (seenTargets.has(abs)) continue
+    seenTargets.add(abs)
+    sourcePaths.push(abs)
+  }
+
+  const scope = { ...baseScope(parsed), sourcePaths }
+  const matched = new Set()
+  const datasets = new Set()
+  for (const source of discoverSourceFiles(paths.recordingRoot, scope)) {
+    matched.add(path.resolve(source.jsonlPath))
+    datasets.add(datasetForSourceSignal(source.signal))
+  }
+  for (const partition of expectedCollectionPartitions(paths, scope)) {
+    matched.add(path.resolve(partition.jsonlPath))
+    datasets.add(partition.table)
+  }
+
+  const unknown = sourcePaths.filter((sourcePath) => !matched.has(sourcePath))
+  if (unknown.length > 0) {
+    throw new Error(`refresh source file is not a known recording or collection source: ${unknown[0]}`)
+  }
+  if (datasets.size === 0) {
+    throw new Error('no refreshable source files matched')
+  }
+  return { ...scope, datasets: [...datasets] }
+}
+
+/**
+ * @param {import('../query/types.js').SourceFile['signal']} signal
+ * @returns {string}
+ */
+function datasetForSourceSignal(signal) {
+  return signal === 'proxy' ? 'proxy_messages' : signal
 }
 
 /**

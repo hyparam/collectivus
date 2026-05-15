@@ -529,7 +529,8 @@ and [provider fields](https://developers.openai.com/codex/config-reference#model
 auto-refresh its Parquet cache unless you ask for that explicitly.
 
 ```bash
-ctvs query refresh --config collectivus.json
+ctvs query refresh /path/to/gw1/logs/2026-05-11.jsonl --config collectivus.json
+ctvs query refresh --all logs --config collectivus.json
 ctvs query logs --config collectivus.json --since 1h
 ctvs query traces slow --config collectivus.json --limit 20
 ctvs query metrics series latency.ms --config collectivus.json
@@ -549,9 +550,11 @@ Freshness is treated asymmetrically (since v1.7.0):
 | --- | --- |
 | `fresh` | Query proceeds silently. |
 | `stale` (Parquet exists, may be outdated) | Query proceeds; a `warning: querying stale data; …` line is written to stderr. Stdout is unchanged. |
-| `missing` (no Parquet at all) | Query exits with the exact `ctvs query refresh …` command to run. |
+| `missing` (no Parquet at all) | Query exits with the exact file-targeted `ctvs query refresh …` command to run when the source file is known. |
 
-Use `--refresh always` to force a refresh before the query runs. Use
+Use `ctvs query refresh <file.jsonl>` to refresh selected source files, or
+`ctvs query refresh --all [dataset]` when you explicitly want the broader
+walk. Use `--refresh always` to force a refresh before the query runs. Use
 `--strict-freshness` to restore the pre-1.7 behavior where stale partitions
 are a hard error (useful in CI / scheduled jobs that must never read
 outdated data).

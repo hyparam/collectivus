@@ -42,6 +42,7 @@ const DEFAULT_REDACT = [
 ]
 
 const SINGLE_PROXY_LISTEN = '127.0.0.1:8787'
+const DEFAULT_OTEL_LISTEN = '127.0.0.1:4318'
 const DEFAULT_CONTROL_PLANE_LISTEN = '0.0.0.0:8788'
 const IDENTITY_SECRET_BYTES = 32
 
@@ -167,10 +168,11 @@ export async function runInit(hooks = {}) {
 }
 
 /**
- * Minimal standalone walkthrough. Defaults the proxy to 127.0.0.1:8787
- * forwarding to Anthropic and asks only where to keep recordings and where
- * to save the config. Users wanting a different upstream, an OTLP receiver,
- * or S3 upload edit the config.
+ * Minimal standalone walkthrough. Lets the operator choose which local
+ * capture sources to enable, then asks only the details those sources need.
+ * Proxy defaults to 127.0.0.1:8787 forwarding to Anthropic; OTLP defaults to
+ * 127.0.0.1:4318; gascity tries to discover city roots from the current
+ * workspace before falling back to manual city/API entry.
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
@@ -189,23 +191,29 @@ export async function runInit(hooks = {}) {
 async function runSingleUserFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
-  stdout.write('\nStandalone mode. The proxy will listen on 127.0.0.1:8787 and\n')
-  stdout.write('forward LLM traffic to Anthropic. Edit the config later to switch\n')
-  stdout.write('upstreams or add the OTLP receiver.\n\n')
+  stdout.write('\nStandalone mode.\n\n')
+  const sources = await askStandaloneSources(prompt, stdout, stderr)
+  const hasProxy = sources.includes('proxy')
+  const hasGascity = sources.includes('gascity')
+  const hasOtel = sources.includes('otel')
 
   stdout.write('Where should collectivus write recordings? Each signal lands in a\n')
   stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
   const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
   const sinkDir = sinkAns === '' ? defaultSink : sinkAns
 
-  const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
-  const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
-
-  const provider = PROVIDERS[0]
   /** @type {CollectivusConfig} */
   const config = {
     version: 1,
-    proxy: {
+    sink: { type: 'file', dir: sinkDir },
+    query: { parquet: { enabled: true } },
+  }
+
+  if (hasProxy) {
+    stdout.write('\nProxy capture will listen on 127.0.0.1:8787 and forward LLM\n')
+    stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n')
+    const provider = PROVIDERS[0]
+    config.proxy = {
       listen: SINGLE_PROXY_LISTEN,
       upstreams: [
         {
@@ -215,20 +223,296 @@ async function runSingleUserFlow(args) {
         },
       ],
       redact_headers: DEFAULT_REDACT,
-    },
-    sink: { type: 'file', dir: sinkDir },
-    query: { parquet: { enabled: true } },
+    }
   }
+
+  if (hasGascity) {
+    const cities = await askGascityCities({ stdout, stderr, prompt, cwd })
+    config.gascity = cities
+  }
+
+  if (hasOtel) {
+    stdout.write('\nOTLP receiver\n')
+    const listenAns = (await prompt(`OTLP listen [${DEFAULT_OTEL_LISTEN}]: `)).trim()
+    config.otel = { listen: listenAns === '' ? DEFAULT_OTEL_LISTEN : listenAns }
+  }
+
+  const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
+  const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
   const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
   if (!written) return 0
 
   return offerDaemonInstall({
-    configPath: cfgPath, wantProxy: true,
+    configPath: cfgPath, wantDaemon: true,
     stdout, prompt, platform, binPath,
     runInstall: args.runInstall,
-    offerClaudeCode: true,
+    offerClaudeCode: hasProxy,
   })
+}
+
+/**
+ * @typedef {'proxy' | 'gascity' | 'otel'} StandaloneSource
+ */
+
+/**
+ * @param {(q: string) => Promise<string>} prompt
+ * @param {{ write: (s: string) => void }} stdout
+ * @param {{ write: (s: string) => void }} stderr
+ * @returns {Promise<StandaloneSource[]>}
+ */
+async function askStandaloneSources(prompt, stdout, stderr) {
+  stdout.write('Which capture sources should this Standalone config enable?\n\n')
+  stdout.write('  1) Proxy\n')
+  stdout.write('     LLM API traffic through a localhost proxy.\n\n')
+  stdout.write('  2) Gas city supervisor\n')
+  stdout.write('     Agent-attributed transcripts from a gas city supervisor.\n\n')
+  stdout.write('  3) OTLP receiver\n')
+  stdout.write('     OpenTelemetry logs, traces, and metrics over HTTP.\n\n')
+  stdout.write('  4) All\n\n')
+
+  for (;;) {
+    const raw = (await prompt('Enable sources [1]: ')).trim()
+    const parsed = parseStandaloneSources(raw)
+    if (parsed) return parsed
+    stderr.write('error: choose 1, 2, 3, 4, all, or a comma-separated list such as 1,2\n')
+  }
+}
+
+/**
+ * @param {string} raw
+ * @returns {StandaloneSource[] | undefined}
+ */
+function parseStandaloneSources(raw) {
+  const input = raw.trim()
+  if (input === '') return ['proxy']
+
+  let chunks = input.split(',').map((s) => s.trim()).filter(Boolean)
+  if (chunks.length === 1 && /^[0-9\s]+$/.test(input)) {
+    chunks = input.split(/\s+/).map((s) => s.trim()).filter(Boolean)
+  }
+
+  /** @type {Set<StandaloneSource>} */
+  const out = new Set()
+  for (const chunk of chunks) {
+    const normalized = chunk.toLowerCase().replace(/[\s_-]+/g, '')
+    if (normalized === '4' || normalized === 'all') return ['proxy', 'gascity', 'otel']
+    if (normalized === '1' || normalized === 'proxy' || normalized === 'llm') {
+      out.add('proxy')
+      continue
+    }
+    if (normalized === '2' || normalized === 'gascity' || normalized === 'gas' || normalized === 'gc' || normalized === 'supervisor') {
+      out.add('gascity')
+      continue
+    }
+    if (normalized === '3' || normalized === 'otel' || normalized === 'otlp') {
+      out.add('otel')
+      continue
+    }
+    return undefined
+  }
+  return out.size > 0 ? Array.from(out) : undefined
+}
+
+/**
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   cwd: string,
+ * }} args
+ * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
+ */
+async function askGascityCities(args) {
+  const { stdout, stderr, prompt, cwd } = args
+  stdout.write('\nGas city supervisor capture\n')
+  stdout.write('Enter a city root or a parent directory. Press Enter to scan the current directory.\n')
+  const searchAns = (await prompt(`Gas city search path [${cwd}]: `)).trim()
+  const searchRoot = searchAns === '' ? cwd : path.resolve(cwd, searchAns)
+  const discovered = await discoverGascityCityEntries(searchRoot)
+  if (discovered.length > 0) {
+    stdout.write('\nDiscovered gas city supervisors:\n')
+    for (const city of discovered) {
+      stdout.write(`  - ${city.name} (${city.api_url})\n`)
+    }
+    const addAns = (await prompt(`Add ${discovered.length === 1 ? 'this city' : 'these cities'}? [Y/n]: `)).trim()
+    if (isYes(addAns)) {
+      return askManualGascityCities({
+        stdout, stderr, prompt, cwd,
+        defaultTarget: searchRoot,
+        initial: discovered,
+      })
+    }
+  } else {
+    stdout.write('No gas city supervisors were discovered from that path.\n')
+  }
+  return askManualGascityCities({ stdout, stderr, prompt, cwd, defaultTarget: searchRoot, initial: [] })
+}
+
+/**
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   cwd: string,
+ *   defaultTarget: string,
+ *   initial: import('../gascity/types.d.ts').GascityCityConfig[],
+ * }} args
+ * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
+ */
+async function askManualGascityCities(args) {
+  const { stdout, stderr, prompt, cwd, defaultTarget } = args
+  /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
+  const cities = dedupeGascityCities(args.initial)
+
+  for (;;) {
+    if (cities.length > 0) {
+      const more = (await prompt('Add another gas city? [y/N]: ')).trim()
+      if (!/^y(es)?$/i.test(more)) return cities
+    }
+
+    const targetDefault = cities.length === 0 ? defaultTarget : ''
+    const question = targetDefault
+      ? `Gas city directory or name [${targetDefault}]: `
+      : 'Gas city directory or name: '
+    const targetAns = (await prompt(question)).trim()
+    const target = targetAns === '' ? targetDefault : targetAns
+    if (!target) {
+      stderr.write('  city directory or name is required\n')
+      continue
+    }
+
+    const resolvedTarget = resolvePromptPath(cwd, target)
+    let entry
+    try {
+      entry = await resolveGascityCityEntry(resolvedTarget, undefined)
+    } catch (err) {
+      const message = formatError(err)
+      if (!/--api-url is required|could not infer api_url/.test(message)) {
+        stderr.write(`  ${message}\n`)
+        continue
+      }
+      const apiUrl = (await prompt('Supervisor API URL: ')).trim()
+      if (!apiUrl) {
+        stderr.write('  supervisor API URL is required\n')
+        continue
+      }
+      try {
+        entry = await resolveGascityCityEntry(resolvedTarget, apiUrl)
+      } catch (apiErr) {
+        stderr.write(`  ${formatError(apiErr)}\n`)
+        continue
+      }
+    }
+
+    upsertGascityCity(cities, entry)
+    stdout.write(`  Added ${entry.name} via ${entry.api_url}\n`)
+  }
+}
+
+/**
+ * @param {string} root
+ * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
+ */
+async function discoverGascityCityEntries(root) {
+  const dirs = discoverGascityCityDirs(root)
+  /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
+  const entries = []
+  for (const dir of dirs) {
+    try {
+      const entry = await resolveGascityCityEntry(dir, undefined)
+      upsertGascityCity(entries, entry)
+    } catch {
+      // A city.toml without an API hint can still be added manually below.
+    }
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name))
+  return entries
+}
+
+/**
+ * @param {string} root
+ * @returns {string[]}
+ */
+function discoverGascityCityDirs(root) {
+  /** @type {string[]} */
+  const dirs = []
+  if (hasCityToml(root)) dirs.push(root)
+  let children
+  try {
+    children = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return dirs
+  }
+  for (const child of children) {
+    if (!child.isDirectory()) continue
+    const childDir = path.join(root, child.name)
+    if (hasCityToml(childDir)) dirs.push(childDir)
+  }
+  dirs.sort()
+  return dirs
+}
+
+/**
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function hasCityToml(dir) {
+  try {
+    return fs.statSync(path.join(dir, 'city.toml')).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {string} cwd
+ * @param {string} target
+ * @returns {string}
+ */
+function resolvePromptPath(cwd, target) {
+  if (path.isAbsolute(target)) return target
+  const maybePath = path.resolve(cwd, target)
+  try {
+    if (fs.statSync(maybePath).isDirectory()) return maybePath
+  } catch {
+    // Treat it as a city name.
+  }
+  return target
+}
+
+/**
+ * @param {string} target
+ * @param {string | undefined} apiUrl
+ * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig>}
+ */
+async function resolveGascityCityEntry(target, apiUrl) {
+  const { resolveCityEntry } = await import('./gascity.js')
+  return resolveCityEntry(target, apiUrl)
+}
+
+/**
+ * @param {import('../gascity/types.d.ts').GascityCityConfig[]} cities
+ * @param {import('../gascity/types.d.ts').GascityCityConfig} entry
+ */
+function upsertGascityCity(cities, entry) {
+  const idx = cities.findIndex((city) => city.name === entry.name)
+  if (idx === -1) {
+    cities.push(entry)
+  } else {
+    cities[idx] = entry
+  }
+}
+
+/**
+ * @param {import('../gascity/types.d.ts').GascityCityConfig[]} entries
+ * @returns {import('../gascity/types.d.ts').GascityCityConfig[]}
+ */
+function dedupeGascityCities(entries) {
+  /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
+  const out = []
+  for (const entry of entries) upsertGascityCity(out, entry)
+  return out
 }
 
 /**
@@ -368,15 +652,16 @@ async function askUpload(prompt, stdout, stderr) {
 }
 
 /**
- * Prompt for daemon install + Claude Code attach when the platform supports it
- * and the config has a proxy listener. Otherwise prints next-step hints.
+ * Prompt for daemon install + optional Claude Code attach when the platform
+ * supports it and the config has a long-running Standalone listener.
+ * Otherwise prints next-step hints.
  *
  * Skips the daemon install offer when running via npx. Daemonizing requires a
  * persistent binary, which an npx-resolved path under `_npx/` is not.
  *
  * @param {{
  *   configPath: string,
- *   wantProxy: boolean,
+ *   wantDaemon: boolean,
  *   stdout: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
@@ -387,9 +672,9 @@ async function askUpload(prompt, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function offerDaemonInstall(args) {
-  const { configPath, wantProxy, stdout, prompt, platform, binPath, offerClaudeCode } = args
+  const { configPath, wantDaemon, stdout, prompt, platform, binPath, offerClaudeCode } = args
   const viaNpx = isNpxBinPath(binPath)
-  if (wantProxy && (platform === 'darwin' || platform === 'linux') && !viaNpx) {
+  if (wantDaemon && (platform === 'darwin' || platform === 'linux') && !viaNpx) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
     stdout.write('\nRun ctvs as a background daemon?\n')
     stdout.write(`  Yes → installs a ${daemonKind} that starts at login and respawns\n`)
@@ -410,8 +695,7 @@ async function offerDaemonInstall(args) {
         const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
         installFlag = isYes(cAns) ? '--yes' : '--no'
       } else {
-        // Server installs don't ask about Claude Code: this machine is the
-        // upstream other people's claude CLIs route through, not a workstation.
+        // Non-proxy configs do not need client attach; install the daemon only.
         installFlag = '--no'
       }
       const installArgs = ['--config', configPath, installFlag]
@@ -426,7 +710,7 @@ async function offerDaemonInstall(args) {
   } else {
     stdout.write(`  ctvs --config ${configPath}\n`)
   }
-  if (wantProxy && (platform === 'darwin' || platform === 'linux')) {
+  if (wantDaemon && (platform === 'darwin' || platform === 'linux')) {
     if (viaNpx) {
       stdout.write('\nTo run ctvs as a background daemon, install it globally first:\n')
       stdout.write('  npm install -g collectivus\n')
@@ -456,12 +740,18 @@ async function offerDaemonInstall(args) {
  */
 function useExistingConfig(args) {
   const wantProxy = args.config.proxy !== undefined
+  const role = args.config.role ?? 'standalone'
+  const wantDaemon = role === 'standalone' && (
+    args.config.proxy !== undefined ||
+    args.config.otel !== undefined ||
+    args.config.gascity !== undefined
+  )
   return offerDaemonInstall({
-    configPath: args.configPath, wantProxy,
+    configPath: args.configPath, wantDaemon,
     stdout: args.stdout, prompt: args.prompt, platform: args.platform,
     binPath: args.binPath,
     runInstall: args.runInstall,
-    offerClaudeCode: true,
+    offerClaudeCode: wantProxy,
   })
 }
 
@@ -486,6 +776,10 @@ function printConfigSummary(stdout, config) {
   }
   if (config.otel) {
     stdout.write(`  otel:   ${config.otel.listen}\n`)
+  }
+  if (config.gascity) {
+    const cities = config.gascity.map((c) => c.name).join(', ')
+    stdout.write(`  gascity:${cities ? ` ${cities}` : ' no cities attached'}\n`)
   }
   if (config.sink) {
     stdout.write(`  sink:   ${config.sink.dir}\n`)

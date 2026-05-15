@@ -284,7 +284,7 @@ async function writeConfigObject(configPath, obj) {
  * @param {string | undefined} apiUrl
  * @returns {Promise<GascityCityConfig>}
  */
-async function resolveCityEntry(target, apiUrl) {
+export async function resolveCityEntry(target, apiUrl) {
   /** @type {import('node:fs').Stats | undefined} */
   let stats
   try {

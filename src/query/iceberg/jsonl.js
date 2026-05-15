@@ -1,86 +1,160 @@
 import fs from 'node:fs'
 
 /**
- * @import { JsonlReadResult } from './types.d.ts'
+ * @import { JsonlEntry, JsonlReadOptions, JsonlReadResult } from './types.d.ts'
  */
 
+const NEWLINE = 0x0a
+const CARRIAGE_RETURN = 0x0d
+const DEFAULT_BATCH_ROWS = 5_000
+const DEFAULT_BATCH_BYTES = 16 * 1024 * 1024
+const STREAM_HIGH_WATER_MARK = 1024 * 1024
+
 /**
- * Read complete JSONL lines after a byte cursor. A trailing partial line is
+ * Stream complete JSONL lines after a byte cursor. A trailing partial line is
  * deliberately left unread so refresh can retry it once the writer appends
  * its newline.
  *
+ * `onBatch` is called only for batches containing parsed object entries. The
+ * returned cursor still advances across empty or malformed complete lines.
+ *
  * @param {string} filePath
- * @param {number} startByteOffset
- * @param {number} startLineNumber
- * @returns {JsonlReadResult}
+ * @param {JsonlReadOptions} options
+ * @param {(batch: JsonlReadResult) => void | Promise<void>} onBatch
+ * @returns {Promise<JsonlReadResult>}
  */
-export function readJsonlEntries(filePath, startByteOffset = 0, startLineNumber = 0) {
+export async function readJsonlEntryBatches(filePath, options = {}, onBatch = () => {}) {
+  const {
+    startByteOffset = 0,
+    startLineNumber = 0,
+    batchRows = DEFAULT_BATCH_ROWS,
+    batchBytes = DEFAULT_BATCH_BYTES,
+  } = options
   const stat = fs.statSync(filePath)
   if (startByteOffset > stat.size) {
     throw new Error(`source JSONL was truncated: ${filePath}`)
   }
-  const buf = fs.readFileSync(filePath)
-  const rest = buf.subarray(startByteOffset)
-  if (rest.byteLength === 0) {
-    return {
-      entries: [],
-      nextByteOffset: startByteOffset,
-      nextLineNumber: startLineNumber,
+
+  /** @type {JsonlEntry[]} */
+  let entries = []
+  let entriesBytes = 0
+  /** @type {Buffer<ArrayBufferLike>} */
+  let pending = Buffer.alloc(0)
+  let currentLineOffset = startByteOffset
+  let nextByteOffset = startByteOffset
+  let nextLineNumber = startLineNumber
+
+  /** @returns {Promise<void>} */
+  async function flush() {
+    if (entries.length === 0) return
+    const batch = {
+      entries,
+      nextByteOffset,
+      nextLineNumber,
       fileSize: stat.size,
       fileMtimeMs: stat.mtimeMs,
     }
+    entries = []
+    entriesBytes = 0
+    await onBatch(batch)
   }
 
-  let text = rest.toString('utf8')
-  const hasCompleteTail = text.endsWith('\n')
-  if (!hasCompleteTail) {
-    const lastNewline = text.lastIndexOf('\n')
-    if (lastNewline === -1) text = ''
-    else text = text.slice(0, lastNewline + 1)
-  }
-  if (text.length === 0) {
-    return {
-      entries: [],
-      nextByteOffset: startByteOffset,
-      nextLineNumber: startLineNumber,
-      fileSize: stat.size,
-      fileMtimeMs: stat.mtimeMs,
-    }
-  }
+  if (startByteOffset < stat.size) {
+    const stream = fs.createReadStream(filePath, {
+      start: startByteOffset,
+      end: stat.size - 1,
+      highWaterMark: STREAM_HIGH_WATER_MARK,
+    })
+    for await (const chunk of stream) {
+      if (!Buffer.isBuffer(chunk)) throw new Error(`expected Buffer chunk while reading ${filePath}`)
+      const buf = pending.byteLength === 0
+        ? chunk
+        : Buffer.concat([pending, chunk])
+      let scanStart = 0
+      let newlineIndex = buf.indexOf(NEWLINE, scanStart)
+      while (newlineIndex !== -1) {
+        const rawLine = buf.subarray(scanStart, newlineIndex)
+        const lineBytes = newlineIndex - scanStart + 1
+        const lineOffset = currentLineOffset
+        const lineNextOffset = currentLineOffset + lineBytes
+        currentLineOffset = lineNextOffset
+        nextByteOffset = lineNextOffset
+        nextLineNumber++
 
-  const lines = text.split('\n')
-  if (lines[lines.length - 1] === '') lines.pop()
-  const entries = []
-  let offset = startByteOffset
-  let lineNumber = startLineNumber
-  for (const rawLine of lines) {
-    lineNumber++
-    const lineBytes = Buffer.byteLength(rawLine) + 1
-    const lineOffset = offset
-    const nextOffset = offset + lineBytes
-    offset = nextOffset
-    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
-    if (!line) continue
-    try {
-      const parsed = JSON.parse(line)
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        entries.push({
-          lineNumber,
-          byteOffset: lineOffset,
-          nextByteOffset: nextOffset,
-          raw: /** @type {Record<string, unknown>} */ (parsed),
-        })
+        const line = rawLine.byteLength > 0 && rawLine[rawLine.byteLength - 1] === CARRIAGE_RETURN
+          ? rawLine.subarray(0, rawLine.byteLength - 1)
+          : rawLine
+        if (line.byteLength > 0) {
+          const parsed = parseJsonlObject(filePath, nextLineNumber, line)
+          if (parsed) {
+            entries.push({
+              lineNumber: nextLineNumber,
+              byteOffset: lineOffset,
+              nextByteOffset: lineNextOffset,
+              raw: parsed,
+            })
+            entriesBytes += lineBytes
+            if (entries.length >= batchRows || entriesBytes >= batchBytes) {
+              await flush()
+            }
+          }
+        }
+
+        scanStart = newlineIndex + 1
+        newlineIndex = buf.indexOf(NEWLINE, scanStart)
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.warn(`[collectivus] skipping malformed JSONL line ${filePath}:${lineNumber}: ${message}`)
+      pending = scanStart < buf.byteLength ? buf.subarray(scanStart) : Buffer.alloc(0)
     }
   }
+
+  await flush()
   return {
-    entries,
-    nextByteOffset: offset,
-    nextLineNumber: lineNumber,
+    entries: [],
+    nextByteOffset,
+    nextLineNumber,
     fileSize: stat.size,
     fileMtimeMs: stat.mtimeMs,
   }
+}
+
+/**
+ * Read complete JSONL lines into memory. Prefer `readJsonlEntryBatches` for
+ * refresh paths that can process rows incrementally.
+ *
+ * @param {string} filePath
+ * @param {number} startByteOffset
+ * @param {number} startLineNumber
+ * @returns {Promise<JsonlReadResult>}
+ */
+export async function readJsonlEntries(filePath, startByteOffset = 0, startLineNumber = 0) {
+  /** @type {JsonlEntry[]} */
+  const entries = []
+  const result = await readJsonlEntryBatches(
+    filePath,
+    { startByteOffset, startLineNumber },
+    (batch) => {
+      entries.push(...batch.entries)
+    }
+  )
+  return { ...result, entries }
+}
+
+/**
+ * @param {string} filePath
+ * @param {number} lineNumber
+ * @param {Buffer} line
+ * @returns {Record<string, unknown> | undefined}
+ */
+function parseJsonlObject(filePath, lineNumber, line) {
+  try {
+    const parsed = JSON.parse(line.toString('utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const row = /** @type {Record<string, unknown>} */ (parsed)
+      return row
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[collectivus] skipping malformed JSONL line ${filePath}:${lineNumber}: ${message}`)
+  }
+  return undefined
 }

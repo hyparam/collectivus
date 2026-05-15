@@ -58,3 +58,12 @@ export interface JsonlReadResult {
   fileSize: number
   fileMtimeMs: number
 }
+
+export interface JsonlReadOptions {
+  startByteOffset?: number
+  startLineNumber?: number
+  batchRows?: number
+  batchBytes?: number
+}
+
+export type JsonlEntryBatch = JsonlReadResult

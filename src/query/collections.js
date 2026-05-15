@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { QUERY_CACHE_SCHEMA_VERSION, isQueryDataset } from './schema.js'
 import { readCacheCursor, stableFingerprint, writeCacheCursor } from './iceberg/cursor.js'
-import { readJsonlEntries } from './iceberg/jsonl.js'
+import { readJsonlEntryBatches } from './iceberg/jsonl.js'
 import { collectionColumnsToSpecs } from './iceberg/schema.js'
 import { appendRowsToTable, queryCacheTableExists, queryCacheTableUrl } from './iceberg/store.js'
 
@@ -450,31 +450,45 @@ async function materializeCollectionIncremental(partition, force) {
   let reset = force || !existing || existing.cache_schema_version !== QUERY_CACHE_SCHEMA_VERSION
   if (existing && partition.sourceSize < existing.byte_offset) reset = true
 
-  let read = readJsonlEntries(
-    partition.jsonlPath,
-    reset ? 0 : existing?.byte_offset ?? 0,
-    reset ? 0 : existing?.line_number ?? 0
-  )
   let columns = existing?.columns
   let timestampColumn = existing?.timestamp_column
+  let startByteOffset = reset ? 0 : existing?.byte_offset ?? 0
+  let startLineNumber = reset ? 0 : existing?.line_number ?? 0
   if (!reset && existing) {
-    const nextColumns = inferCollectionColumns(read.entries.map((entry) => entry.raw), partition.collection.timestamp_column)
+    const nextColumns = await inferCollectionColumnsFromJsonl(
+      partition.jsonlPath,
+      partition.collection.timestamp_column,
+      startByteOffset,
+      startLineNumber
+    )
     if (!columnsCompatible(existing.columns, nextColumns)) {
       reset = true
-      read = readJsonlEntries(partition.jsonlPath, 0, 0)
+      startByteOffset = 0
+      startLineNumber = 0
     }
   }
   if (reset || !columns) {
-    columns = inferCollectionColumns(read.entries.map((entry) => entry.raw), partition.collection.timestamp_column)
+    columns = await inferCollectionColumnsFromJsonl(partition.jsonlPath, partition.collection.timestamp_column, 0, 0)
     timestampColumn = resolveTimestampColumn(columns, partition.collection.timestamp_column)
   }
+  const materializedColumns = columns
 
   const epoch = reset ? (existing?.source_epoch ?? -1) + 1 : existing?.source_epoch ?? 0
   const tablePath = reset ? path.join(partition.cachePath, `epoch=${epoch}`) : existing?.table_path ?? partition.tablePath
   const tableUrl = queryCacheTableUrl(tablePath)
-  const rows = read.entries.map((entry) => materializeRow(entry, columns, partition.jsonlPath, sourceId, epoch))
-  if (!reset && read.nextByteOffset === existing?.byte_offset && rows.length === 0) return { rows: 0 }
-  await appendRowsToTable(tablePath, collectionColumnsToSpecs(columns), rows)
+  const columnSpecs = collectionColumnsToSpecs(materializedColumns)
+  let rowsWritten = 0
+  const read = await readJsonlEntryBatches(
+    partition.jsonlPath,
+    { startByteOffset, startLineNumber },
+    async (batch) => {
+      const rows = batch.entries.map((entry) => materializeRow(entry, materializedColumns, partition.jsonlPath, sourceId, epoch))
+      await appendRowsToTable(tablePath, columnSpecs, rows)
+      rowsWritten += rows.length
+    }
+  )
+  if (!reset && read.nextByteOffset === existing?.byte_offset && rowsWritten === 0) return { rows: 0 }
+  if (rowsWritten === 0) await appendRowsToTable(tablePath, columnSpecs, [])
   writeCacheCursor(partition.cursorPath, {
     cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
     kind: 'collection',
@@ -489,13 +503,13 @@ async function materializeCollectionIncremental(partition, force) {
     source_mtime_ms: read.fileMtimeMs,
     byte_offset: read.nextByteOffset,
     line_number: read.nextLineNumber,
-    row_count: (reset ? 0 : existing?.row_count ?? 0) + rows.length,
-    schema_fingerprint: stableFingerprint(columns),
+    row_count: (reset ? 0 : existing?.row_count ?? 0) + rowsWritten,
+    schema_fingerprint: stableFingerprint(materializedColumns),
     refreshed_at: new Date().toISOString(),
-    columns,
+    columns: materializedColumns,
     ...(timestampColumn ? { timestamp_column: timestampColumn } : {}),
   })
-  return { rows: rows.length }
+  return { rows: rowsWritten }
 }
 
 /**
@@ -613,62 +627,122 @@ function walkDir(dir, onFile) {
 }
 
 /**
- * @param {Record<string, unknown>[]} rawRows
+ * @param {string} filePath
  * @param {string | undefined} requestedTimestampColumn
- * @returns {CollectionColumnMeta[]}
+ * @param {number} startByteOffset
+ * @param {number} startLineNumber
+ * @returns {Promise<CollectionColumnMeta[]>}
  */
-function inferCollectionColumns(rawRows, requestedTimestampColumn) {
-  /** @type {CollectionColumnMeta[]} */
-  const columns = [...META_COLUMNS]
-  /** @type {Map<string, { sourceField: string, values: unknown[], present: number, nullable: boolean }>} */
-  const stats = new Map()
-  /** @type {Set<string>} */
-  const usedNames = new Set(columns.map((column) => column.name))
-
-  for (const raw of rawRows) {
-    for (const [sourceField, value] of Object.entries(raw)) {
-      let stat = stats.get(sourceField)
-      if (!stat) {
-        stat = { sourceField, values: [], present: 0, nullable: false }
-        stats.set(sourceField, stat)
-      }
-      stat.present++
-      if (value === undefined || value === null) stat.nullable = true
-      else stat.values.push(value)
+async function inferCollectionColumnsFromJsonl(filePath, requestedTimestampColumn, startByteOffset, startLineNumber) {
+  const inference = createCollectionColumnInference(requestedTimestampColumn)
+  await readJsonlEntryBatches(
+    filePath,
+    { startByteOffset, startLineNumber },
+    (batch) => {
+      for (const entry of batch.entries) inference.observe(entry.raw)
     }
-  }
+  )
+  return inference.columns()
+}
 
-  for (const stat of stats.values()) {
-    const baseName = normalizeColumnName(stat.sourceField)
-    const name = uniqueName(baseName, usedNames)
-    usedNames.add(name)
-    columns.push({
-      name,
-      source_field: stat.sourceField,
-      type: inferColumnType(stat.sourceField, name, stat.values, requestedTimestampColumn),
-      nullable: stat.nullable || stat.present < rawRows.length,
-    })
+/**
+ * @param {string | undefined} requestedTimestampColumn
+ * @returns {{
+ *   observe: (raw: Record<string, unknown>) => void,
+ *   columns: () => CollectionColumnMeta[],
+ * }}
+ */
+function createCollectionColumnInference(requestedTimestampColumn) {
+  /** @type {CollectionColumnMeta[]} */
+  const baseColumns = [...META_COLUMNS]
+  /** @type {Map<string, {
+   *   sourceField: string,
+   *   present: number,
+   *   nullable: boolean,
+   *   hasValue: boolean,
+   *   allBooleans: boolean,
+   *   allNumbers: boolean,
+   *   allStrings: boolean,
+   *   allTimestamps: boolean,
+   * }>} */
+  const stats = new Map()
+  let rows = 0
+
+  return {
+    observe(raw) {
+      rows++
+      for (const [sourceField, value] of Object.entries(raw)) {
+        let stat = stats.get(sourceField)
+        if (!stat) {
+          stat = {
+            sourceField,
+            present: 0,
+            nullable: false,
+            hasValue: false,
+            allBooleans: true,
+            allNumbers: true,
+            allStrings: true,
+            allTimestamps: true,
+          }
+          stats.set(sourceField, stat)
+        }
+        stat.present++
+        if (value === undefined || value === null) {
+          stat.nullable = true
+          continue
+        }
+        stat.hasValue = true
+        if (typeof value !== 'boolean') stat.allBooleans = false
+        if (typeof value !== 'number' || !Number.isFinite(value)) stat.allNumbers = false
+        if (typeof value !== 'string') stat.allStrings = false
+        if (!isTimestampValue(value)) stat.allTimestamps = false
+      }
+    },
+    columns() {
+      /** @type {CollectionColumnMeta[]} */
+      const columns = [...baseColumns]
+      /** @type {Set<string>} */
+      const usedNames = new Set(columns.map((column) => column.name))
+
+      for (const stat of stats.values()) {
+        const baseName = normalizeColumnName(stat.sourceField)
+        const name = uniqueName(baseName, usedNames)
+        usedNames.add(name)
+        columns.push({
+          name,
+          source_field: stat.sourceField,
+          type: inferColumnType(stat.sourceField, name, stat, requestedTimestampColumn),
+          nullable: stat.nullable || stat.present < rows,
+        })
+      }
+      return columns
+    },
   }
-  return columns
 }
 
 /**
  * @param {string} sourceField
  * @param {string} columnName
- * @param {unknown[]} values
+ * @param {{
+ *   hasValue: boolean,
+ *   allBooleans: boolean,
+ *   allNumbers: boolean,
+ *   allStrings: boolean,
+ *   allTimestamps: boolean,
+ * }} stat
  * @param {string | undefined} requestedTimestampColumn
  * @returns {CollectionColumnMeta['type']}
  */
-function inferColumnType(sourceField, columnName, values, requestedTimestampColumn) {
-  if (values.length === 0) return 'JSON'
+function inferColumnType(sourceField, columnName, stat, requestedTimestampColumn) {
+  if (!stat.hasValue) return 'JSON'
   const requested = requestedTimestampColumn && (
     requestedTimestampColumn === sourceField ||
     normalizeColumnName(requestedTimestampColumn) === columnName
   )
-  if ((requested || isTimestampCandidate(sourceField) || isTimestampCandidate(columnName)) && values.every(isTimestampValue)) return 'TIMESTAMP'
-  if (values.every((value) => typeof value === 'boolean')) return 'BOOLEAN'
-  if (values.every((value) => typeof value === 'number' && Number.isFinite(value))) return 'DOUBLE'
-  if (values.every((value) => typeof value === 'string')) return 'STRING'
+  if ((requested || isTimestampCandidate(sourceField) || isTimestampCandidate(columnName)) && stat.allTimestamps) return 'TIMESTAMP'
+  if (stat.allBooleans) return 'BOOLEAN'
+  if (stat.allNumbers) return 'DOUBLE'
+  if (stat.allStrings) return 'STRING'
   return 'JSON'
 }
 

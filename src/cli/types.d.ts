@@ -349,6 +349,8 @@ export interface InitHooks {
   resolveGlobalBinPath?: () => Promise<string>
   /** Override `collectivus install` chain entry. */
   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>
+  /** Override `ctvs gascity backfill` chain entry. */
+  runGascityBackfill?: (args: string[], hooks?: { stdout?: WriteStream, stderr?: WriteStream }) => Promise<number>
   /** Override `process.platform`. */
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */

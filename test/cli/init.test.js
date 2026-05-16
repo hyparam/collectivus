@@ -159,6 +159,7 @@ describe('runInit', function() {
         '', // default OTLP listen
         cfgPath,
         'y',
+        'n', // skip historical gascity backfill
         'n', // skip daemon
       ])
       const code = await runInit({
@@ -197,6 +198,7 @@ describe('runInit', function() {
         '', // add no more cities
         cfgPath,
         'y',
+        'n', // skip historical gascity backfill
         'y', // install daemon
       ])
       /** @type {string[][]} */
@@ -216,6 +218,44 @@ describe('runInit', function() {
       expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
       expect(installCalls).toEqual([['--config', cfgPath, '--no']])
       expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
+    })
+
+    it('offers to backfill gascity history after writing the config', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'gascity.json')
+      const cityDir = path.join(tmpDir, 'mycity')
+      fs.mkdirSync(cityDir, { recursive: true })
+      fs.writeFileSync(
+        path.join(cityDir, 'city.toml'),
+        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
+        'utf8'
+      )
+      const { prompt, asked } = scriptedPrompt([
+        '1', // standalone
+        '2', // gascity only
+        '', // default sink
+        cityDir,
+        '', // add discovered city
+        '', // add no more cities
+        cfgPath,
+        'y', // confirm write
+        'y', // run historical backfill
+        'n', // skip daemon
+      ])
+      /** @type {string[][]} */
+      const backfillCalls = []
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultConfigPath: absentDefaultCfg,
+        runGascityBackfill(args) { backfillCalls.push(args); return Promise.resolve(0) },
+      })
+      expect(code).toBe(0)
+      expect(backfillCalls).toEqual([['mycity', '--all', '--config', cfgPath]])
+      expect(asked).toContain('Backfill all recoverable gascity sessions? [y/N]: ')
+      expect(stdout.value()).toMatch(/This can take a while/)
     })
 
     it('defaults the save path to ~/.hyp/collectivus.json and creates the parent dir', async function() {

@@ -170,6 +170,7 @@ export async function runInit(hooks = {}) {
       installGlobal: hooks.installGlobal,
       resolveGlobalBinPath: hooks.resolveGlobalBinPath,
       runInstall: hooks.runInstall,
+      runGascityBackfill: hooks.runGascityBackfill,
     })
   }
   return runServerFlow({
@@ -198,6 +199,7 @@ export async function runInit(hooks = {}) {
  *   installGlobal?: () => Promise<boolean>,
  *   resolveGlobalBinPath?: () => Promise<string>,
  *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
+ *   runGascityBackfill?: (args: string[], hooks?: { stdout?: { write: (s: string) => void }, stderr?: { write: (s: string) => void } }) => Promise<number>,
  * }} args
  * @returns {Promise<number>}
  */
@@ -221,6 +223,8 @@ async function runSingleUserFlow(args) {
     sink: { type: 'file', dir: sinkDir },
     query: { cache: { enabled: true } },
   }
+  /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
+  let gascityCities = []
 
   if (hasProxy) {
     stdout.write('\nProxy capture will listen on 127.0.0.1:8787 and forward LLM\n')
@@ -240,8 +244,8 @@ async function runSingleUserFlow(args) {
   }
 
   if (hasGascity) {
-    const cities = await askGascityCities({ stdout, stderr, prompt, cwd })
-    config.gascity = cities
+    gascityCities = await askGascityCities({ stdout, stderr, prompt, cwd })
+    config.gascity = gascityCities
   }
 
   if (hasOtel) {
@@ -255,6 +259,15 @@ async function runSingleUserFlow(args) {
 
   const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
   if (!written) return 0
+  if (gascityCities.length > 0) {
+    const backfillCode = await offerGascityBackfill({
+      cities: gascityCities,
+      configPath: cfgPath,
+      stdout, stderr, prompt,
+      runBackfill: args.runGascityBackfill,
+    })
+    if (backfillCode !== 0) return backfillCode
+  }
 
   return offerDaemonInstall({
     configPath: cfgPath, wantDaemon: true,
@@ -264,6 +277,39 @@ async function runSingleUserFlow(args) {
     runInstall: args.runInstall,
     offerClaudeCode: hasProxy,
   })
+}
+
+/**
+ * Offer an explicit historical backfill step for newly configured gascity
+ * supervisors. This is intentionally opt-in because `--all` asks the supervisor
+ * for recoverable sessions and then replays each transcript.
+ *
+ * @param {{
+ *   cities: import('../gascity/types.d.ts').GascityCityConfig[],
+ *   configPath: string,
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   runBackfill?: (args: string[], hooks?: { stdout?: { write: (s: string) => void }, stderr?: { write: (s: string) => void } }) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function offerGascityBackfill(args) {
+  const { cities, configPath, stdout, stderr, prompt } = args
+  stdout.write('\nBackfill gascity history now?\n')
+  stdout.write('  Yes -> asks each supervisor for all recoverable sessions and replays transcripts.\n')
+  stdout.write('         This can take a while for large cities.\n')
+  stdout.write('  No  -> starts capturing new and active sessions only; run\n')
+  stdout.write('         `ctvs gascity backfill <city> --all` later.\n')
+  const ans = (await prompt('Backfill all recoverable gascity sessions? [y/N]: ')).trim()
+  if (!/^y(es)?$/i.test(ans)) return 0
+
+  const runBackfill = args.runBackfill ?? await loadRunGascityBackfill()
+  for (const city of cities) {
+    const code = await runBackfill([city.name, '--all', '--config', configPath], { stdout, stderr })
+    if (code !== 0) return code
+  }
+  return 0
 }
 
 /**
@@ -853,6 +899,14 @@ function defaultReadConfig(p) {
 async function loadRunInstall() {
   const mod = await import('./install.js')
   return function(args, hooks) { return mod.runInstall(args, hooks) }
+}
+
+/**
+ * @returns {Promise<(args: string[], hooks?: { stdout?: { write: (s: string) => void }, stderr?: { write: (s: string) => void } }) => Promise<number>>}
+ */
+async function loadRunGascityBackfill() {
+  const mod = await import('./gascity.js')
+  return function(args, hooks) { return mod.runBackfill(args, hooks) }
 }
 
 /**

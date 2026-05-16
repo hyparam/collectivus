@@ -473,30 +473,39 @@ describe('runBackfill', () => {
     expect(stdout.value()).toMatch(/1 attempted/)
   })
 
-  it('with --all also walks retired cursors', async () => {
+  it('with --all discovers supervisor sessions and replays full transcripts', async () => {
     const paths = buildPaths()
     await writeConfig(paths.configPath, {
       gascity: [{ name: 'hyptown', api_url: 'http://127.0.0.1:8372' }],
     })
-    const cursorsDir = path.join(paths.sinkRoot, '.cursors', 'hyptown')
-    await fs.mkdir(cursorsDir, { recursive: true })
-    await fs.writeFile(
-      path.join(cursorsDir, 'session-a.json'),
-      JSON.stringify({ last_uuid: 'u1', retired: true })
-    )
-    await fs.writeFile(
-      path.join(cursorsDir, 'session-b.json'),
-      JSON.stringify({ last_uuid: 'u2', retired: true })
-    )
-    const fetchFn = vi.fn(async () => new Response('[]', {
-      status: 200, headers: { 'content-type': 'application/json' },
-    }))
+    /** @type {string[]} */
+    const seenUrls = []
+    const fetchFn = vi.fn(async (/** @type {string} */ url) => {
+      seenUrls.push(url)
+      if (url.includes('/sessions?state=all')) {
+        return new Response(JSON.stringify({
+          items: [
+            { id: 'session-a', state: 'stopped' },
+            { id: 'te-b', alias: 'rig/gastown.worker', template: 'rig/gastown.worker', state: 'active' },
+          ],
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('[]', {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    })
+    const stdout = memo()
     await runBackfill(['hyptown', '--all', '--config', paths.configPath], {
-      stdout: memo(), stderr: memo(),
+      stdout, stderr: memo(),
       sinkRoot: paths.sinkRoot,
       fetchFn: /** @type {typeof fetch} */ (/** @type {unknown} */ (fetchFn)),
     })
-    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(seenUrls[0]).toBe('http://127.0.0.1:8372/v0/city/hyptown/sessions?state=all')
+    expect(seenUrls.some((u) => /session\/session-a\/transcript\?format=raw$/.test(u))).toBe(true)
+    expect(seenUrls.some((u) => u.includes(`/session/${encodeURIComponent('rig/gastown.worker')}/transcript?format=raw`))).toBe(true)
+    expect(seenUrls.some((u) => u.includes('after='))).toBe(false)
+    expect(stdout.value()).toMatch(/can take a while/)
+    expect(stdout.value()).toMatch(/Discovered 2 sessions/)
   })
 
   it('skips sessions whose cursor is older than --since', async () => {

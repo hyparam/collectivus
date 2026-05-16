@@ -749,16 +749,19 @@ const BACKFILL_USAGE = `Usage:
   ctvs gascity backfill <city> [--since <duration>] [--all]
 
 Walks the city's transcript history per session via /v0/city/{city}/session/{id}/transcript?format=raw.
-Skips sessions whose cursor is marked retired unless --all is set. The dispatch
-path is the same one the live SSE tail uses, so re-running is idempotent — the
-writer's dedup set collapses any overlap.
+By default, backfill uses local session cursors and skips retired sessions.
+With --all, it asks the supervisor for all recoverable sessions and replays each
+transcript from the beginning. The dispatch path is the same one the live SSE
+tail uses, so re-running is idempotent — the writer's dedup set collapses any
+overlap.
 
 Options:
   --since <duration>   Skip sessions whose cursor's last_timestamp is older than this (e.g. 7d, 12h)
-  --all                Include retired-cursor sessions
+  --all                Discover and backfill all recoverable supervisor sessions
   --config <path>      collectivus config (default: ~/.hyp/collectivus.json)
   --help, -h           Show this help
 `
+const BACKFILL_DISCOVERY_TIMEOUT_MS = 5000
 
 /**
  * @typedef {object} BackfillParseResult
@@ -870,42 +873,54 @@ export async function runBackfill(argv, hooks) {
         throw err
       }
     }
-    const cutoff = sinceMs !== undefined ? Date.now() - sinceMs : undefined
+    const cursors = new Map()
     for (const entry of entries) {
       if (!entry.endsWith('.json') || entry === 'lifecycle.json') continue
       const sessionId = entry.slice(0, -'.json'.length)
       if (sessionId.length === 0) continue
       const cursorPath = `${cursorsRoot}/${entry}`
       const cursor = await readCursor(cursorPath)
-      if (!cursor) continue
-      if (cursor.retired === true && !parsed.all) {
+      if (cursor) cursors.set(sessionId, cursor)
+    }
+
+    const cutoff = sinceMs !== undefined ? Date.now() - sinceMs : undefined
+    const targets = parsed.all
+      ? await discoverAllBackfillTargets({ city, fetchFn, stdout, cursors })
+      : cursorBackfillTargets(cursors)
+
+    for (const target of targets) {
+      const { cursor } = target
+      if (!parsed.all && cursor?.retired === true) {
         result.sessionsSkipped += 1
         continue
       }
-      if (cutoff !== undefined && typeof cursor.last_timestamp === 'string') {
-        const ts = Date.parse(cursor.last_timestamp)
+      const timestamp = target.lastTimestamp ?? (typeof cursor?.last_timestamp === 'string' ? cursor.last_timestamp : undefined)
+      if (cutoff !== undefined && timestamp !== undefined) {
+        const ts = Date.parse(timestamp)
         if (Number.isFinite(ts) && ts < cutoff) {
           result.sessionsSkipped += 1
           continue
         }
       }
+
       result.sessionsAttempted += 1
       try {
+        const backfillCityConfig = cityForBackfillSession(city, target)
         const dispatched = await backfillSession({
-          city,
-          sessionId,
-          afterUuid: typeof cursor.last_uuid === 'string' ? cursor.last_uuid : undefined,
+          city: backfillCityConfig,
+          sessionId: target.sessionId,
+          afterUuid: parsed.all ? undefined : typeof cursor?.last_uuid === 'string' ? cursor.last_uuid : undefined,
           dispatcher,
           fetchFn,
           stderr,
           debug: false,
         })
         result.framesDispatched += dispatched
-        stdout.write(`  ${sessionId}: ${dispatched} frames\n`)
+        stdout.write(`  ${target.sessionId}: ${dispatched} frames\n`)
       } catch (err) {
         result.sessionsFailed += 1
         stderr.write(
-          `[gascity] backfill_session_failed city=${city.name} session=${sessionId} err=${formatError(err)}\n`
+          `[gascity] backfill_session_failed city=${city.name} session=${target.sessionId} err=${formatError(err)}\n`
         )
       }
     }
@@ -922,6 +937,167 @@ export async function runBackfill(argv, hooks) {
     `${result.framesDispatched} frames, ${result.sessionsFailed} failed, ${result.sessionsSkipped} skipped\n`
   )
   return result.sessionsFailed > 0 ? 1 : 0
+}
+
+/**
+ * @typedef {{
+ *   sessionId: string,
+ *   cursor?: import('../gascity/types.d.ts').SessionCursor,
+ *   template?: string,
+ *   rig?: string,
+ *   alias?: string,
+ *   lastTimestamp?: string,
+ * }} BackfillTarget
+ */
+
+/**
+ * @param {Map<string, import('../gascity/types.d.ts').SessionCursor>} cursors
+ * @returns {BackfillTarget[]}
+ */
+function cursorBackfillTargets(cursors) {
+  return Array.from(cursors.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([sessionId, cursor]) => ({ sessionId, cursor }))
+}
+
+/**
+ * @param {{
+ *   city: import('../gascity/types.d.ts').GascityCityConfig,
+ *   fetchFn: typeof fetch,
+ *   stdout: { write: (s: string) => void },
+ *   cursors: Map<string, import('../gascity/types.d.ts').SessionCursor>,
+ * }} args
+ * @returns {Promise<BackfillTarget[]>}
+ */
+async function discoverAllBackfillTargets(args) {
+  args.stdout.write(`Discovering recoverable sessions for ${args.city.name}; this can take a while for large cities.\n`)
+  const sessions = await fetchSupervisorSessions({
+    city: args.city,
+    fetchFn: args.fetchFn,
+    state: 'all',
+  })
+  args.stdout.write(`Discovered ${sessions.length} session${sessions.length === 1 ? '' : 's'} from supervisor.\n`)
+  /** @type {Map<string, BackfillTarget>} */
+  const targets = new Map()
+  for (const session of sessions) {
+    /** @type {BackfillTarget} */
+    const target = { sessionId: session.sessionId }
+    const cursor = args.cursors.get(session.sessionId)
+    if (cursor !== undefined) target.cursor = cursor
+    if (session.template !== undefined) target.template = session.template
+    if (session.rig !== undefined) target.rig = session.rig
+    if (session.alias !== undefined) target.alias = session.alias
+    if (session.lastTimestamp !== undefined) target.lastTimestamp = session.lastTimestamp
+    targets.set(session.sessionId, target)
+  }
+  for (const [sessionId, cursor] of args.cursors) {
+    if (targets.has(sessionId)) continue
+    targets.set(sessionId, { sessionId, cursor })
+  }
+  return Array.from(targets.values()).sort((a, b) => a.sessionId.localeCompare(b.sessionId))
+}
+
+/**
+ * @param {{
+ *   city: import('../gascity/types.d.ts').GascityCityConfig,
+ *   fetchFn: typeof fetch,
+ *   state: 'active' | 'all',
+ * }} args
+ * @returns {Promise<import('../gascity/types.d.ts').SupervisorSessionInfo[]>}
+ */
+async function fetchSupervisorSessions(args) {
+  const url = buildSessionsUrl(args.city.api_url, args.city.name, args.state)
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), BACKFILL_DISCOVERY_TIMEOUT_MS)
+  /** @type {Response} */
+  let response
+  try {
+    response = await args.fetchFn(url, { signal: ac.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(swallow)
+    throw new Error(`sessions HTTP ${response.status}`)
+  }
+  /** @type {unknown} */
+  const body = await response.json()
+  return parseSupervisorSessions(body, { includeInactive: args.state === 'all' })
+}
+
+/**
+ * @param {string} apiUrl
+ * @param {string} city
+ * @param {'active' | 'all'} state
+ * @returns {string}
+ */
+function buildSessionsUrl(apiUrl, city, state) {
+  const base = `${apiUrl.replace(/\/+$/, '')}/v0/city/${encodeURIComponent(city)}/sessions`
+  return `${base}?${new URLSearchParams({ state }).toString()}`
+}
+
+/**
+ * @param {unknown} body
+ * @param {{ includeInactive: boolean }} opts
+ * @returns {import('../gascity/types.d.ts').SupervisorSessionInfo[]}
+ */
+function parseSupervisorSessions(body, opts) {
+  if (body === null || typeof body !== 'object') return []
+  const { items } = /** @type {Record<string, unknown>} */ (body)
+  if (!Array.isArray(items)) return []
+  /** @type {import('../gascity/types.d.ts').SupervisorSessionInfo[]} */
+  const sessions = []
+  for (const item of items) {
+    if (item === null || typeof item !== 'object') continue
+    const state = pickString(item, 'state')
+    if (!opts.includeInactive && state !== undefined && state !== 'active') continue
+    const alias = pickString(item, 'alias')
+    const id = pickString(item, 'id')
+    const sessionId = alias ?? id
+    if (sessionId === undefined || sessionId.length === 0) continue
+    const template = pickString(item, 'template') ?? sessionId
+    const rig = pickString(item, 'rig')
+    const lastTimestamp =
+      pickString(item, 'last_timestamp') ??
+      pickString(item, 'last_frame_at') ??
+      pickString(item, 'updated_at') ??
+      pickString(item, 'stopped_at') ??
+      pickString(item, 'created_at')
+    /** @type {import('../gascity/types.d.ts').SupervisorSessionInfo} */
+    const session = { sessionId }
+    if (template !== undefined) session.template = template
+    if (rig !== undefined) session.rig = rig
+    if (alias !== undefined) session.alias = alias
+    if (state !== undefined) session.state = state
+    if (lastTimestamp !== undefined) session.lastTimestamp = lastTimestamp
+    sessions.push(session)
+  }
+  return sessions
+}
+
+/**
+ * @param {import('../gascity/types.d.ts').GascityCityConfig} city
+ * @param {BackfillTarget} target
+ * @returns {{ name: string, api_url: string, template?: string, rig?: string, alias?: string }}
+ */
+function cityForBackfillSession(city, target) {
+  /** @type {{ name: string, api_url: string, template?: string, rig?: string, alias?: string }} */
+  const out = { name: city.name, api_url: city.api_url }
+  if (target.template !== undefined) out.template = target.template
+  if (target.rig !== undefined) out.rig = target.rig
+  if (target.alias !== undefined) out.alias = target.alias
+  return out
+}
+
+/**
+ * @param {unknown} obj
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function pickString(obj, key) {
+  if (obj === null || typeof obj !== 'object') return undefined
+  const value = /** @type {Record<string, unknown>} */ (obj)[key]
+  return typeof value === 'string' ? value : undefined
 }
 
 /**

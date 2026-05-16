@@ -270,8 +270,8 @@ async function runSingleUserFlow(args) {
   const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
   const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
-  const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
-  if (!written) return 0
+  const written = await confirmAndWrite({ stdout, stderr, writeFile, config, cfgPath })
+  if (!written) return 1
   if (gascityCities.length > 0) {
     const backfillCode = await offerGascityBackfill({
       cities: gascityCities,
@@ -634,13 +634,11 @@ function dedupeGascityCities(entries) {
 }
 
 /**
- * Render the config preview, ask the user to confirm, and write the file.
- * Returns true if the file was written, false if the user aborted.
+ * Write the config file. Returns true on success, false on error.
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
  *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
  *   writeFile: (path: string, contents: string) => void,
  *   config: CollectivusConfig,
  *   cfgPath: string,
@@ -648,20 +646,11 @@ function dedupeGascityCities(entries) {
  * @returns {Promise<boolean>}
  */
 async function confirmAndWrite(args) {
-  const { stdout, stderr, prompt, writeFile, config, cfgPath } = args
+  const { stdout, stderr, writeFile, config, cfgPath } = args
   const json = JSON.stringify(config, null, 2)
-  stdout.write('\n--- ' + cfgPath + ' ---\n')
-  stdout.write(json + '\n')
-  stdout.write('-'.repeat(cfgPath.length + 8) + '\n\n')
-
-  const confirmAns = (await prompt(`Write this config to ${cfgPath}? [Y/n]: `)).trim()
-  if (!isYes(confirmAns)) {
-    stdout.write('Aborted. No changes made.\n')
-    return false
-  }
   try {
     writeFile(cfgPath, json + '\n')
-    stdout.write(`✓ Wrote ${cfgPath}\n`)
+    stdout.write(`\n✓ Wrote ${cfgPath}\n`)
     if (config.upload) {
       stdout.write('ⓘ Upload uses AWS env credentials or an ECS task role.\n')
       stdout.write('  Daemon will fail fast at start if no credential source is available.\n')
@@ -1100,7 +1089,7 @@ async function runServerFlow(args) {
   if (upload) config.upload = upload
 
   const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
-  if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
+  if (!await confirmAndWrite({ stdout, stderr, cfgPath, config, writeFile })) return 1
 
   if (secretAns === '') {
     stdout.write('\nGenerated identity-issuer secret was written to the config file.\n')

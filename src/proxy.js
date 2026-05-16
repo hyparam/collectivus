@@ -1,6 +1,7 @@
 import http from 'node:http'
 import https from 'node:https'
 import zlib from 'node:zlib'
+import { BANNER, BANNER_HEADERS } from './banner.js'
 import { isSseHeaders } from './sse.js'
 
 /**
@@ -194,8 +195,13 @@ function handleRequest(upstreams, recorder, sessionContexts, ignoreFilter, req, 
 
   const upstream = matchUpstream(upstreams, url.pathname)
   if (!upstream) {
-    sendJson(res, 404, { error: 'no upstream matches path', path: url.pathname })
     req.resume()
+    if (req.method === 'GET' && url.pathname === '/') {
+      res.writeHead(200, BANNER_HEADERS)
+      res.end(BANNER)
+      return
+    }
+    sendJson(res, 404, { error: 'no upstream matches path', path: url.pathname })
     return
   }
 

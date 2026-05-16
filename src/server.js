@@ -1,5 +1,6 @@
 import http from 'node:http'
 import zlib from 'node:zlib'
+import { BANNER, BANNER_HEADERS } from './banner.js'
 import { decodeExportLogsServiceRequest } from './otlp/logs.js'
 import { decodeExportMetricsServiceRequest } from './otlp/metrics.js'
 import { decodeExportTraceServiceRequest } from './otlp/traces.js'
@@ -39,6 +40,12 @@ function createServer(handler) {
   const server = http.createServer(async function(req, res) {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`)
     const path = url.pathname
+
+    if (req.method === 'GET' && path === '/') {
+      res.writeHead(200, BANNER_HEADERS)
+      res.end(BANNER)
+      return
+    }
 
     if (req.method !== 'POST') {
       res.writeHead(405, JSON_CT)

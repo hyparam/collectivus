@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-05-15
+
+### Added
+
+- `ctvs gascity` can capture gascity supervisor transcripts into the
+  `gascity_messages` dataset, with Claude and Codex normalizers, Parquet
+  output, per-session cursors, attach/detach/list/status/backfill commands,
+  and `ctvs query` catalog/schema/SQL support.
+- Standalone initialization now lets operators choose Proxy, gascity, OTLP, or
+  all capture sources, discovers gascity supervisors from a workspace, and can
+  backfill recoverable gascity history during setup.
+- `ctvs query refresh <file.jsonl>...` materializes selected source files, and
+  missing/stale-cache guidance now suggests file-targeted refresh commands when
+  the affected source files are known.
+- Dynamic collection tables can be queried by their normalized SQL table name
+  or by their original quoted collection name.
+- `ctvs ignore add|remove|list`, `.ctvsignore`, and session-scoped ignore
+  endpoints let users opt folders or active sessions out of Collectivus
+  recording before rows are written. `ctvs attach --client claude` now installs
+  the bundled query and ignore skills.
+
 ### Changed (breaking)
 
 - Local `ctvs query` cache storage now uses local Iceberg tables under
@@ -18,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   starts a new source epoch instead of recreating every cache partition.
 - Glob-backed collection sources that disappear remain queryable as cache-only
   partitions instead of being pruned on refresh.
+
+### Changed
+
+- Query cache refresh writes now stream incrementally instead of buffering whole
+  partitions, and proxy-message refresh can append new rows while preserving
+  previously written message IDs and tool-call names.
+
+### Fixed
+
+- `ctvs gascity` backfill handles active sessions and recoverable supervisor
+  backfill setup more reliably.
 
 ## [2.2.0] — 2026-05-14
 

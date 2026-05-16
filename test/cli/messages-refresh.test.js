@@ -28,6 +28,8 @@ let tmpDir
 let sinkDir
 /** @type {string} */
 let cacheDir
+/** @type {string | undefined} */
+let originalHome
 
 beforeEach(function() {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-msgs-refresh-'))
@@ -35,9 +37,13 @@ beforeEach(function() {
   cacheDir = path.join(tmpDir, 'cache')
   fs.mkdirSync(sinkDir, { recursive: true })
   fs.mkdirSync(cacheDir, { recursive: true })
+  originalHome = process.env.HOME
+  process.env.HOME = tmpDir
 })
 
 afterEach(function() {
+  if (originalHome !== undefined) process.env.HOME = originalHome
+  else delete process.env.HOME
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
 

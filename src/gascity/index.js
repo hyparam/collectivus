@@ -120,6 +120,7 @@ export async function startGascitySource(opts) {
     stop: async () => {
       await Promise.all(Array.from(subscribers.values()).map((s) => s.stop()))
       subscribers.clear()
+      await dispatcher.drain()
       await writer.stop()
       await stateWriter.stop()
     },

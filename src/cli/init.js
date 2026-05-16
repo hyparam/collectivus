@@ -402,22 +402,8 @@ async function askManualGascityCities(args) {
     try {
       entry = await resolveGascityCityEntry(resolvedTarget, undefined)
     } catch (err) {
-      const message = formatError(err)
-      if (!/--api-url is required|could not infer api_url/.test(message)) {
-        stderr.write(`  ${message}\n`)
-        continue
-      }
-      const apiUrl = (await prompt('Supervisor API URL: ')).trim()
-      if (!apiUrl) {
-        stderr.write('  supervisor API URL is required\n')
-        continue
-      }
-      try {
-        entry = await resolveGascityCityEntry(resolvedTarget, apiUrl)
-      } catch (apiErr) {
-        stderr.write(`  ${formatError(apiErr)}\n`)
-        continue
-      }
+      stderr.write(`  ${formatError(err)}\n`)
+      continue
     }
 
     upsertGascityCity(cities, entry)

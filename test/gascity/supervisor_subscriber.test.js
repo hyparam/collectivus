@@ -22,6 +22,9 @@ describe('SupervisorSubscriber', () => {
     const fetchFn = vi.fn().mockImplementation(async (
       /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
     ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': 'lc-0' })
+      }
       if (url.includes('/events/stream')) {
         return holdingSseResponse(
           ['id: lc-1\nevent: session.woke\ndata: {"session_id":"hy-a","template":"desktop/refinery"}\n\n'],
@@ -52,12 +55,178 @@ describe('SupervisorSubscriber', () => {
     expect(cursor).toEqual({ last_event_id: 'lc-1' })
   })
 
+  it('seeds active session workers before opening the lifecycle stream', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({
+          items: [{
+            id: 'te-a',
+            alias: 'rig/gastown.worker',
+            template: 'rig/gastown.worker',
+            rig: 'rig',
+            state: 'active',
+          }],
+        }, { 'x-gc-index': 'seed-42' })
+      }
+      if (url.includes('/events/stream')) {
+        return holdingSseResponse([], opts.signal)
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => fetchFn.mock.calls.some((c) => {
+      const url = /** @type {string} */ (c[0])
+      return url.includes(`/session/${encodeURIComponent('rig/gastown.worker')}/stream`)
+    }))
+    await subscriber.stop()
+    const eventsCall = fetchFn.mock.calls.find((c) => /\/events\/stream/.test(/** @type {string} */ (c[0])))
+    if (!eventsCall) throw new Error('expected lifecycle stream fetch')
+    const headers = /** @type {{ headers: Record<string, string> }} */ (eventsCall[1]).headers
+    expect(headers['Last-Event-ID']).toBe('seed-42')
+  })
+
+  it('backfills seeded active session transcripts in the background', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    /** @type {unknown[]} */
+    const seen = []
+    dispatcher.register('claude', (frame) => { seen.push(frame); return [] })
+    const writer = /** @type {import('../../src/gascity/parquet_writer.js').ParquetWriter} */ (
+      /** @type {unknown} */ ({
+        getLastFlushedUuid: vi.fn(async () => undefined),
+        retireSession: vi.fn(async () => undefined),
+      })
+    )
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({
+          items: [{
+            id: 'te-a',
+            alias: 'rig/gastown.worker',
+            template: 'rig/gastown.worker',
+            rig: 'rig',
+            state: 'active',
+          }],
+        }, { 'x-gc-index': 'seed-42' })
+      }
+      if (url.includes('/transcript')) {
+        return jsonResponse({
+          provider: 'claude',
+          messages: [{ type: 'assistant', uuid: 'u-1' }],
+        })
+      }
+      if (url.includes('/events/stream')) {
+        return holdingSseResponse([], opts.signal)
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher,
+      writer,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => seen.length === 1)
+    await subscriber.stop()
+    expect(seen).toEqual([{ type: 'assistant', uuid: 'u-1' }])
+    expect(writer.getLastFlushedUuid).toHaveBeenCalledWith('hyptown', 'rig/gastown.worker')
+  })
+
+  it('spawns a session worker from the supervisor event-log envelope', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const sessionId = 'azworld/gastown-beads-lite.witness'
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '9' })
+      }
+      if (url.includes('/events/stream')) {
+        return holdingSseResponse(
+          [
+            'id: 10\nevent: event\ndata: {"seq":10,"type":"session.woke","subject":"azworld/gastown-beads-lite.witness","payload":{}}\n\n',
+          ],
+          opts.signal
+        )
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => fetchFn.mock.calls.some((c) => {
+      const url = /** @type {string} */ (c[0])
+      return url.includes(`/session/${encodeURIComponent(sessionId)}/stream`)
+    }))
+    expect(subscriber.workers.get(sessionId)?.template).toBe(sessionId)
+    await subscriber.stop()
+  })
+
+  it('retires a session worker from the supervisor event-log envelope', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const sessionId = 'azworld/gastown-beads-lite.witness'
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '9' })
+      }
+      if (url.includes('/events/stream')) {
+        return holdingSseResponse([
+          'id: 10\nevent: event\ndata: {"seq":10,"type":"session.woke","subject":"azworld/gastown-beads-lite.witness","payload":{}}\n\n',
+          'id: 11\nevent: event\ndata: {"seq":11,"type":"session.stopped","subject":"azworld/gastown-beads-lite.witness","payload":{}}\n\n',
+        ], opts.signal)
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => !subscriber.workers.has(sessionId) && fetchFn.mock.calls.length > 1)
+    await subscriber.stop()
+  })
+
   it('honors include/exclude template filters before spawning workers', async () => {
     const stderr = memoStream()
     const dispatcher = new NormalizerDispatcher({ stderr })
     const fetchFn = vi.fn().mockImplementation(async (
       /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
     ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '0' })
+      }
       if (url.includes('/events/stream')) {
         return holdingSseResponse([
           'id: 1\nevent: session.woke\ndata: {"session_id":"sa","template":"desktop/refinery"}\n\n',
@@ -106,6 +275,9 @@ describe('SupervisorSubscriber', () => {
     const fetchFn = vi.fn().mockImplementation(async (
       /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
     ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '0' })
+      }
       if (url.includes('/events/stream')) {
         return holdingSseResponse([
           'id: 1\nevent: session.woke\ndata: {"session_id":"hy-z","template":"desktop/x"}\n\n',
@@ -137,6 +309,9 @@ describe('SupervisorSubscriber', () => {
     const fetchFn = vi.fn().mockImplementation(async (
       /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
     ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '0' })
+      }
       if (url.includes('/events/stream')) {
         return holdingSseResponse([
           'id: 1\nevent: session.woke\ndata: not-json\n\n',
@@ -168,7 +343,14 @@ describe('SupervisorSubscriber', () => {
     )
     const stderr = memoStream()
     const dispatcher = new NormalizerDispatcher({ stderr })
-    const fetchFn = vi.fn().mockImplementation(async (_url, /** @type {{ signal: AbortSignal }} */ opts) => holdingSseResponse([], opts.signal))
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': 'seed-ignored' })
+      }
+      return holdingSseResponse([], opts.signal)
+    })
     const subscriber = new SupervisorSubscriber({
       city: { name: 'hyptown', api_url: 'http://h' },
       sinkRoot,
@@ -178,10 +360,69 @@ describe('SupervisorSubscriber', () => {
       sleep: blockingSleep(),
     })
     subscriber.start()
-    await waitFor(() => fetchFn.mock.calls.length >= 1)
+    await waitFor(() => fetchFn.mock.calls.some((c) => /\/events\/stream/.test(/** @type {string} */ (c[0]))))
     await subscriber.stop()
-    const headers = /** @type {{ headers: Record<string, string> }} */ (fetchFn.mock.calls[0][1]).headers
+    const eventsCall = fetchFn.mock.calls.find((c) => /\/events\/stream/.test(/** @type {string} */ (c[0])))
+    if (!eventsCall) throw new Error('expected lifecycle stream fetch')
+    const headers = /** @type {{ headers: Record<string, string> }} */ (eventsCall[1]).headers
     expect(headers['Last-Event-ID']).toBe('lc-prev')
+  })
+
+  it('starts first lifecycle stream from the active-session snapshot index', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': 'seed-99' })
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h' },
+      sinkRoot,
+      dispatcher,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => fetchFn.mock.calls.some((c) => /\/events\/stream/.test(/** @type {string} */ (c[0]))))
+    await subscriber.stop()
+    const eventsCall = fetchFn.mock.calls.find((c) => /\/events\/stream/.test(/** @type {string} */ (c[0])))
+    if (!eventsCall) throw new Error('expected lifecycle stream fetch')
+    const headers = /** @type {{ headers: Record<string, string> }} */ (eventsCall[1]).headers
+    expect(headers['Last-Event-ID']).toBe('seed-99')
+  })
+
+  it('falls back to event-log replay when active-session seeding fails', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.includes('/sessions?state=active')) {
+        return new Response('not found', { status: 404 })
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h' },
+      sinkRoot,
+      dispatcher,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    await waitFor(() => fetchFn.mock.calls.some((c) => /\/events\/stream/.test(/** @type {string} */ (c[0]))))
+    await subscriber.stop()
+    const eventsCall = fetchFn.mock.calls.find((c) => /\/events\/stream/.test(/** @type {string} */ (c[0])))
+    if (!eventsCall) throw new Error('expected lifecycle stream fetch')
+    const headers = /** @type {{ headers: Record<string, string> }} */ (eventsCall[1]).headers
+    expect(headers['Last-Event-ID']).toBe('0')
+    expect(stderr.value()).toMatch(/active_sessions_seed_failed/)
   })
 
   it('does nothing when only ping/heartbeat events arrive', async () => {
@@ -190,6 +431,9 @@ describe('SupervisorSubscriber', () => {
     const fetchFn = vi.fn().mockImplementation(async (
       /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
     ) => {
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '0' })
+      }
       if (url.includes('/events/stream')) {
         return holdingSseResponse([
           ': heartbeat comment\n\n',
@@ -216,3 +460,18 @@ describe('SupervisorSubscriber', () => {
     expect(sessionFetches).toHaveLength(0)
   })
 })
+
+/**
+ * @param {unknown} body
+ * @param {Record<string, string>} [headers]
+ * @returns {Response}
+ */
+function jsonResponse(body, headers = {}) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: {
+      'content-type': 'application/json',
+      ...headers,
+    },
+  })
+}

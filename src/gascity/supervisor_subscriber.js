@@ -1,3 +1,4 @@
+import { backfillSession } from './backfill.js'
 import { readCursor, writeCursor } from './cursor.js'
 import { lifecycleCursorPath } from './paths.js'
 import { SessionWorker } from './session_worker.js'
@@ -13,6 +14,8 @@ import { compileFilter } from './template_filter.js'
 
 const SPAWN_EVENTS = new Set(['session.created', 'session.woke'])
 const RETIRE_EVENTS = new Set(['session.draining', 'session.stopped'])
+const ACTIVE_SESSIONS_TIMEOUT_MS = 15000
+const FIRST_EVENT_ID = '0'
 
 /**
  * One supervisor subscriber per configured city. Holds:
@@ -145,13 +148,23 @@ export class SupervisorSubscriber {
   async run() {
     const cursorPath = lifecycleCursorPath(this.sinkRoot, this.city.name)
     const cursor = await readCursor(cursorPath, { onError: (m) => this.stderr.write(`${m}\n`) })
-    const initialId = typeof cursor?.last_event_id === 'string' ? cursor.last_event_id : undefined
+    let initialId = typeof cursor?.last_event_id === 'string' ? cursor.last_event_id : undefined
     const url = `${this.apiUrl}/v0/city/${encodeURIComponent(this.city.name)}/events/stream`
     if (this.debug) {
       this.stderr.write(`[gascity] supervisor_start city=${this.city.name} url=${url}\n`)
     }
     if (this.stateWriter !== undefined) {
       this.stateWriter.upsertCity({ name: this.city.name, api_url: this.apiUrl })
+    }
+    if (this.controller.signal.aborted) return
+    const seed = await this.seedActiveSessions()
+    if (this.controller.signal.aborted) return
+    if (initialId === undefined) {
+      if (seed.lastEventId !== undefined) {
+        initialId = seed.lastEventId
+      } else if (!seed.ok) {
+        initialId = FIRST_EVENT_ID
+      }
     }
     /** @type {Parameters<typeof streamSse>[0]} */
     const streamOpts = {
@@ -186,6 +199,110 @@ export class SupervisorSubscriber {
   }
 
   /**
+   * Seed workers for sessions that were already active before this listener
+   * started. The session-list response carries the event index that produced
+   * the snapshot; a first-time lifecycle stream can start from there instead
+   * of replaying the entire city event log from event 0.
+   *
+   * @returns {Promise<{ ok: boolean, lastEventId?: string }>}
+   * @private
+   */
+  async seedActiveSessions() {
+    const url = `${this.apiUrl}/v0/city/${encodeURIComponent(this.city.name)}/sessions?state=active`
+    if (this.debug) {
+      this.stderr.write(`[gascity] active_sessions_seed_start city=${this.city.name} url=${url}\n`)
+    }
+    try {
+      const fetchFn = this.fetchFn ?? globalThis.fetch
+      const response = await fetchWithTimeout(fetchFn, url, this.controller.signal, ACTIVE_SESSIONS_TIMEOUT_MS)
+      if (!response.ok) {
+        await drainBody(response)
+        throw new Error(`HTTP ${response.status}`)
+      }
+      /** @type {unknown} */
+      const body = await response.json()
+      const sessions = parseActiveSessions(body)
+      let spawned = 0
+      for (const session of sessions) {
+        if (this.controller.signal.aborted) return { ok: false }
+        if (!this.templateMatches(session.template)) {
+          if (this.debug) {
+            this.stderr.write(
+              `[gascity] session_filtered city=${this.city.name} session=${session.sessionId} template=${session.template ?? '<none>'}\n`
+            )
+          }
+          continue
+        }
+        this.spawnWorker(session.sessionId, session.payload)
+        this.scheduleSeedBackfill(session)
+        spawned += 1
+      }
+      const lastEventId = response.headers.get('x-gc-index') ?? undefined
+      if (this.debug) {
+        this.stderr.write(
+          `[gascity] active_sessions_seed_complete city=${this.city.name} sessions=${sessions.length} spawned=${spawned} event_id=${lastEventId ?? '<none>'}\n`
+        )
+      }
+      /** @type {{ ok: boolean, lastEventId?: string }} */
+      const result = { ok: true }
+      if (lastEventId !== undefined) result.lastEventId = lastEventId
+      return result
+    } catch (err) {
+      if (this.controller.signal.aborted) return { ok: false }
+      this.stderr.write(`[gascity] active_sessions_seed_failed city=${this.city.name} err=${formatError(err)}\n`)
+      return { ok: false }
+    }
+  }
+
+  /**
+   * Active-session seeding attaches the live stream; this best-effort
+   * transcript pull fills in frames that were already present before the
+   * listener connected. It runs in the background so lifecycle SSE startup is
+   * not blocked by a large transcript response.
+   *
+   * @param {ActiveSessionSeed} session
+   * @returns {void}
+   * @private
+   */
+  scheduleSeedBackfill(session) {
+    if (this.writer === undefined) return
+    /** @type {{ name: string, api_url: string, template?: string, rig?: string, alias?: string }} */
+    const city = { name: this.city.name, api_url: this.apiUrl }
+    if (session.template !== undefined) city.template = session.template
+    const rig = pickString(session.payload, 'rig')
+    const alias = pickString(session.payload, 'alias')
+    if (rig !== undefined) city.rig = rig
+    if (alias !== undefined) city.alias = alias
+
+    this.writer.getLastFlushedUuid(this.city.name, session.sessionId)
+      .then((afterUuid) => {
+        if (this.controller.signal.aborted) return 0
+        return backfillSession({
+          city,
+          sessionId: session.sessionId,
+          afterUuid,
+          dispatcher: this.dispatcher,
+          fetchFn: this.fetchFn ?? globalThis.fetch,
+          stderr: this.stderr,
+          debug: this.debug,
+        })
+      })
+      .then((count) => {
+        if (this.debug) {
+          this.stderr.write(
+            `[gascity] active_session_backfill_complete city=${this.city.name} session=${session.sessionId} frames=${count}\n`
+          )
+        }
+      })
+      .catch((err) => {
+        if (this.controller.signal.aborted) return
+        this.stderr.write(
+          `[gascity] active_session_backfill_failed city=${this.city.name} session=${session.sessionId} err=${formatError(err)}\n`
+        )
+      })
+  }
+
+  /**
    * @param {import('../types.js').SseEvent} ev
    * @param {string} cursorPath
    * @returns {Promise<void>}
@@ -217,10 +334,11 @@ export class SupervisorSubscriber {
         this.stderr.write(`[gascity] lifecycle_cursor_write_failed city=${this.city.name} err=${formatError(err)}\n`)
       }
     }
-    const sessionId = pickString(payload, 'session_id') ?? pickString(payload, 'sessionId')
+    const lifecycle = unwrapLifecycleEvent(ev.event, payload)
+    const sessionId = lifecycle.sessionId
     if (typeof sessionId !== 'string' || sessionId.length === 0) return
-    if (SPAWN_EVENTS.has(ev.event)) {
-      const template = pickString(payload, 'template')
+    if (SPAWN_EVENTS.has(lifecycle.type)) {
+      const template = lifecycle.template
       if (!this.templateMatches(template)) {
         if (this.debug) {
           this.stderr.write(
@@ -229,8 +347,8 @@ export class SupervisorSubscriber {
         }
         return
       }
-      this.spawnWorker(sessionId, payload)
-    } else if (RETIRE_EVENTS.has(ev.event)) {
+      this.spawnWorker(sessionId, payloadWithLifecycleTemplate(lifecycle.payload, template))
+    } else if (RETIRE_EVENTS.has(lifecycle.type)) {
       await this.retireWorker(sessionId)
     }
   }
@@ -309,6 +427,148 @@ function pickString(obj, key) {
   if (obj === null || typeof obj !== 'object') return undefined
   const value = /** @type {Record<string, unknown>} */ (obj)[key]
   return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * @typedef {{
+ *   sessionId: string,
+ *   template?: string,
+ *   payload: { template?: string, rig?: string, alias?: string },
+ * }} ActiveSessionSeed
+ */
+
+/**
+ * @param {unknown} body
+ * @returns {ActiveSessionSeed[]}
+ */
+function parseActiveSessions(body) {
+  if (body === null || typeof body !== 'object') return []
+  const items = /** @type {Record<string, unknown>} */ (body).items
+  if (!Array.isArray(items)) return []
+  /** @type {ActiveSessionSeed[]} */
+  const sessions = []
+  for (const item of items) {
+    if (item === null || typeof item !== 'object') continue
+    const state = pickString(item, 'state')
+    if (state !== undefined && state !== 'active') continue
+    const alias = pickString(item, 'alias')
+    const sessionId = alias ?? pickString(item, 'id')
+    if (sessionId === undefined || sessionId.length === 0) continue
+    const template = pickString(item, 'template') ?? sessionId
+    const rig = pickString(item, 'rig')
+    /** @type {{ template?: string, rig?: string, alias?: string }} */
+    const payload = { template }
+    if (rig !== undefined) payload.rig = rig
+    if (alias !== undefined) payload.alias = alias
+    sessions.push({ sessionId, template, payload })
+  }
+  return sessions
+}
+
+/**
+ * Normalize both lifecycle shapes the supervisor has emitted:
+ *
+ *   event: session.woke
+ *   data: {"session_id":"...","template":"..."}
+ *
+ * and the city event-log envelope:
+ *
+ *   event: event
+ *   data: {"type":"session.woke","subject":"...","payload":{...}}
+ *
+ * @param {string} eventName
+ * @param {unknown} data
+ * @returns {{ type: string, payload: unknown, sessionId?: string, template?: string }}
+ */
+function unwrapLifecycleEvent(eventName, data) {
+  const envelopeType = pickString(data, 'type')
+  const type = eventName === 'event' && envelopeType !== undefined ? envelopeType : eventName
+  const nestedPayload = pickObject(data, 'payload')
+  const payload = nestedPayload ?? data
+
+  const sessionId =
+    pickString(payload, 'session_id') ??
+    pickString(payload, 'sessionId') ??
+    pickString(data, 'subject')
+  const template =
+    pickString(payload, 'template') ??
+    pickString(data, 'template') ??
+    sessionId
+
+  /** @type {{ type: string, payload: unknown, sessionId?: string, template?: string }} */
+  const out = { type, payload }
+  if (sessionId !== undefined) out.sessionId = sessionId
+  if (template !== undefined) out.template = template
+  return out
+}
+
+/**
+ * @param {unknown} payload
+ * @param {string | undefined} template
+ * @returns {unknown}
+ */
+function payloadWithLifecycleTemplate(payload, template) {
+  if (template === undefined || pickString(payload, 'template') !== undefined) return payload
+  if (payload !== null && typeof payload === 'object' && !Array.isArray(payload)) {
+    return { .../** @type {Record<string, unknown>} */ (payload), template }
+  }
+  return { template }
+}
+
+/**
+ * @param {unknown} obj
+ * @param {string} key
+ * @returns {Record<string, unknown> | undefined}
+ */
+function pickObject(obj, key) {
+  if (obj === null || typeof obj !== 'object') return undefined
+  const value = /** @type {Record<string, unknown>} */ (obj)[key]
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? /** @type {Record<string, unknown>} */ (value)
+    : undefined
+}
+
+/**
+ * @param {typeof fetch} fetchFn
+ * @param {string} url
+ * @param {AbortSignal} parentSignal
+ * @param {number} timeoutMs
+ * @returns {Promise<Response>}
+ */
+async function fetchWithTimeout(fetchFn, url, parentSignal, timeoutMs) {
+  if (parentSignal.aborted) throw new Error('aborted')
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  function onAbort() {
+    controller.abort()
+  }
+  parentSignal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await fetchFn(url, {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+    parentSignal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * @param {Response} response
+ * @returns {Promise<void>}
+ */
+async function drainBody(response) {
+  if (!response.body) return
+  try {
+    const reader = response.body.getReader()
+    while (true) {
+      const { done } = await reader.read()
+      if (done) return
+    }
+  } catch {
+    // Best effort; the server may have already closed the body.
+  }
 }
 
 /**

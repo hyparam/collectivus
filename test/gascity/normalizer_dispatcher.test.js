@@ -82,6 +82,33 @@ describe('NormalizerDispatcher', () => {
     expect(seen).toEqual([{ uuid: 'no-provider' }])
   })
 
+  it('unwraps provider frame envelopes before calling a registered normalizer', () => {
+    const dispatcher = new NormalizerDispatcher({ stderr: memoStream() })
+    /** @type {unknown[]} */
+    const seen = []
+    dispatcher.register('claude', (frame) => { seen.push(frame); return [] })
+    dispatcher.dispatch({ provider: 'claude', frame: { type: 'assistant', uuid: 'u-1' } }, ctx)
+    expect(seen).toEqual([{ type: 'assistant', uuid: 'u-1' }])
+  })
+
+  it('expands transcript message envelopes into individual normalizer calls', () => {
+    const dispatcher = new NormalizerDispatcher({ stderr: memoStream() })
+    /** @type {unknown[]} */
+    const seen = []
+    dispatcher.register('claude', (frame) => { seen.push(frame); return [] })
+    dispatcher.dispatch({
+      provider: 'claude',
+      messages: [
+        { type: 'user', uuid: 'u-1' },
+        { type: 'assistant', uuid: 'u-2' },
+      ],
+    }, ctx)
+    expect(seen).toEqual([
+      { type: 'user', uuid: 'u-1' },
+      { type: 'assistant', uuid: 'u-2' },
+    ])
+  })
+
   it('ships built-in stubs for claude and codex (overridable by beads 2/4)', () => {
     const stderr = memoStream()
     const dispatcher = new NormalizerDispatcher({ stderr })
@@ -157,6 +184,43 @@ describe('NormalizerDispatcher', () => {
     expect(appended[0].ctx).toEqual(ctx)
     const firstRow = /** @type {Record<string, unknown>} */ (appended[0].rows[0])
     expect(firstRow.provider_uuid).toBe('u-1')
+  })
+
+  it('drain waits for asynchronous writer appends', async () => {
+    const stderr = memoStream()
+    /** @type {(() => void) | undefined} */
+    let releaseAppend
+    let appendFinished = false
+    const blocker = new Promise((resolve) => { releaseAppend = () => resolve(undefined) })
+    const writer = /** @type {import('../../src/gascity/parquet_writer.js').ParquetWriter} */ (
+      /** @type {unknown} */ ({
+        append: async () => {
+          await blocker
+          appendFinished = true
+        },
+      })
+    )
+    const dispatcher = new NormalizerDispatcher({ stderr, writer })
+    dispatcher.register('claude', () => [/** @type {any} */ ({
+      schema_version: 1,
+      city: 'hyptown',
+      provider_session_id: 'hy-1',
+      provider_uuid: 'u-1',
+      provider: 'claude',
+      message_created_at: '2026-05-14T00:00:00Z',
+      part_index: 0,
+      part_type: 'text',
+    })])
+    dispatcher.dispatch({ provider: 'claude', uuid: 'u-1' }, ctx)
+    let drained = false
+    const drainPromise = dispatcher.drain().then(() => { drained = true })
+    await new Promise((r) => setImmediate(r))
+    expect(drained).toBe(false)
+    expect(appendFinished).toBe(false)
+    releaseAppend?.()
+    await drainPromise
+    expect(drained).toBe(true)
+    expect(appendFinished).toBe(true)
   })
 
   it('the default passthrough emits a raw_frame row when no provider matches', () => {

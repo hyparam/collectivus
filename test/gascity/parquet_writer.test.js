@@ -161,6 +161,26 @@ describe('ParquetWriter', () => {
     expect(partDir.sort()).toEqual(['part-hy-1-0.parquet', 'part-hy-2-0.parquet'])
   })
 
+  it('keeps slashed session ids inside the parquet filename', async () => {
+    const writer = new ParquetWriter({ sinkRoot, stderr: memoStream(), flushRows: 1, flushIntervalMs: 60_000 })
+    await writer.append(
+      /** @type {import('../../src/gascity/types.d.ts').SessionContext} */ ({
+        ...ctx,
+        sessionId: 'azworld/gastown.worker',
+      }),
+      [makeRow({
+        provider_session_id: 'azworld/gastown.worker',
+        gascity_session_id: 'azworld/gastown.worker',
+        provider_uuid: 'u-1',
+      })]
+    )
+    await writer.flushAll()
+    await writer.stop()
+
+    const partDir = await fs.readdir(path.join(sinkRoot, `date=${today()}`, 'city=hyptown'))
+    expect(partDir).toEqual(['part-azworld%2Fgastown.worker-0.parquet'])
+  })
+
   it('increments the per-day counter across flushes', async () => {
     const writer = new ParquetWriter({ sinkRoot, stderr: memoStream(), flushRows: 1, flushIntervalMs: 60_000 })
     await writer.append(ctx, [makeRow({ provider_uuid: 'u-1' })])

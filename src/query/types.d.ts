@@ -1,6 +1,7 @@
 import type { ColumnSpec, Signal } from '../upload/upload.js'
 import type { CollectivusConfig } from '../types.js'
 import type { CollectionColumnMeta, QueryCacheCursor } from './iceberg/types.d.ts'
+import type { AsyncDataSource } from 'squirreling'
 
 export type QueryDataset =
   | 'logs'
@@ -19,6 +20,8 @@ export interface QueryScope {
   sourcePaths?: string[]
   gatewayId?: string
   date?: string
+  /** UTC date partitions to include. Used when a query needs more than one day. */
+  dates?: string[]
   from?: string
   to?: string
   service?: string
@@ -106,6 +109,43 @@ export interface RefreshFileResult {
 export interface QueryResultSet {
   columns: string[]
   rows: Record<string, unknown>[]
+}
+
+export type QueryTableKind = 'builtin' | 'collection'
+
+export type ResolvedQueryTableInfo =
+  | {
+    /** Table name exactly as requested by the caller. */
+    name: string
+    /** Canonical dataset used for cache freshness. */
+    dataset: QueryDataset
+    kind: 'builtin'
+  }
+  | {
+    /** Table name exactly as requested by the caller. */
+    name: string
+    /** Canonical collection table used for cache freshness. */
+    dataset: string
+    kind: 'collection'
+    collection: JsonlCollection
+  }
+
+export interface ResolvedQueryTable {
+  /** Table name exactly as referenced by SQL. */
+  name: string
+  /** Canonical dataset or collection table used for cache freshness. */
+  dataset: string
+  kind: QueryTableKind
+  columns: string[]
+}
+
+export interface ResolvedQueryTables {
+  /** SQL table names in first-reference order. */
+  tableNames: string[]
+  /** Canonical dataset/table names for cache freshness and refresh. */
+  datasets: string[]
+  tables: Record<string, AsyncDataSource>
+  resolved: ResolvedQueryTable[]
 }
 
 export interface JsonlCollection {

@@ -180,6 +180,33 @@ function writeJsonl(gatewayId, signal, date, rows) {
   return filePath
 }
 
+/**
+ * @param {string} date
+ * @param {string} content
+ * @returns {Record<string, unknown>}
+ */
+function proxyExchange(date, content) {
+  return {
+    exchange_id: `ex-${date}`,
+    kind: 'exchange',
+    ts_start: `${date}T10:00:00.000Z`,
+    ts_end: `${date}T10:00:00.250Z`,
+    duration_ms: 250,
+    upstream: 'anthropic',
+    request: {
+      method: 'POST',
+      path: '/v1/messages',
+      headers: {},
+      body: JSON.stringify({
+        model: 'claude-opus-4-7',
+        messages: [{ role: 'user', content }],
+      }),
+    },
+    response: { status: 200, headers: {}, body: '{}' },
+    stream_event_count: 0,
+  }
+}
+
 function writeAllSignals() {
   writeJsonl('gw1', 'logs', '2026-05-11', [
     {
@@ -391,7 +418,33 @@ describe('ctvs query', function() {
       '--config', configPath,
     ], { stdout: badOut, stderr: badErr })
     expect(badCode).toBe(2)
-    expect(badErr.value()).toMatch(/logical query tables/)
+    expect(badErr.value()).toMatch(/unknown query table "\/tmp\/not-allowed\.parquet"/)
+  })
+
+  it('queries proxy_messages across selected date partitions', async function() {
+    writeJsonl('gw1', 'proxy', '2026-05-14', [proxyExchange('2026-05-14', 'day one')])
+    writeJsonl('gw1', 'proxy', '2026-05-15', [proxyExchange('2026-05-15', 'day two')])
+    writeJsonl('gw1', 'proxy', '2026-05-16', [proxyExchange('2026-05-16', 'day three')])
+
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery([
+      'sql',
+      'select date, count(*) as n from proxy_messages group by date order by date',
+      '--config', configPath,
+      '--format', 'json',
+      '--refresh', 'always',
+      '--date', '2026-05-14',
+      '--date', '2026-05-15',
+    ], { stdout, stderr })
+
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    expect(JSON.parse(stdout.value())).toEqual([
+      { date: '2026-05-14', n: 1 },
+      { date: '2026-05-15', n: 1 },
+    ])
+    expect(fs.existsSync(cacheCursorPath('proxy_messages', 'gw1', '2026-05-16'))).toBe(false)
   })
 
   it('surfaces cache-only partitions whose source JSONL was drained', async function() {
@@ -514,6 +567,13 @@ describe('ctvs query freshness gate', function() {
       expect(parsed.error).toBeUndefined()
       expect(parsed.strictFreshness).toBe(true)
       expect(parsed.configPath).toBe('/tmp/cfg.json')
+    })
+
+    it('accepts repeated date filters for multi-day scopes', function() {
+      const parsed = parseQueryArgs(['proxy', '--date', '2026-05-14', '--date', '2026-05-15'])
+      expect(parsed.error).toBeUndefined()
+      expect(parsed.date).toBeUndefined()
+      expect(parsed.dates).toEqual(['2026-05-14', '2026-05-15'])
     })
   })
 

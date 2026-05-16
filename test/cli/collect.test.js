@@ -114,6 +114,20 @@ describe('ctvs collect', function() {
       { message: 'careful', count: 3.5, nested: { ok: false } },
     ])
 
+    const namedSqlOut = memo()
+    const namedSqlErr = memo()
+    expect(await runQuery([
+      'sql',
+      'select message from "random-log" order by timestamp asc',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: namedSqlOut, stderr: namedSqlErr })).toBe(0)
+    expect(namedSqlErr.value()).toBe('')
+    expect(JSON.parse(namedSqlOut.value())).toEqual([
+      { message: 'hello' },
+      { message: 'careful' },
+    ])
+
     const schemaOut = memo()
     expect(await runQuery(['schema', 'random-log', '--config', configPath, '--format', 'json'], {
       stdout: schemaOut,
@@ -286,6 +300,6 @@ describe('ctvs collect', function() {
       stdout: memo(),
       stderr: removedErr,
     })).toBe(2)
-    expect(removedErr.value()).toMatch(/logical query tables/)
+    expect(removedErr.value()).toMatch(/unknown query table "change_me"/)
   })
 })

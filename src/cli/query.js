@@ -19,13 +19,12 @@ import {
   resolveQueryPaths,
 } from '../query/paths.js'
 import { refreshQueryCache } from '../query/refresh.js'
-import { executeLogicalSql, prepareReadOnlySql } from '../query/sql.js'
+import { executeLogicalSql, prepareReadOnlySql, resolveQueryTableInfo, resolveQueryTables } from '../query/sql.js'
 import {
   collectionTablesForQuery,
   expectedCollectionPartitions,
   inspectCollectionCachePartitions,
   listCollections,
-  normalizeTableName,
   readAnyCollectionMeta,
   refreshCollectionCache,
 } from '../query/collections.js'
@@ -69,7 +68,7 @@ Shared options:
   --from <timestamp>             Inclusive timestamp lower bound
   --to <timestamp>               Inclusive timestamp upper bound
   --since <duration>             Relative lower bound, e.g. 15m, 2h, 7d
-  --date <YYYY-MM-DD>            Restrict to one UTC date partition
+  --date <YYYY-MM-DD>            Restrict to one UTC date partition; repeat for multiple days
   --gateway-id <id>              Restrict to one gateway id
   --service <name>               Restrict serviceName for OTLP datasets
   --limit <n>                    Max rows to render (default: 100, max: 1000)
@@ -190,6 +189,7 @@ export async function runQuery(argv, hooks = {}) {
  *   from?: string,
  *   to?: string,
  *   date?: string,
+ *   dates?: string[],
  *   gatewayId?: string,
  *   service?: string,
  *   limit: number,
@@ -262,8 +262,9 @@ export function parseQueryArgs(argv) {
     }
     const date = readValue('--date')
     if (date !== undefined) {
-      if (!DATE_PATTERN.test(date)) { out.error = `--date must be YYYY-MM-DD, got ${date}`; return out }
-      out.date = date
+      const dates = parseDateValues(date)
+      if (!dates) { out.error = `--date must be YYYY-MM-DD, got ${date}`; return out }
+      addDateFilters(out, dates)
       continue
     }
     const gatewayId = readValue('--gateway-id')
@@ -318,6 +319,33 @@ export function parseQueryArgs(argv) {
  */
 function isQueryFormat(value) {
   return value === 'table' || value === 'json' || value === 'jsonl' || value === 'markdown'
+}
+
+/**
+ * @param {string} value
+ * @returns {string[] | undefined}
+ */
+function parseDateValues(value) {
+  const dates = value.split(',').map((entry) => entry.trim()).filter(Boolean)
+  if (dates.length === 0 || dates.some((date) => !DATE_PATTERN.test(date))) return undefined
+  return dates
+}
+
+/**
+ * @param {ReturnType<typeof parseQueryArgs>} parsed
+ * @param {string[]} dates
+ * @returns {void}
+ */
+function addDateFilters(parsed, dates) {
+  const existing = parsed.dates ?? (parsed.date ? [parsed.date] : [])
+  const merged = [...new Set([...existing, ...dates])]
+  if (merged.length === 1) {
+    parsed.date = merged[0]
+    delete parsed.dates
+  } else {
+    delete parsed.date
+    parsed.dates = merged
+  }
 }
 
 /**
@@ -380,7 +408,11 @@ function handleSchema(paths, parsed, stdout, stderr) {
     stderr.write('error: schema requires a dataset\n')
     return 2
   }
-  if (isQueryDataset(raw)) {
+  if (!paths) {
+    if (!isQueryDataset(raw)) {
+      stderr.write(`error: unknown dataset "${raw}"\n`)
+      return 2
+    }
     const rows = columnsForDataset(raw).map((column) => ({
       name: column.name,
       type: column.type,
@@ -389,15 +421,29 @@ function handleSchema(paths, parsed, stdout, stderr) {
     stdout.write(renderResult({ columns: ['name', 'type', 'nullable'], rows }, parsed.format))
     return 0
   }
-  if (!paths?.cacheDir) {
-    stderr.write(`error: unknown dataset "${raw}"\n`)
+
+  /** @type {import('../query/types.js').ResolvedQueryTableInfo} */
+  let info
+  try {
+    info = resolveQueryTableInfo(paths, raw)
+  } catch (err) {
+    stderr.write(`error: ${formatError(err)}\n`)
     return 2
   }
-  const collection = collectionByNameOrTable(paths, raw)
-  if (!collection) {
-    stderr.write(`error: unknown dataset "${raw}"\n`)
-    return 2
+  if (info.kind === 'builtin') {
+    const rows = columnsForDataset(info.dataset).map((column) => ({
+      name: column.name,
+      type: column.type,
+      nullable: column.nullable,
+    }))
+    stdout.write(renderResult({ columns: ['name', 'type', 'nullable'], rows }, parsed.format))
+    return 0
   }
+  if (!paths.cacheDir) {
+    stderr.write('error: query cache is disabled; pass --cache-dir or set query.cache.enabled: true\n')
+    return 1
+  }
+  const { collection } = info
   const meta = readAnyCollectionMeta(paths.cacheDir, collection)
   if (!meta) {
     stderr.write(`error: query cache is missing for ${collection.table}. Run: ${refreshCommand(parsed, undefined, { ...baseScope(parsed), datasets: [collection.table] })}\n`)
@@ -464,13 +510,15 @@ async function handleRefresh(paths, parsed, stdout, stderr) {
 async function handleSql(paths, parsed, stdout, stderr) {
   const sql = parsed.positionals.slice(1).join(' ')
   let prepared
+  let datasets
   try {
-    prepared = prepareReadOnlySql(sql, parsed.limit, listCollections(paths.recordingRoot).map((collection) => collection.table))
+    prepared = prepareReadOnlySql(sql, parsed.limit)
+    datasets = resolveQueryDatasets(paths, prepared.tableNames)
   } catch (err) {
     stderr.write(`error: ${formatError(err)}\n`)
     return 2
   }
-  return executePrepared(paths, parsed, stdout, stderr, prepared.datasets, prepared.statement)
+  return executePrepared(paths, parsed, stdout, stderr, datasets, prepared.tableNames, prepared.statement)
 }
 
 /**
@@ -759,8 +807,10 @@ async function handleService(paths, parsed, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function executeGeneratedSql(paths, parsed, stdout, stderr, datasets, sql) {
-  const prepared = prepareReadOnlySql(sql, parsed.limit, listCollections(paths.recordingRoot).map((collection) => collection.table))
-  return executePrepared(paths, parsed, stdout, stderr, datasets, prepared.statement)
+  const prepared = prepareReadOnlySql(sql, parsed.limit)
+  const tableNames = prepared.tableNames.length > 0 ? prepared.tableNames : datasets
+  const resolvedDatasets = resolveQueryDatasets(paths, tableNames)
+  return executePrepared(paths, parsed, stdout, stderr, resolvedDatasets, tableNames, prepared.statement)
 }
 
 /**
@@ -769,10 +819,11 @@ async function executeGeneratedSql(paths, parsed, stdout, stderr, datasets, sql)
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
  * @param {string[]} datasets
+ * @param {string[]} tableNames
  * @param {import('squirreling').Statement} statement
  * @returns {Promise<number>}
  */
-async function executePrepared(paths, parsed, stdout, stderr, datasets, statement) {
+async function executePrepared(paths, parsed, stdout, stderr, datasets, tableNames, statement) {
   const scope = { ...baseScope(parsed), datasets }
   const ready = await ensureCacheReady(paths, scope, parsed)
   if (ready.ok === false) {
@@ -782,7 +833,8 @@ async function executePrepared(paths, parsed, stdout, stderr, datasets, statemen
   if (ready.warnings) {
     for (const warning of ready.warnings) stderr.write(warning + '\n')
   }
-  const result = await executeLogicalSql({ paths, scope, datasets, statement })
+  const resolvedTables = await resolveQueryTables(paths, scope, tableNames)
+  const result = await executeLogicalSql({ paths, scope, statement, resolvedTables })
   stdout.write(renderResult(result, parsed.format))
   return 0
 }
@@ -863,7 +915,9 @@ function refreshCommand(parsed, states, scope) {
   if (parsed.configPath) parts.push('--config', shellQuote(parsed.configPath))
   if (parsed.cacheDir) parts.push('--cache-dir', shellQuote(parsed.cacheDir))
   if (parsed.gatewayId) parts.push('--gateway-id', shellQuote(parsed.gatewayId))
-  if (parsed.date) parts.push('--date', parsed.date)
+  for (const date of parsed.dates ?? (parsed.date ? [parsed.date] : [])) {
+    parts.push('--date', date)
+  }
   return parts.join(' ')
 }
 
@@ -1054,7 +1108,7 @@ function liveProxyExchangeRow(raw, gatewayId, date) {
  */
 function liveRowMatchesScope(row, scope) {
   if (scope.gatewayId && row.gateway_id !== scope.gatewayId) return false
-  if (scope.date && row.date !== scope.date) return false
+  if (!dateMatchesScope(row.date, scope)) return false
   if (scope.service && row.serviceName !== scope.service) return false
   if (!scope.from && !scope.to) return true
   const raw = row.timestamp ?? row.observedTimestamp ?? row.ts_start
@@ -1134,11 +1188,23 @@ function baseScope(parsed) {
   return {
     gatewayId: parsed.gatewayId,
     date: parsed.date,
+    dates: parsed.dates,
     from: parsed.from,
     to: parsed.to,
     service: parsed.service,
     limit: parsed.limit,
   }
+}
+
+/**
+ * @param {unknown} date
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function dateMatchesScope(date, scope) {
+  if (scope.date && date !== scope.date) return false
+  if (scope.dates && !scope.dates.includes(String(date))) return false
+  return true
 }
 
 /**
@@ -1210,30 +1276,26 @@ function datasetForSourceSignal(signal) {
  * @returns {string | undefined}
  */
 function resolveQueryTable(paths, raw) {
-  if (isQueryDataset(raw)) return raw
-  return collectionByNameOrTable(paths, raw)?.table
+  try {
+    return resolveQueryTableInfo(paths, raw).dataset
+  } catch {
+    return undefined
+  }
 }
 
 /**
  * @param {QueryPaths} paths
- * @param {string} raw
- * @returns {import('../query/types.js').JsonlCollection | undefined}
+ * @param {string[]} tableNames
+ * @returns {string[]}
  */
-function collectionByNameOrTable(paths, raw) {
-  const normalized = normalizeCollectionLookup(raw)
-  return listCollections(paths.recordingRoot).find((collection) => (
-    collection.table === raw ||
-    collection.table === normalized ||
-    collection.name === raw
-  ))
-}
-
-/**
- * @param {string} raw
- * @returns {string}
- */
-function normalizeCollectionLookup(raw) {
-  return normalizeTableName(raw)
+function resolveQueryDatasets(paths, tableNames) {
+  /** @type {string[]} */
+  const datasets = []
+  for (const tableName of tableNames) {
+    const { dataset } = resolveQueryTableInfo(paths, tableName)
+    if (!datasets.includes(dataset)) datasets.push(dataset)
+  }
+  return datasets
 }
 
 /**

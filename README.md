@@ -299,7 +299,8 @@ Freshness is treated asymmetrically (since v1.7.0):
 
 Use `ctvs query refresh <file.jsonl>` to refresh selected source files, or
 `ctvs query refresh --all [dataset]` when you explicitly want the broader
-walk. Use `--refresh always` to force a refresh before the query runs. Use
+walk. Repeat `--date` to query or refresh several UTC date partitions at once.
+Use `--refresh always` to force a refresh before the query runs. Use
 `--strict-freshness` to restore the pre-1.7 behavior where stale partitions
 are a hard error (useful in CI / scheduled jobs that must never read
 outdated data).
@@ -310,7 +311,12 @@ outdated data).
 > unchanged; the new warning is written only to stderr. `missing`
 > partitions still error.
 
-Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; `ctvs collect --glob '<pattern>' --name <name>` backs one table with many source files. Names are normalized for SQL, so `--name random-log` becomes table `random_log`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. Deleted glob sources remain queryable from their cache-only partitions until the collection is removed. `ctvs query schema <dataset>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+Logical datasets are `logs`, `traces`, `metrics`, `proxy_messages`, and `gascity_messages`. `ctvs collect <file.jsonl> --name <name>` registers an external JSONL file as a dynamic table; `ctvs collect --glob '<pattern>' --name <name>` backs one table with many source files. Names are normalized for SQL, so `--name random-log` becomes table `random_log`; quoted SQL can also reference the original collection name as `"random-log"`. Collection tables include `_ctvs_source_path`, `_ctvs_line_number`, `_ctvs_raw`, and inferred top-level JSON fields. Deleted glob sources remain queryable from their cache-only partitions until the collection is removed. `ctvs query schema <table>` prints the schema, and `ctvs query catalog` shows which datasets have source and cached rows.
+
+```bash
+ctvs query sql "select date, count(*) from proxy_messages group by date" \
+  --date 2026-05-14 --date 2026-05-15 --refresh always
+```
 
 ### Conversation log model
 

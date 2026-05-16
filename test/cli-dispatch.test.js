@@ -1,8 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const cliPath = fileURLToPath(new URL('../bin/cli.js', import.meta.url))
+
+/** @type {string} */
+let emptyHome
+beforeAll(function() {
+  // Point HOME at an empty directory so the CLI can't pick up the developer's
+  // real ~/.hyp/collectivus.json and turn "missing --config" into a load.
+  emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-dispatch-home-'))
+})
+afterAll(function() {
+  fs.rmSync(emptyHome, { recursive: true, force: true })
+})
 
 /**
  * Spawn the CLI with the given args and capture stdio + exit code.
@@ -12,7 +26,10 @@ const cliPath = fileURLToPath(new URL('../bin/cli.js', import.meta.url))
  */
 function runCli(args) {
   return new Promise(function(resolve, reject) {
-    const child = spawn(process.execPath, [cliPath, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: emptyHome, USERPROFILE: emptyHome },
+    })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', function(c) { stdout += c.toString() })
@@ -105,6 +122,6 @@ describe('bin/cli.js — subcommand dispatch', function() {
     const r = await runCli(['--help'])
     expect(r.exitCode).toBe(0)
     // Top-level USAGE wording, not a subcommand-specific Usage.
-    expect(r.stdout).toMatch(/--config <path\|url>\s+Run with config file/)
+    expect(r.stdout).toMatch(/--config <path\|url>\]\s+Run with config file/)
   })
 })

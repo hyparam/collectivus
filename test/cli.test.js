@@ -50,10 +50,10 @@ function memo() {
 function noop() {}
 
 describe('parseArgs', () => {
-  it('requires --config', () => {
-    const r = parseArgs([])
-    expect(r.mode).toBe('error')
-    if (r.mode === 'error') expect(r.message).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
+  it('returns config mode without configPath when nothing is supplied', () => {
+    // The "no config source" error has moved into `run()` so it can fall back
+    // to `~/.hyp/collectivus.json` when that file exists.
+    expect(parseArgs([])).toEqual({ mode: 'config', printConfig: false, strict: false })
   })
 
   it('parses --config <path>', () => {
@@ -130,9 +130,8 @@ describe('parseArgs', () => {
     expect(parseArgs(['-v'])).toEqual({ mode: 'version' })
   })
 
-  it('rejects --print-config without --config', () => {
-    const r = parseArgs(['--print-config'])
-    expect(r.mode).toBe('error')
+  it('accepts --print-config without --config (run() resolves the default)', () => {
+    expect(parseArgs(['--print-config'])).toEqual({ mode: 'config', printConfig: true, strict: false })
   })
 
   it('rejects unknown arguments', () => {
@@ -180,13 +179,36 @@ describe('run(): help and arg errors', () => {
     expect(stderr.value()).toMatch(/Usage:/)
   })
 
-  it('prints error + usage and exits 2 when --config is missing', async () => {
+  it('prints error + usage and exits 2 when --config is missing and no default exists', async () => {
     const stdout = memo()
     const stderr = memo()
-    const code = await run([], {}, { stdout, stderr })
-    expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
-    expect(stderr.value()).toMatch(/Usage:/)
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-empty-home-'))
+    try {
+      const code = await run([], {}, { stdout, stderr, homeDir: emptyHome })
+      expect(code).toBe(2)
+      expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
+      expect(stderr.value()).toMatch(/Usage:/)
+    } finally {
+      fs.rmSync(emptyHome, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to ~/.hyp/collectivus.json when no --config is supplied', async () => {
+    const stdout = memo()
+    const stderr = memo()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-home-'))
+    try {
+      fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
+      fs.writeFileSync(
+        path.join(home, '.hyp', 'collectivus.json'),
+        JSON.stringify({ version: 1, otel: { listen: '127.0.0.1:0' }, sink: { type: 'file', dir: '/tmp/x' } }),
+      )
+      const code = await run(['--print-config'], {}, { stdout, stderr, homeDir: home })
+      expect(code).toBe(0)
+      expect(stdout.value()).toMatch(/"otel"/)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 
@@ -205,18 +227,24 @@ describe('run(): walkthrough dispatch', () => {
     expect(stderr.value()).toBe('')
   })
 
-  it('falls through to the --config error when not a TTY', async () => {
+  it('falls through to the --config error when not a TTY and no default exists', async () => {
     const stdout = memo()
     const stderr = memo()
     let initCalls = 0
-    const code = await run([], {}, {
-      stdout, stderr,
-      isTTY: false,
-      runInit: () => { initCalls++; return Promise.resolve(0) },
-    })
-    expect(code).toBe(2)
-    expect(initCalls).toBe(0)
-    expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-empty-home-'))
+    try {
+      const code = await run([], {}, {
+        stdout, stderr,
+        isTTY: false,
+        runInit: () => { initCalls++; return Promise.resolve(0) },
+        homeDir: emptyHome,
+      })
+      expect(code).toBe(2)
+      expect(initCalls).toBe(0)
+      expect(stderr.value()).toMatch(/--config <path\|url>, --config-env <env-var>, or --config-endpoint <url> is required/)
+    } finally {
+      fs.rmSync(emptyHome, { recursive: true, force: true })
+    }
   })
 })
 

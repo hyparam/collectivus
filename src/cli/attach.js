@@ -3,7 +3,7 @@ import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
 import { attach as defaultAttachClaude, defaultSettingsPath } from '../claude-code/settings.js'
 import { attach as defaultAttachCodex, defaultConfigPath as defaultCodexConfigPath } from '../codex/settings.js'
-import { parseListenPort, readPackageVersion } from './common.js'
+import { parseListenPort, readPackageVersion, resolveDefaultConfigPath } from './common.js'
 import { pathMatchesPrefix } from '../proxy.js'
 import { installSkillBundle as defaultInstallSkillBundle } from '../skills/install.js'
 
@@ -13,16 +13,17 @@ import { installSkillBundle as defaultInstallSkillBundle } from '../skills/insta
  */
 
 const USAGE = `Usage:
-  ctvs attach (--config <path|url> | --port <n>) [--client claude|codex|all]
+  ctvs attach [--config <path|url> | --port <n>] [--client claude|codex|all]
 
 Options:
   --config <path|url>  Read the proxy port from this collectivus config (path or http(s) URL)
+                       (default: ~/.hyp/collectivus.json)
   --port <n>           Use this port directly
   --client <name>      Tool to configure: claude, codex, or all (default: claude)
   --help, -h           Show this help
 
 Edits Claude Code and/or Codex configuration to point at the local proxy.
-Exactly one of --config or --port is required.`
+Without --config or --port, falls back to ~/.hyp/collectivus.json when present.`
 
 /**
  * Parse the argument list of `collectivus attach`.
@@ -69,9 +70,9 @@ export function parseAttachArgs(argv) {
   }
   if (r.configPath !== undefined && r.port !== undefined) {
     r.error = '--config and --port are mutually exclusive'
-  } else if (r.configPath === undefined && r.port === undefined) {
-    r.error = 'one of --config or --port is required'
   }
+  // The "neither --config nor --port" case is handled in runAttach so it can
+  // fall back to ~/.hyp/collectivus.json when present.
   if (r.client === undefined) r.client = 'claude'
   return r
 }
@@ -117,6 +118,16 @@ export async function runAttach(argv, hooks = {}) {
     return 2
   }
 
+  if (parsed.port === undefined && parsed.configPath === undefined) {
+    const fallback = resolveDefaultConfigPath(hooks.homeDir)
+    if (fallback) {
+      parsed.configPath = fallback
+    } else {
+      stderr.write(`error: one of --config or --port is required\n\n${USAGE}\n`)
+      return 2
+    }
+  }
+
   /** @type {number} */
   let port
   /** @type {CollectivusConfig | undefined} */
@@ -144,7 +155,7 @@ export async function runAttach(argv, hooks = {}) {
       return 1
     }
   } else {
-    // Defensive: parser should have caught this.
+    // Defensive: branch above set configPath when neither was provided.
     stderr.write('error: one of --config or --port is required\n')
     return 2
   }

@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { asyncRow, collect, executeSql, extractTables, parseSql } from 'squirreling'
+import { asyncRow, collect, extractTables, parseSql } from 'squirreling'
 import { parquetReadObjects } from 'hyparquet'
 import { compressors } from 'hyparquet-compressors'
 import { icebergDataSource, loadLatestFileCatalogMetadata } from 'icebird'
@@ -19,19 +19,20 @@ import {
 import { readCacheCursor } from './iceberg/cursor.js'
 import { createLocalIcebergIO } from './iceberg/resolver.js'
 import { queryCacheTableExists } from './iceberg/store.js'
+import { executeSqlWithRandomSample } from './random-sample.js'
 
 /**
- * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
+ * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, SelectStatement, SetOperationStatement, Statement } from 'squirreling'
  * @import { CachePartition, QueryDataset, QueryPaths, QueryResultSet, QueryScope, ResolvedQueryTableInfo, ResolvedQueryTables } from './types.js'
  * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
 /**
  * @param {string} sql
- * @param {number} defaultLimit
+ * @param {number} rowLimit
  * @returns {{ statement: Statement, tableNames: string[] }}
  */
-export function prepareReadOnlySql(sql, defaultLimit) {
+export function prepareReadOnlySql(sql, rowLimit) {
   const trimmed = sql.trim()
   if (trimmed.length === 0) throw new Error('SQL query is required')
   /** @type {Statement} */
@@ -42,7 +43,7 @@ export function prepareReadOnlySql(sql, defaultLimit) {
     throw new Error(`SQL must be a single read-only SELECT statement: ${formatError(err)}`)
   }
   const tableNames = uniqueStrings(extractTables(statement))
-  applyDefaultLimit(statement, defaultLimit)
+  applyResultLimit(statement, rowLimit)
   return { statement, tableNames }
 }
 
@@ -62,7 +63,7 @@ export async function executeLogicalSql(args) {
     : args.datasets && args.datasets.length > 0
       ? await buildTables(args.paths, { ...args.scope, datasets: args.datasets })
       : {}
-  const results = executeSql({ tables, query: args.statement })
+  const results = executeSqlWithRandomSample({ tables, query: args.statement })
   const rows = await collect(results)
   return { columns: results.columns, rows }
 }
@@ -347,9 +348,15 @@ async function* scanBuiltinIcebergRows(dataset, sourcesPromise, columns, scope, 
   /** @type {Set<string>} */
   const seenRowIds = new Set()
   const sources = await sourcesPromise
+  const innerLimit = builtinInnerScanLimit(scope, options, sources.length)
   for (const { partition, source } of sources) {
     if (options.signal?.aborted) return
-    const scan = source.scan({ columns: innerColumns, where: options.where, signal: options.signal })
+    const scan = source.scan({
+      columns: innerColumns,
+      where: options.where,
+      ...(innerLimit === undefined ? {} : { limit: innerLimit }),
+      signal: options.signal,
+    })
     for await (const sourceRow of scan.rows()) {
       if (options.signal?.aborted) return
       const row = await resolveAsyncRow(sourceRow)
@@ -380,13 +387,19 @@ async function* scanCollectionIcebergRows(table, sourcesPromise, columns, scope,
   /** @type {Set<string>} */
   const seenRowIds = new Set()
   const sources = await sourcesPromise
+  const innerLimit = collectionInnerScanLimit(scope, options, sources.length)
   for (const { source, meta } of sources) {
     if (options.signal?.aborted) return
     const innerColumns = scanColumnsWithPrivateColumns(
       requestedColumns,
       collectionScopeColumns(meta, scope)
     )
-    const scan = source.scan({ columns: innerColumns, where: options.where, signal: options.signal })
+    const scan = source.scan({
+      columns: innerColumns,
+      where: options.where,
+      ...(innerLimit === undefined ? {} : { limit: innerLimit }),
+      signal: options.signal,
+    })
     for await (const sourceRow of scan.rows()) {
       if (options.signal?.aborted) return
       const row = await resolveAsyncRow(sourceRow)
@@ -522,6 +535,30 @@ function canUseBuiltinRowCount(scope) {
  */
 function canUseCollectionRowCount(scope) {
   return !scope.service && !scope.date && !scope.dates && !scope.from && !scope.to
+}
+
+/**
+ * @param {QueryScope} scope
+ * @param {ScanOptions} options
+ * @param {number} sourceCount
+ * @returns {number | undefined}
+ */
+function builtinInnerScanLimit(scope, options, sourceCount) {
+  if (sourceCount !== 1 || options.limit === undefined || options.offset !== undefined || options.where) return undefined
+  if (scope.service || scope.from || scope.to) return undefined
+  return options.limit
+}
+
+/**
+ * @param {QueryScope} scope
+ * @param {ScanOptions} options
+ * @param {number} sourceCount
+ * @returns {number | undefined}
+ */
+function collectionInnerScanLimit(scope, options, sourceCount) {
+  if (sourceCount !== 1 || options.limit === undefined || options.offset !== undefined || options.where) return undefined
+  if (scope.gatewayId || scope.service || scope.date || scope.dates || scope.from || scope.to) return undefined
+  return options.limit
 }
 
 /**
@@ -706,9 +743,9 @@ function collectionColumns(partitions) {
  * @param {Statement} statement
  * @param {number} limit
  */
-function applyDefaultLimit(statement, limit) {
+function applyResultLimit(statement, limit) {
   const target = topLevelStatement(statement)
-  if (target && 'limit' in target && target.limit === undefined) {
+  if (target && isLimitableStatement(target) && (target.limit === undefined || target.limit > limit)) {
     target.limit = limit
   }
 }
@@ -718,8 +755,16 @@ function applyDefaultLimit(statement, limit) {
  * @returns {Statement | undefined}
  */
 function topLevelStatement(statement) {
-  if (statement.type === 'with') return statement.query
+  if (statement.type === 'with') return topLevelStatement(statement.query)
   return statement
+}
+
+/**
+ * @param {Statement} statement
+ * @returns {statement is SelectStatement | SetOperationStatement}
+ */
+function isLimitableStatement(statement) {
+  return statement.type === 'select' || statement.type === 'compound'
 }
 
 /**

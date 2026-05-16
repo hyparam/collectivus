@@ -71,7 +71,7 @@ Shared options:
   --date <YYYY-MM-DD>            Restrict to one UTC date partition; repeat for multiple days
   --gateway-id <id>              Restrict to one gateway id
   --service <name>               Restrict serviceName for OTLP datasets
-  --limit <n>                    Max rows to render (default: 100, max: 1000)
+  --limit <n>                    Max rows to return (default/max: 100)
   --format <fmt>                 table, json, jsonl, markdown
   --refresh <mode>               never or always (default: never).
                                  Stale partitions query with a stderr warning;
@@ -82,7 +82,7 @@ Shared options:
   --help, -h                     Show this help`
 
 const DEFAULT_LIMIT = 100
-const MAX_LIMIT = 1000
+const MAX_LIMIT = 100
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 
 /**

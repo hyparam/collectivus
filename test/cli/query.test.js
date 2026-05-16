@@ -1,10 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { collect } from 'squirreling'
 import { parseQueryArgs, runQuery } from '../../src/cli/query.js'
 import { ParquetWriter } from '../../src/gascity/parquet_writer.js'
 import { GASCITY_GATEWAY_ID, GASCITY_MESSAGES_SCHEMA_VERSION } from '../../src/gascity/schema.js'
+import { prepareReadOnlySql } from '../../src/query/sql.js'
+import { executeSqlWithRandomSample, getRandomSamplePlan } from '../../src/query/random-sample.js'
 
 /**
  * @returns {{ write: (s: string) => void, value: () => string }}
@@ -44,6 +47,7 @@ beforeEach(function() {
 })
 
 afterEach(function() {
+  vi.restoreAllMocks()
   if (originalHome !== undefined) process.env.HOME = originalHome
   else delete process.env.HOME
   fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -291,6 +295,56 @@ function readCursor(cursorPath) {
   return JSON.parse(fs.readFileSync(cursorPath, 'utf8'))
 }
 
+/**
+ * @param {string} sql
+ * @returns {number | undefined}
+ */
+function preparedTopLevelLimit(sql) {
+  let { statement } = prepareReadOnlySql(sql, 100)
+  while (statement.type === 'with') statement = statement.query
+  return statement.limit
+}
+
+describe('ctvs query result limits', function() {
+  it('defaults and clamps top-level SQL result limits to 100', function() {
+    expect(preparedTopLevelLimit('select * from logs')).toBe(100)
+    expect(preparedTopLevelLimit('select * from logs limit 500')).toBe(100)
+    expect(preparedTopLevelLimit('select * from logs limit 20')).toBe(20)
+    expect(preparedTopLevelLimit('with recent as (select * from logs limit 500) select * from recent')).toBe(100)
+  })
+
+  it('rejects --limit values above the hard cap', function() {
+    expect(parseQueryArgs(['logs', '--limit', '100']).error).toBeUndefined()
+    expect(parseQueryArgs(['logs', '--limit', '101']).error).toBe('--limit must be an integer between 1 and 100')
+  })
+})
+
+describe('ctvs query random sampling', function() {
+  it('detects top-level ORDER BY RANDOM() LIMIT queries', function() {
+    const plan = getRandomSamplePlan(prepareReadOnlySql('select * from logs order by random() limit 10', 100).statement)
+    expect(plan?.limit).toBe(10)
+  })
+
+  it('reservoir-samples ORDER BY RANDOM() LIMIT without sorting the full result', async function() {
+    vi.spyOn(Math, 'random')
+      .mockReturnValueOnce(0.1)
+      .mockReturnValueOnce(0.7)
+      .mockReturnValueOnce(0.2)
+      .mockReturnValueOnce(0.9)
+      .mockReturnValueOnce(0.3)
+      .mockReturnValueOnce(0.1)
+
+    const rows = Array.from({ length: 5 }, (_, id) => ({ id }))
+    const result = await collect(executeSqlWithRandomSample({
+      tables: { logs: rows },
+      query: 'select * from logs order by random() limit 2',
+    }))
+
+    expect(result).toHaveLength(2)
+    expect(result.map((row) => row.id).sort()).toEqual([2, 4])
+  })
+})
+
 describe('ctvs query', function() {
   it('refreshes local JSONL into partitioned query-cache Iceberg tables with cursors', async function() {
     writeAllSignals()
@@ -419,6 +473,46 @@ describe('ctvs query', function() {
     ], { stdout: badOut, stderr: badErr })
     expect(badCode).toBe(2)
     expect(badErr.value()).toMatch(/unknown query table "\/tmp\/not-allowed\.parquet"/)
+  })
+
+  it('returns no more than 100 rows for custom SQL output', async function() {
+    const rows = Array.from({ length: 150 }, (_, i) => ({
+      serviceName: 'svc-a',
+      timestamp: new Date(Date.UTC(2026, 4, 11, 10, 0, i)).toISOString(),
+      body: `line-${String(i).padStart(3, '0')}`,
+      resource: {},
+      scope: { attributes: {} },
+      attributes: {},
+    }))
+    writeJsonl('gw1', 'logs', '2026-05-11', rows)
+    expect(await runQuery(['refresh', '--all', '--config', configPath], { stdout: memo(), stderr: memo() })).toBe(0)
+
+    const defaultOut = memo()
+    expect(await runQuery([
+      'sql',
+      'select body from logs order by body',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: defaultOut, stderr: memo() })).toBe(0)
+    expect(JSON.parse(defaultOut.value())).toHaveLength(100)
+
+    const clampedOut = memo()
+    expect(await runQuery([
+      'sql',
+      'select body from logs order by body limit 140',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: clampedOut, stderr: memo() })).toBe(0)
+    expect(JSON.parse(clampedOut.value())).toHaveLength(100)
+
+    const lowerOut = memo()
+    expect(await runQuery([
+      'sql',
+      'select body from logs order by body limit 12',
+      '--config', configPath,
+      '--format', 'json',
+    ], { stdout: lowerOut, stderr: memo() })).toBe(0)
+    expect(JSON.parse(lowerOut.value())).toHaveLength(12)
   })
 
   it('queries proxy_messages across selected date partitions', async function() {

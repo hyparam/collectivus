@@ -1,6 +1,6 @@
 ---
 name: collectivus-query
-description: Inspect local Collectivus recordings with the ctvs query CLI. Use when the user asks about recorded logs, traces, metrics, LLM proxy exchanges, query cache freshness, or wants SQL over local Collectivus data.
+description: Inspect local Collectivus recordings with the ctvs query CLI. Use when the user asks about recorded logs, traces, metrics, LLM proxy exchanges, query cache freshness, or wants SQL over local Collectivus data, including collected JSONL tables.
 ---
 
 # Collectivus Query
@@ -18,6 +18,7 @@ Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL r
    - Pass `--strict-freshness` only when the user explicitly needs the pre-1.7 strict mode (e.g., scheduled checks that must never read stale data); it turns stale partitions back into a hard error.
 4. Prefer structured output for analysis: use `--format json` for follow-up reasoning, `--format markdown` when showing a table to the user, and `--limit` to keep output bounded.
 5. Use high-level query commands before custom SQL. Switch to `ctvs query sql` only when the built-in commands cannot answer the question.
+6. For unfamiliar SQL tables, run `ctvs query schema <table> --format json` before querying. It works for built-in recording tables and tables registered with `ctvs collect`.
 
 ## Common Commands
 
@@ -30,6 +31,7 @@ ctvs query logs --since 1h --format json
 ctvs query traces slow --limit 20 --format json
 ctvs query metrics list --format json
 ctvs query metrics series <metric-name> --format json
+ctvs query schema <table> --format json
 ctvs query proxy get <conversation-id> --format json
 ctvs query proxy stats --format json
 ctvs query errors --since 24h --format json
@@ -39,7 +41,9 @@ ctvs collect <file.jsonl> --name <name>
 ctvs collect --glob '<pattern>' --name <name>
 ```
 
-`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its query cache. Collection names are normalized for SQL (`random-log` -> `random_log`). Query them with `ctvs query sql "select * from random_log"`. Pass `--glob '<pattern>'` instead of a single path to back one logical table with many files; each matched file becomes its own cache partition and `_ctvs_source_path` tells you which file a row came from.
+`ctvs collect` registers an external local JSONL file as a dynamic SQL table and immediately refreshes its query cache. `ctvs query sql` resolves table names from the SQL AST and injects built-in recording tables plus registered collection tables by name. Collection SQL can use either the normalized table name (`random-log` -> `random_log`) or the original quoted collection name (`"random-log"`), for example `ctvs query sql 'select * from "random-log"'`. Pass `--glob '<pattern>'` instead of a single path to back one logical table with many files; each matched file becomes its own cache partition and `_ctvs_source_path` tells you which file a row came from.
+
+Repeat `--date` to query or refresh multiple UTC date partitions at once, for example `ctvs query sql "select count(*) from proxy_messages" --date 2026-05-14 --date 2026-05-15`.
 
 ## Proxy conversation log model
 
@@ -109,9 +113,9 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 - Do not assume the cache auto-refreshes. Query commands default to `--refresh never`, and stale partitions return data with a stderr warning rather than refreshing themselves.
 - Always read stderr. A successful exit code does not mean the cache is current — a `warning: query cache last refreshed at …` line on stderr means stdout reflects cache rows from that refresh, and the user should be told before drawing conclusions.
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
-- Do not read arbitrary Parquet files directly for `ctvs query sql`; the CLI only allows logical tables.
-- Keep SQL read-only and use only logical datasets: `logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`, and registered collection tables from `ctvs query catalog`.
-- Use UTC dates with `--date YYYY-MM-DD`.
+- Do not read arbitrary Parquet or Iceberg files directly for `ctvs query sql`; the CLI resolves SQL table names and injects only known query tables.
+- Keep SQL read-only and use only query tables from `ctvs query catalog`: built-ins (`logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`) and registered collection tables.
+- Use UTC dates with `--date YYYY-MM-DD`; repeat `--date` when the user wants a union across multiple date partitions.
 - Use `--service`, `--gateway-id`, `--from`, `--to`, or `--since` to narrow broad investigations.
 
 ## Reference

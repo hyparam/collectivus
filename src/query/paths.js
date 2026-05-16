@@ -173,7 +173,7 @@ export function discoverSourceFiles(root, scope) {
         const match = DATE_FILE_PATTERN.exec(entry)
         if (!match) continue
         const date = match[1]
-        if (scope.date && date !== scope.date) continue
+        if (!dateMatchesScope(date, scope)) continue
         const jsonlPath = path.join(signalDir, entry)
         if (sourcePaths && !sourcePaths.has(path.resolve(jsonlPath))) continue
         const stat = safeStat(jsonlPath)
@@ -244,7 +244,7 @@ export function discoverGascityPartitions(scope) {
     const dateMatch = DATE_PARTITION_PATTERN.exec(dateEntry)
     if (!dateMatch) continue
     const date = dateMatch[1]
-    if (scope.date && date !== scope.date) continue
+    if (!dateMatchesScope(date, scope)) continue
     const dateDir = path.join(root, dateEntry)
     if (!isDirectory(dateDir)) continue
     for (const cityEntry of safeReadDir(dateDir)) {
@@ -344,7 +344,7 @@ export function listBuiltinCacheCursors(cacheDir, scope) {
         const dateMatch = DATE_PARTITION_PATTERN.exec(dateEntry)
         if (!dateMatch) continue
         const date = dateMatch[1]
-        if (scope.date && date !== scope.date) continue
+        if (!dateMatchesScope(date, scope)) continue
         const cursor = readCacheCursor(path.join(gatewayDir, dateEntry, 'cursor.json'))
         if (!cursor || cursor.kind !== 'builtin') continue
         if (sourcePaths && !sourcePaths.has(path.resolve(cursor.source_path))) continue
@@ -446,6 +446,17 @@ function isFile(p) {
 function sourcePathFilter(scope) {
   if (!scope.sourcePaths) return undefined
   return new Set(scope.sourcePaths.map((sourcePath) => path.resolve(sourcePath)))
+}
+
+/**
+ * @param {string} date
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function dateMatchesScope(date, scope) {
+  if (scope.date && date !== scope.date) return false
+  if (scope.dates && !scope.dates.includes(date)) return false
+  return true
 }
 
 /**

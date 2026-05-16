@@ -12,7 +12,7 @@ External JSONL collections registered with `ctvs collect <file.jsonl> --name <na
 <recording-root>/.collectivus-query/collections.json
 ```
 
-Their query cache lives under `<recording-root>/.collectivus-query/cache/collections/<table>/source=<hash>/cursor.json`, with rows stored in local Iceberg tables below each source partition. Names are normalized for SQL, so `--name random-log` exposes table `random_log`.
+Their query cache lives under `<recording-root>/.collectivus-query/cache/collections/<table>/source=<hash>/cursor.json`, with rows stored in local Iceberg tables below each source partition. SQL can reference either the normalized table name (`--name random-log` exposes `random_log`) or the original quoted collection name (`"random-log"`).
 
 The cache is explicit. Query commands do not refresh it unless `--refresh always` is passed.
 
@@ -32,7 +32,7 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `--cache-dir <dir>`: Override the query cache directory.
 - `--from <timestamp>` / `--to <timestamp>`: Inclusive timestamp bounds.
 - `--since <duration>`: Relative lower bound such as `15m`, `2h`, or `7d`.
-- `--date <YYYY-MM-DD>`: Restrict to one UTC date partition.
+- `--date <YYYY-MM-DD>`: Restrict to one UTC date partition. Repeat it to query or refresh multiple days.
 - `--gateway-id <id>`: Restrict to one gateway id.
 - `--service <name>`: Restrict `serviceName` for logs, traces, and metrics.
 - `--limit <n>`: Maximum rows to render. Default `100`, maximum `1000`.
@@ -47,7 +47,7 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `ctvs query doctor`: Check config, recording root, source files, and cache freshness.
 - `ctvs query status`: Inspect source partitions and cache freshness.
 - `ctvs query catalog`: List logical datasets, columns, source partitions, and cached row counts.
-- `ctvs query schema <dataset>`: Print static schema for a logical dataset.
+- `ctvs query schema <table>`: Print schema for a built-in or collected query table.
 - `ctvs query refresh <file.jsonl>... [--force]`: Materialize selected JSONL source files into the query cache.
 - `ctvs query refresh --all [dataset] [--force]`: Materialize all matching JSONL source files into the query cache.
 - `ctvs query sample <dataset>`: Show sample rows.
@@ -69,9 +69,10 @@ Use `ctvs collect` to register arbitrary local JSONL files as dynamic query tabl
 ctvs collect random-log.jsonl --name random-log
 ctvs collect --glob '/path/to/segments/**/*.jsonl' --name segments
 ctvs query sql "select * from random_log" --format json
+ctvs query sql 'select * from "random-log"' --format json
 ```
 
-`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the query cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `ctvs query refresh <file.jsonl>` refreshes selected files. Use `--refresh always` to refresh before running the query.
+`ctvs collect` stores the absolute source path (or glob) and immediately refreshes the query cache. If the source file changes later, normal query freshness rules apply: stale cached data is queryable with a stderr warning, `--strict-freshness` turns that into an error, and `ctvs query refresh <file.jsonl>` refreshes selected files. Use `--refresh always` to refresh before running the query. SQL can reference the normalized table name or the original quoted collection name, such as `"random-log"`.
 
 With `--glob`, one logical table is backed by many source files: each matched file becomes its own cache partition under `.collectivus-query/cache/collections/<table>/source=<hash>/cursor.json`, and refresh appends from each file's recorded cursor when possible. Files that no longer match the glob remain queryable as cache-only partitions. Inside SQL, use `_ctvs_source_path` to see which file a row came from.
 
@@ -85,7 +86,7 @@ Collection tables always include `_ctvs_source_path`, `_ctvs_line_number`, and `
 - `proxy_messages`: One row per LLM proxy content part (text block, tool call, tool result, etc.), globally deduped by content-derived `message_id`. See **proxy_messages columns** below for the full 26-column schema; `gateway_id` and `date` are added as partition columns in the query cache.
 - `gascity_messages`: One row per content block from gascity-captured agent sessions (text, thinking, tool_use, tool_result, attachment). Captured by the `ctvs gascity` supervisor source — agent-attributed (`gascity_template` / `gascity_rig` / `gascity_alias`) and includes per-frame token usage with cache breakdown. Always fresh: the daemon writes Parquet directly to `~/.collectivus/sink/gascity_messages/date=<YYYY-MM-DD>/city=<name>/` (no JSONL stage, no `.meta.json` sidecar). The constant `gateway_id = 'gascity-scribe'` tags the source for cross-source UNIONs with `proxy_messages`. Run `ctvs query schema gascity_messages --format markdown` for the full 47-column schema.
 
-Run `ctvs query schema <dataset> --format json` for the exact columns in the installed version.
+Run `ctvs query schema <table> --format json` for the exact columns in the installed version. Schema lookup works for built-in tables and tables registered with `ctvs collect`.
 
 ## proxy_messages columns
 
@@ -129,6 +130,7 @@ ctvs query sql "select serviceName, count(*) as logs from logs group by serviceN
 ctvs query sql "select traceId, name, durationMs from traces order by durationMs desc limit 20" --refresh always --format json
 ctvs query sql "select model, count(distinct message_id) as messages, count(*) as parts from proxy_messages where role = 'assistant' group by model order by messages desc" --format markdown
 ctvs query sql "select conversation_id, count(distinct message_id) as messages from proxy_messages group by conversation_id order by messages desc limit 10" --format markdown
+ctvs query sql "select date, count(*) as parts from proxy_messages group by date order by date" --date 2026-05-14 --date 2026-05-15 --format markdown
 ```
 
 For JSON columns (`attributes`, `status`, `tools`, `tool_args`), extract scalars with `JSON_VALUE(<col>, '$.path')`:
@@ -137,4 +139,4 @@ For JSON columns (`attributes`, `status`, `tools`, `tool_args`), extract scalars
 ctvs query sql "select model, sum(cast(JSON_VALUE(attributes, '\$.usage.input_tokens') as bigint)) as input_tokens from (select distinct message_id, model, attributes from proxy_messages where role = 'assistant') group by model order by input_tokens desc" --format markdown
 ```
 
-SQL must be a read-only `select` over the logical datasets above or registered collection tables.
+SQL must be a read-only `select` over known query tables. Table names are resolved from the SQL AST and may be built-ins (`logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`) or registered collection tables from `ctvs query catalog`.

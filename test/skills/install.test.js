@@ -79,8 +79,14 @@ describe('installSkill', function() {
       const reference = fs.readFileSync(path.join(destination.path, 'references', 'query-cli.md'), 'utf8')
       expect(skill).toMatch(/ctvs collect <file\.jsonl> --name <name>/)
       expect(skill).toMatch(/registered collection tables/)
+      expect(skill).toMatch(/ctvs query schema <table> --format json/)
+      expect(skill).toContain('ctvs query sql \'select * from "random-log"\'')
+      expect(skill).toMatch(/Repeat `--date`/)
       expect(reference).toMatch(/External JSONL collections/)
       expect(reference).toMatch(/ctvs query sql "select \* from random_log"/)
+      expect(reference).toContain('ctvs query sql \'select * from "random-log"\' --format json')
+      expect(reference).toMatch(/ctvs query schema <table> --format json/)
+      expect(reference).toMatch(/--date 2026-05-14 --date 2026-05-15/)
     }
   })
 

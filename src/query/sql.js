@@ -12,7 +12,9 @@ import {
 import { expectedCachePartitions } from './paths.js'
 import {
   expectedCollectionPartitions,
+  findCollection,
   readCollectionCacheMeta,
+  readCollectionsManifest,
 } from './collections.js'
 import { readCacheCursor } from './iceberg/cursor.js'
 import { createLocalIcebergIO } from './iceberg/resolver.js'
@@ -20,17 +22,16 @@ import { queryCacheTableExists } from './iceberg/store.js'
 
 /**
  * @import { AsyncDataSource, AsyncRow, ScanOptions, ScanResults, Statement } from 'squirreling'
- * @import { CachePartition, QueryDataset, QueryPaths, QueryResultSet, QueryScope } from './types.js'
+ * @import { CachePartition, QueryDataset, QueryPaths, QueryResultSet, QueryScope, ResolvedQueryTableInfo, ResolvedQueryTables } from './types.js'
  * @import { Lister, Resolver, TableMetadata } from 'icebird/src/types.js'
  */
 
 /**
  * @param {string} sql
  * @param {number} defaultLimit
- * @param {string[]} [collectionTables]
- * @returns {{ statement: Statement, datasets: string[] }}
+ * @returns {{ statement: Statement, tableNames: string[] }}
  */
-export function prepareReadOnlySql(sql, defaultLimit, collectionTables = []) {
+export function prepareReadOnlySql(sql, defaultLimit) {
   const trimmed = sql.trim()
   if (trimmed.length === 0) throw new Error('SQL query is required')
   /** @type {Statement} */
@@ -40,19 +41,9 @@ export function prepareReadOnlySql(sql, defaultLimit, collectionTables = []) {
   } catch (err) {
     throw new Error(`SQL must be a single read-only SELECT statement: ${formatError(err)}`)
   }
-  const tables = extractTables(statement)
-  /** @type {string[]} */
-  const datasets = []
-  const allowedCollectionTables = new Set(collectionTables)
-  for (const table of tables) {
-    if (!isQueryDataset(table) && !allowedCollectionTables.has(table)) {
-      const allowed = [...QUERY_DATASETS, ...collectionTables].join(', ')
-      throw new Error(`SQL can only reference logical query tables (${allowed}); got "${table}"`)
-    }
-    if (!datasets.includes(table)) datasets.push(table)
-  }
+  const tableNames = uniqueStrings(extractTables(statement))
   applyDefaultLimit(statement, defaultLimit)
-  return { statement, datasets }
+  return { statement, tableNames }
 }
 
 /**
@@ -60,17 +51,104 @@ export function prepareReadOnlySql(sql, defaultLimit, collectionTables = []) {
  *   paths: QueryPaths,
  *   scope: QueryScope,
  *   statement: Statement,
- *   datasets: string[],
+ *   datasets?: string[],
+ *   resolvedTables?: ResolvedQueryTables,
  * }} args
  * @returns {Promise<QueryResultSet>}
  */
 export async function executeLogicalSql(args) {
-  const tables = args.datasets.length === 0
-    ? {}
-    : await buildTables(args.paths, { ...args.scope, datasets: args.datasets })
+  const tables = args.resolvedTables
+    ? args.resolvedTables.tables
+    : args.datasets && args.datasets.length > 0
+      ? await buildTables(args.paths, { ...args.scope, datasets: args.datasets })
+      : {}
   const results = executeSql({ tables, query: args.statement })
   const rows = await collect(results)
   return { columns: results.columns, rows }
+}
+
+/**
+ * Resolve the SQL table names referenced by a query into Squirreling data
+ * sources. The SQL-facing name is kept as the key in `tables`; the canonical
+ * dataset name is carried separately for cache freshness and refresh.
+ *
+ * @param {QueryPaths} paths
+ * @param {QueryScope} scope
+ * @param {string[]} tableNames
+ * @returns {Promise<ResolvedQueryTables>}
+ */
+export async function resolveQueryTables(paths, scope, tableNames) {
+  const names = uniqueStrings(tableNames)
+  /** @type {Record<string, AsyncDataSource>} */
+  const tables = {}
+  /** @type {string[]} */
+  const datasets = []
+  /** @type {ResolvedQueryTables['resolved']} */
+  const resolved = []
+  /** @type {Promise<{ resolver: Resolver, lister: Lister }> | undefined} */
+  let localIcebergIO
+  function getLocalIcebergIO() {
+    localIcebergIO ??= createLocalIcebergIO()
+    return localIcebergIO
+  }
+
+  for (const name of names) {
+    const table = resolveQueryTableInfo(paths, name)
+    if (!datasets.includes(table.dataset)) datasets.push(table.dataset)
+    if (table.kind === 'builtin') {
+      const { dataset } = table
+      const partitions = expectedCachePartitions(paths, { ...scope, datasets: [dataset] })
+      tables[name] = dataset === 'gascity_messages'
+        ? gascityDataSource(dataset, partitions, scope)
+        : buildCacheDataSource(dataset, partitions, scope, await getLocalIcebergIO())
+    } else {
+      const partitions = expectedCollectionPartitions(paths, { ...scope, datasets: [table.dataset] })
+      tables[name] = buildCollectionDataSource(name, partitions, scope, await getLocalIcebergIO())
+    }
+    resolved.push({
+      name,
+      dataset: table.dataset,
+      kind: table.kind,
+      columns: tables[name].columns,
+    })
+  }
+
+  return { tableNames: names, datasets, tables, resolved }
+}
+
+/**
+ * @param {QueryPaths} paths
+ * @param {string} name
+ * @returns {ResolvedQueryTableInfo}
+ */
+export function resolveQueryTableInfo(paths, name) {
+  if (isQueryDataset(name)) return { name, kind: 'builtin', dataset: name }
+  const manifest = readCollectionsManifest(paths.recordingRoot)
+  const collection = findCollection(manifest, name)
+  if (collection) return { name, kind: 'collection', dataset: collection.table, collection }
+  throw new Error(`unknown query table "${name}"${queryTableHint(manifest)}`)
+}
+
+/**
+ * @param {import('./types.js').CollectionsManifest} manifest
+ * @returns {string}
+ */
+function queryTableHint(manifest) {
+  /** @type {string[]} */
+  const names = [...QUERY_DATASETS]
+  for (const collection of Object.values(manifest.collections)) {
+    names.push(collection.table)
+    if (collection.name !== collection.table) names.push(collection.name)
+  }
+  return names.length > 0 ? `; available tables: ${uniqueStrings(names).join(', ')}` : ''
+}
+
+/**
+ * @param {string[]} values
+ * @returns {string[]}
+ */
+function uniqueStrings(values) {
+  return [...new Set(values)]
 }
 
 /**
@@ -423,7 +501,7 @@ function collectionScopeColumns(meta, scope) {
   /** @type {string[]} */
   const columns = []
   if (scope.service) columns.push('serviceName', 'service_name')
-  if (scope.date || scope.from || scope.to) {
+  if (scope.date || scope.dates || scope.from || scope.to) {
     if (meta?.timestamp_column) columns.push(meta.timestamp_column)
     columns.push('timestamp', 'time', 'ts', 'created_at', 'createdat', 'date')
   }
@@ -443,7 +521,7 @@ function canUseBuiltinRowCount(scope) {
  * @returns {boolean}
  */
 function canUseCollectionRowCount(scope) {
-  return !scope.service && !scope.date && !scope.from && !scope.to
+  return !scope.service && !scope.date && !scope.dates && !scope.from && !scope.to
 }
 
 /**
@@ -508,7 +586,7 @@ function projectRow(row, columns) {
  */
 function rowMatchesScope(dataset, row, scope) {
   if (scope.gatewayId && row.gateway_id !== scope.gatewayId) return false
-  if (scope.date && row.date !== scope.date) return false
+  if (!dateMatchesScope(row.date, scope)) return false
   if (scope.service && 'serviceName' in row && row.serviceName !== scope.service) return false
   if (!scope.from && !scope.to) return true
   const timestampMs = rowTimestampMs(dataset, row)
@@ -531,12 +609,23 @@ function collectionRowMatchesScope(_table, row, scope, meta) {
     if ('serviceName' in row && row.serviceName !== scope.service) return false
     if ('service_name' in row && row.service_name !== scope.service) return false
   }
-  if (!scope.date && !scope.from && !scope.to) return true
+  if (!scope.date && !scope.dates && !scope.from && !scope.to) return true
   const timestampMs = collectionRowTimestampMs(row, meta)
   if (timestampMs === undefined) return true
-  if (scope.date && new Date(timestampMs).toISOString().slice(0, 10) !== scope.date) return false
+  if (!dateMatchesScope(new Date(timestampMs).toISOString().slice(0, 10), scope)) return false
   if (scope.from && timestampMs < Date.parse(scope.from)) return false
   if (scope.to && timestampMs > Date.parse(scope.to)) return false
+  return true
+}
+
+/**
+ * @param {unknown} date
+ * @param {QueryScope} scope
+ * @returns {boolean}
+ */
+function dateMatchesScope(date, scope) {
+  if (scope.date && date !== scope.date) return false
+  if (scope.dates && !scope.dates.includes(String(date))) return false
   return true
 }
 

@@ -111,6 +111,40 @@ describe('backfillCity', () => {
     expect(calledUrls.some((u) => u.includes('session/hy-2/transcript?format=raw&after=u-10'))).toBe(true)
   })
 
+  it('dispatches supervisor transcript message envelopes with their provider hint', async () => {
+    await writeCursorFile('hyptown', 'hy-1', { retired: false })
+    const dispatcher = new NormalizerDispatcher({ stderr: memoStream() })
+    /** @type {unknown[]} */
+    const dispatched = []
+    dispatcher.register('claude', (frame) => {
+      dispatched.push(frame)
+      return []
+    })
+    const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'te-1',
+      provider: 'claude',
+      format: 'raw',
+      messages: [
+        { type: 'user', uuid: 'u-1' },
+        { type: 'assistant', uuid: 'u-2' },
+      ],
+    }), { status: 200 }))
+
+    const result = await backfillCity({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher,
+      stderr: memoStream(),
+      fetchFn,
+    })
+
+    expect(result).toEqual({ sessionsAttempted: 1, framesDispatched: 2, sessionsFailed: 0 })
+    expect(dispatched).toEqual([
+      { type: 'user', uuid: 'u-1' },
+      { type: 'assistant', uuid: 'u-2' },
+    ])
+  })
+
   it('logs and counts failures without throwing', async () => {
     await writeCursorFile('hyptown', 'hy-1', { last_uuid: 'u-0', retired: false })
     const stderr = memoStream()

@@ -186,10 +186,21 @@ function extractFrameArray(body) {
   if (Array.isArray(body)) return body
   if (body && typeof body === 'object') {
     const obj = /** @type {Record<string, unknown>} */ (body)
+    if (Array.isArray(obj.messages)) return wrapProviderFrames(obj.messages, obj.provider)
     if (Array.isArray(obj.frames)) return obj.frames
     if (Array.isArray(obj.transcript)) return obj.transcript
   }
   return []
+}
+
+/**
+ * @param {unknown[]} frames
+ * @param {unknown} provider
+ * @returns {unknown[]}
+ */
+function wrapProviderFrames(frames, provider) {
+  if (typeof provider !== 'string') return frames
+  return frames.map((frame) => ({ provider, frame }))
 }
 
 /**

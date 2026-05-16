@@ -83,6 +83,14 @@ describe('argument parsers', () => {
         help: false,
       })
     })
+    it('parses a bare target and leaves apiUrl undefined for the default', () => {
+      expect(parseAttachArgs(['hyptown'])).toMatchObject({
+        target: 'hyptown',
+        noWait: false,
+        help: false,
+      })
+      expect(parseAttachArgs(['hyptown']).apiUrl).toBeUndefined()
+    })
     it('rejects --api-url with no value', () => {
       expect(parseAttachArgs(['hy', '--api-url']).error).toMatch(/--api-url requires a value/)
     })
@@ -194,6 +202,18 @@ describe('runAttach', () => {
     expect(stdout.value()).toMatch(/attached: hyptown/)
   })
 
+  it('defaults a city-name attach to the local supervisor api url', async () => {
+    const paths = buildPaths()
+    await writeConfig(paths.configPath)
+    const code = await runAttach(
+      ['hyptown', '--no-wait', '--config', paths.configPath],
+      { stdout: memo(), stderr: memo(), pidFilePath: paths.pidFilePath, statePath: paths.statePath }
+    )
+    expect(code).toBe(0)
+    const config = JSON.parse(await fs.readFile(paths.configPath, 'utf8'))
+    expect(config.gascity).toEqual([{ name: 'hyptown', api_url: 'http://127.0.0.1:8372' }])
+  })
+
   it('replaces an existing entry instead of duplicating it', async () => {
     const paths = buildPaths()
     await writeConfig(paths.configPath, {
@@ -257,16 +277,23 @@ describe('runAttach', () => {
     expect(config.gascity).toEqual([{ name: 'mycity', api_url: 'http://1.2.3.4:9999' }])
   })
 
-  it('errors when given a city name without --api-url', async () => {
+  it('uses the local supervisor default when a city directory has no api hint', async () => {
     const paths = buildPaths()
     await writeConfig(paths.configPath)
-    const stderr = memo()
-    const code = await runAttach(
-      ['hyptown', '--no-wait', '--config', paths.configPath],
-      { stdout: memo(), stderr, pidFilePath: paths.pidFilePath, statePath: paths.statePath }
+    const cityDir = path.join(dir, 'default-api-city')
+    await fs.mkdir(cityDir, { recursive: true })
+    await fs.writeFile(
+      path.join(cityDir, 'city.toml'),
+      'name = "default-api-city"\n',
+      'utf8'
     )
-    expect(code).toBe(1)
-    expect(stderr.value()).toMatch(/--api-url is required/)
+    const code = await runAttach(
+      [cityDir, '--no-wait', '--config', paths.configPath],
+      { stdout: memo(), stderr: memo(), pidFilePath: paths.pidFilePath, statePath: paths.statePath }
+    )
+    expect(code).toBe(0)
+    const config = JSON.parse(await fs.readFile(paths.configPath, 'utf8'))
+    expect(config.gascity).toEqual([{ name: 'default-api-city', api_url: 'http://127.0.0.1:8372' }])
   })
 })
 
@@ -576,6 +603,39 @@ describe('runStatus', () => {
         },
       ],
     })
+    expect(fetchFn).toHaveBeenCalledWith(
+      'http://127.0.0.1:8372/v0/city/hyptown/status',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+  })
+
+  it('falls back to generic health probes when per-city status is absent', async () => {
+    const paths = buildPaths()
+    const snap = {
+      schema_version: 1,
+      updated_at: '2026-05-14T10:00:00Z',
+      cities: [{
+        name: 'hyptown', api_url: 'http://127.0.0.1:8372',
+        lifecycle_connected: true, frames_total: 0, sessions: /** @type {never[]} */ ([]),
+      }],
+    }
+    await fs.writeFile(paths.statePath, JSON.stringify(snap), 'utf8')
+    const fetchFn = vi.fn(async (/** @type {string} */ url) => {
+      if (url.endsWith('/v0/health')) return new Response('ok', { status: 200 })
+      return new Response('not found', { status: 404 })
+    })
+    const stdout = memo()
+    await runStatus(['--json'], {
+      stdout, stderr: memo(),
+      statePath: paths.statePath,
+      fetchFn: /** @type {typeof fetch} */ (/** @type {unknown} */ (fetchFn)),
+    })
+    const parsed = JSON.parse(stdout.value())
+    expect(parsed.cities[0].reachable).toBe(true)
+    expect(fetchFn.mock.calls.map((c) => c[0])).toEqual([
+      'http://127.0.0.1:8372/v0/city/hyptown/status',
+      'http://127.0.0.1:8372/v0/health',
+    ])
   })
 
   it('marks unreachable cities when health probe fails', async () => {

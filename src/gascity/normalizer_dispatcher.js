@@ -37,6 +37,8 @@ export class NormalizerDispatcher {
     this.writer = opts.writer
     /** @type {NormalizerFn} */
     this.passthrough = passthroughNormalize
+    /** @type {Set<Promise<void>>} */
+    this.pendingAppends = new Set()
     this.register('claude', claudeStub)
     this.register('codex', codexStub)
   }
@@ -67,6 +69,19 @@ export class NormalizerDispatcher {
   }
 
   /**
+   * Wait for every writer append that dispatch has handed off so far. Live
+   * streaming can let appends run in the background, but short-lived paths
+   * like `ctvs gascity backfill` must drain them before stopping the writer.
+   *
+   * @returns {Promise<void>}
+   */
+  async drain() {
+    while (this.pendingAppends.size > 0) {
+      await Promise.allSettled(Array.from(this.pendingAppends))
+    }
+  }
+
+  /**
    * Resolve `provider` from the frame envelope and dispatch. The supervisor's
    * `format=raw` envelope wraps each provider frame in `{ provider, frame }`
    * (or similar); we look at common positions and fall through to passthrough
@@ -83,32 +98,42 @@ export class NormalizerDispatcher {
    * @returns {NormalizedRow[]}
    */
   dispatch(envelope, ctx) {
-    const provider = resolveProvider(envelope) ?? 'unknown'
-    const fn = this.registry.get(provider) ?? this.passthrough
-    /** @type {NormalizedRow[] | undefined | void} */
-    let rows
-    try {
-      rows = fn(envelope, ctx)
-    } catch (err) {
-      this.stderr.write(
-        `[gascity] normalizer error provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
-      )
-      return []
-    }
-    const out = Array.isArray(rows) ? rows : []
-    if (out.length > 0 && this.writer) {
-      // Writer.append is async but we don't block dispatch — appending only
-      // buffers and any triggered flush failures land on the writer's own
-      // error path. We surface a top-level "writer rejected" only if append
-      // itself throws synchronously (defensive — current ParquetWriter
-      // returns a promise unconditionally).
-      this.writer.append(ctx, out).catch((err) => {
+    /** @type {NormalizedRow[]} */
+    const allRows = []
+    for (const unit of expandDispatchUnits(envelope)) {
+      const provider = unit.provider ?? resolveProvider(unit.frame) ?? 'unknown'
+      const registered = this.registry.get(provider)
+      const fn = registered ?? this.passthrough
+      const input = registered !== undefined ? unit.frame : unit.passthroughEnvelope ?? unit.frame
+      /** @type {NormalizedRow[] | undefined | void} */
+      let rows
+      try {
+        rows = fn(input, ctx)
+      } catch (err) {
         this.stderr.write(
-          `[gascity] writer_append_failed provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
+          `[gascity] normalizer error provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
         )
-      })
+        continue
+      }
+      const out = Array.isArray(rows) ? rows : []
+      if (out.length === 0) continue
+      allRows.push(...out)
+      if (this.writer) {
+        // Writer.append is async but we don't block dispatch — appending only
+        // buffers and any triggered flush failures land on the writer's own
+        // error path. We surface a top-level "writer rejected" only if append
+        // itself throws synchronously (defensive — current ParquetWriter
+        // returns a promise unconditionally).
+        const pending = this.writer.append(ctx, out).catch((err) => {
+          this.stderr.write(
+            `[gascity] writer_append_failed provider=${provider} session=${ctx.sessionId} err=${formatError(err)}\n`
+          )
+        })
+        this.pendingAppends.add(pending)
+        pending.finally(() => this.pendingAppends.delete(pending))
+      }
     }
-    return out
+    return allRows
   }
 }
 
@@ -134,6 +159,63 @@ export function resolveProvider(envelope) {
     if (typeof frame.provider === 'string') return frame.provider
   }
   return undefined
+}
+
+/**
+ * @typedef {{
+ *   frame: unknown,
+ *   provider?: string,
+ *   passthroughEnvelope?: unknown,
+ * }} DispatchUnit
+ */
+
+/**
+ * The supervisor can send a provider frame directly, wrap a frame as
+ * `{ provider, frame }`, or return transcript snapshots as
+ * `{ provider, messages: [...] }`. Provider normalizers want the inner frame;
+ * passthrough wants a provider-bearing envelope when one exists.
+ *
+ * @param {unknown} envelope
+ * @returns {DispatchUnit[]}
+ */
+function expandDispatchUnits(envelope) {
+  if (envelope === null || typeof envelope !== 'object') return [{ frame: envelope }]
+  const obj = /** @type {Record<string, unknown>} */ (envelope)
+  const provider = typeof obj.provider === 'string' ? obj.provider : undefined
+  for (const key of ['messages', 'frames', 'transcript']) {
+    const nested = obj[key]
+    if (Array.isArray(nested)) {
+      return nested.map((frame) => dispatchUnit(frame, provider))
+    }
+  }
+  if (obj.frame !== null && typeof obj.frame === 'object' && !Array.isArray(obj.frame)) {
+    /** @type {DispatchUnit} */
+    const unit = {
+      frame: obj.frame,
+      passthroughEnvelope: envelope,
+    }
+    if (provider !== undefined) unit.provider = provider
+    return [unit]
+  }
+  /** @type {DispatchUnit} */
+  const unit = { frame: envelope }
+  if (provider !== undefined) unit.provider = provider
+  return [unit]
+}
+
+/**
+ * @param {unknown} frame
+ * @param {string | undefined} provider
+ * @returns {DispatchUnit}
+ */
+function dispatchUnit(frame, provider) {
+  /** @type {DispatchUnit} */
+  const unit = { frame }
+  if (provider !== undefined) {
+    unit.provider = provider
+    unit.passthroughEnvelope = { provider, frame }
+  }
+  return unit
 }
 
 /**

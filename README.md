@@ -77,7 +77,7 @@ To capture agent-attributed transcripts from a gascity supervisor (separate
 from the proxy capture above), attach a city to the same daemon:
 
 ```bash
-npx collectivus gascity attach hyptown --api-url http://127.0.0.1:8372
+npx collectivus gascity attach hyptown
 npx collectivus query sql "select gascity_template, count(*) as parts from gascity_messages group by 1 order by parts desc"
 ```
 
@@ -335,7 +335,7 @@ store, so `ctvs query gascity_messages` is always reading what the daemon has
 flushed up to the moment of the call.
 
 ```bash
-ctvs gascity attach hyptown --api-url http://127.0.0.1:8372
+ctvs gascity attach hyptown
 ctvs gascity list
 ctvs query schema gascity_messages --format markdown
 ctvs query sql "select gascity_template, count(*) from gascity_messages group by 1"

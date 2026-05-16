@@ -50,6 +50,8 @@ The daemon is reloaded by sending SIGHUP. Without a running daemon attach/detach
 still mutate the config so the next \`ctvs install\` picks the new entries up.
 `
 
+const DEFAULT_GASCITY_API_URL = 'http://127.0.0.1:8372'
+
 /**
  * Top-level dispatch for `ctvs gascity <sub>`.
  *
@@ -87,11 +89,11 @@ const ATTACH_USAGE = `Usage:
 
 Adds a [[gascity]] entry to the collectivus config and signals the running
 daemon (SIGHUP) to start capturing. When <city-name-or-path> is a directory
-the city name and api_url are inferred from its city.toml; otherwise --api-url
-is required.
+the city name and api_url are inferred from its city.toml. Otherwise the city
+name is used as given and api_url defaults to ${DEFAULT_GASCITY_API_URL}.
 
 Options:
-  --api-url <url>    Supervisor base URL (e.g. http://127.0.0.1:8372)
+  --api-url <url>    Supervisor base URL (default: ${DEFAULT_GASCITY_API_URL})
   --config <path>    collectivus config to edit (default: ~/.hyp/collectivus.json)
   --no-wait          Don't block on the first lifecycle event
   --help, -h         Show this help
@@ -278,7 +280,7 @@ async function writeConfigObject(configPath, obj) {
  *  - If `target` is a directory containing `city.toml`, parse that to
  *    derive the name + api_url. We use a tiny inline TOML reader that
  *    handles only the fields we need (name + api).
- *  - Otherwise treat `target` as the city name; require `--api-url`.
+ *  - Otherwise treat `target` as the city name and use the default api_url.
  *
  * @param {string} target
  * @param {string | undefined} apiUrl
@@ -311,16 +313,10 @@ export async function resolveCityEntry(target, apiUrl) {
     if (!inferredName) {
       throw new Error(`${cityToml} did not provide a string \`name\``)
     }
-    const finalApiUrl = apiUrl ?? inferredApi ?? await discoverApiUrl(target)
-    if (!finalApiUrl) {
-      throw new Error('could not infer api_url from the city directory; pass --api-url')
-    }
+    const finalApiUrl = apiUrl ?? inferredApi ?? await discoverApiUrl(target) ?? DEFAULT_GASCITY_API_URL
     return { name: inferredName, api_url: finalApiUrl }
   }
-  if (!apiUrl) {
-    throw new Error('--api-url is required when the target is a city name (no city.toml at that path)')
-  }
-  return { name: target, api_url: apiUrl }
+  return { name: target, api_url: apiUrl ?? DEFAULT_GASCITY_API_URL }
 }
 
 /**
@@ -915,9 +911,11 @@ export async function runBackfill(argv, hooks) {
     }
   } catch (err) {
     stderr.write(`error: backfill failed: ${formatError(err)}\n`)
+    await dispatcher.drain().catch(swallow)
     await writer.stop().catch(swallow)
     return 1
   }
+  await dispatcher.drain()
   await writer.stop()
   stdout.write(
     `Backfill complete: ${result.sessionsAttempted} attempted, ` +
@@ -1019,7 +1017,7 @@ export async function runStatus(argv, hooks) {
   const cities = []
   if (state) {
     await Promise.all(state.cities.map(async (c) => {
-      const reachable = await probeReachable(fetchFn, c.api_url)
+      const reachable = await probeReachable(fetchFn, c.api_url, c.name)
       /** @type {(typeof cities)[number]} */
       const entry = {
         name: c.name,
@@ -1061,21 +1059,24 @@ export async function runStatus(argv, hooks) {
 }
 
 /**
- * GET `<api_url>/v0/health` (or `/health`, or `/`) with a short timeout.
- * Returns true on a 2xx response. We don't care which endpoint the
+ * GET the per-city status endpoint first, then fall back to generic health
+ * probes. Returns true on a 2xx response. We don't care which endpoint the
  * supervisor exposes — anything that 200s tells us "the port is live and
  * answering". Any error or non-2xx means we render "unreachable" and let
  * the operator decide.
  *
  * @param {typeof fetch} fetchFn
  * @param {string} apiUrl
+ * @param {string} cityName
  * @returns {Promise<boolean>}
  */
-async function probeReachable(fetchFn, apiUrl) {
+async function probeReachable(fetchFn, apiUrl, cityName) {
+  const baseUrl = apiUrl.replace(/\/+$/, '')
   const candidates = [
-    `${apiUrl.replace(/\/+$/, '')}/v0/health`,
-    `${apiUrl.replace(/\/+$/, '')}/health`,
-    `${apiUrl.replace(/\/+$/, '')}/`,
+    `${baseUrl}/v0/city/${encodeURIComponent(cityName)}/status`,
+    `${baseUrl}/v0/health`,
+    `${baseUrl}/health`,
+    `${baseUrl}/`,
   ]
   for (const url of candidates) {
     /** @type {AbortController} */

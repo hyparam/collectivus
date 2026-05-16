@@ -76,6 +76,6 @@ export function parquetPartitionDir(root, date, city) {
 export function parquetPartPath(root, date, city, sessionId, counter) {
   return path.join(
     parquetPartitionDir(root, date, city),
-    `part-${sessionId}-${counter}.parquet`
+    `part-${encodeURIComponent(sessionId)}-${counter}.parquet`
   )
 }

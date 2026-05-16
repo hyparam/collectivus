@@ -80,7 +80,9 @@ export function resolveDefaultConfigPath(homeDir) {
   const p = defaultConfigPath(homeDir)
   try {
     if (fs.statSync(p).isFile()) return p
-  } catch {}
+  } catch {
+    // ignore missing file
+  }
   return undefined
 }
 

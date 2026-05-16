@@ -161,7 +161,7 @@ describe('runInstall', function() {
       fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
       fs.writeFileSync(
         path.join(home, '.hyp', 'collectivus.json'),
-        JSON.stringify({ version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } }),
+        JSON.stringify({ version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } })
       )
       const m = makeMocks({
         loadConfigImpl() {

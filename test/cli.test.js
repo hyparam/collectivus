@@ -201,7 +201,7 @@ describe('run(): help and arg errors', () => {
       fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
       fs.writeFileSync(
         path.join(home, '.hyp', 'collectivus.json'),
-        JSON.stringify({ version: 1, otel: { listen: '127.0.0.1:0' }, sink: { type: 'file', dir: '/tmp/x' } }),
+        JSON.stringify({ version: 1, otel: { listen: '127.0.0.1:0' }, sink: { type: 'file', dir: '/tmp/x' } })
       )
       const code = await run(['--print-config'], {}, { stdout, stderr, homeDir: home })
       expect(code).toBe(0)

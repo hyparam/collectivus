@@ -112,7 +112,7 @@ describe('runAttach', function() {
     try {
       fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
       fs.writeFileSync(path.join(home, '.hyp', 'collectivus.json'), '{}')
-      /** @type {object[]} */
+      /** @type {Array<AttachOptions>} */
       const calls = []
       /** @type {string[]} */
       const loadCalls = []

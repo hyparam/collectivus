@@ -225,8 +225,8 @@ async function runSingleUserFlow(args) {
   const hasGascity = sources.includes('gascity')
   const hasOtel = sources.includes('otel')
 
-  stdout.write('Where should collectivus write recordings? Each signal lands in a\n')
-  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
+  stdout.write('\nWhere should collectivus write recordings? Each signal lands in a\n')
+  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n\n')
   const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
   const sinkDir = sinkAns === '' ? defaultSink : sinkAns
 
@@ -241,7 +241,7 @@ async function runSingleUserFlow(args) {
 
   if (hasProxy) {
     stdout.write('\nProxy capture will listen on 127.0.0.1:8787 and forward LLM\n')
-    stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n')
+    stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n\n')
     const provider = PROVIDERS[0]
     config.proxy = {
       listen: SINGLE_PROXY_LISTEN,
@@ -262,11 +262,13 @@ async function runSingleUserFlow(args) {
   }
 
   if (hasOtel) {
-    stdout.write('\nOTLP receiver\n')
+    stdout.write('\nOTLP receiver listens for OpenTelemetry logs, traces, and metrics\n')
+    stdout.write('over HTTP. Apps with OTLP exporters point to this address.\n\n')
     const listenAns = (await prompt(`OTLP listen [${DEFAULT_OTEL_LISTEN}]: `)).trim()
     config.otel = { listen: listenAns === '' ? DEFAULT_OTEL_LISTEN : listenAns }
   }
 
+  stdout.write('\n')
   const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
   const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
@@ -371,7 +373,7 @@ async function offerGascityBackfill(args) {
   stdout.write('  Yes -> asks each supervisor for all recoverable sessions and replays transcripts.\n')
   stdout.write('         This can take a while for large cities.\n')
   stdout.write('  No  -> starts capturing new and active sessions only; run\n')
-  stdout.write('         `ctvs gascity backfill <city> --all` later.\n')
+  stdout.write('         `ctvs gascity backfill <city> --all` later.\n\n')
   const ans = (await prompt('Backfill all recoverable gascity sessions? [y/N]: ')).trim()
   if (!/^y(es)?$/i.test(ans)) return 0
 
@@ -394,7 +396,7 @@ async function offerGascityBackfill(args) {
  * @returns {Promise<StandaloneSource[]>}
  */
 async function askStandaloneSources(prompt, stdout, stderr) {
-  stdout.write('Which capture sources should this Standalone config enable?\n\n')
+  stdout.write('\nWhich capture sources should this Standalone config enable?\n\n')
   stdout.write('  1) Proxy\n')
   stdout.write('     LLM API traffic through a localhost proxy.\n\n')
   stdout.write('  2) Gas city supervisor\n')
@@ -791,7 +793,7 @@ async function offerDaemonInstall(args) {
     stdout.write('        if it crashes.\n')
     stdout.write('        Logs go to ~/.hyp/collectivus/. Reversible with `ctvs uninstall`.\n')
     stdout.write('  No  → only runs while you launch it manually with\n')
-    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n`)
+    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n\n`)
     const dAns = (await prompt('Install as background daemon? [Y/n]: ')).trim()
     if (isYes(dAns)) {
       let installFlag
@@ -801,7 +803,7 @@ async function offerDaemonInstall(args) {
         stdout.write('        ~/.claude/settings.json so the `claude` CLI uses the proxy.\n')
         stdout.write('        Reversible with `ctvs detach`.\n')
         stdout.write('  No  → leaves Claude Code untouched; attach later with\n')
-        stdout.write('        `ctvs attach`.\n')
+        stdout.write('        `ctvs attach`.\n\n')
         const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
         installFlag = isYes(cAns) ? '--yes' : '--no'
       } else {
@@ -1017,19 +1019,18 @@ function formatError(err) {
 async function runServerFlow(args) {
   const { stdout, stderr, prompt, cwd, defaultCfgPath, writeFile } = args
 
-  stdout.write('\nCentral server\n')
-  stdout.write('──────────────\n')
+  stdout.write('\nCentral server mode.\n')
   stdout.write('This binary will run the central-server HTTP listener that\n')
   stdout.write('vendors per-gateway configs and accepts ingest from gateways.\n')
 
   stdout.write('\nWhere should the control plane listen? Gateways will reach this\n')
-  stdout.write('address; 0.0.0.0 listens on all interfaces.\n')
+  stdout.write('address; 0.0.0.0 listens on all interfaces.\n\n')
   const listenAns = (await prompt(`Central server listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
   const controlPlaneListen = listenAns === '' ? DEFAULT_CONTROL_PLANE_LISTEN : listenAns
 
   const defaultPublicUrl = publicUrlDefault(controlPlaneListen)
   stdout.write('\nWhat URL will gateways use to reach this server? For ECS/Docker,\n')
-  stdout.write('use the load balancer or service URL, not 0.0.0.0.\n')
+  stdout.write('use the load balancer or service URL, not 0.0.0.0.\n\n')
   const publicUrl = await askUrlWithDefault({
     prompt,
     stderr,
@@ -1043,7 +1044,7 @@ async function runServerFlow(args) {
   const defaultDataDir = defaultServerDataDir()
   stdout.write('\nWhere should server-side state live? Per-gateway config files land\n')
   stdout.write('under <data_dir>/configs/ and the bootstrap-token store defaults to\n')
-  stdout.write('<data_dir>/bootstrap.json.\n')
+  stdout.write('<data_dir>/bootstrap.json.\n\n')
   const dataDirAns = (await prompt(`Server data directory [${defaultDataDir}]: `)).trim()
   const dataDir = dataDirAns === '' ? defaultDataDir : dataDirAns
 
@@ -1052,7 +1053,7 @@ async function runServerFlow(args) {
   const generatedSecret = crypto.randomBytes(IDENTITY_SECRET_BYTES).toString('hex')
   stdout.write('\nThe server signs gateway JWTs with an HMAC secret. Pressing Enter\n')
   stdout.write('uses a freshly generated 32-byte random hex value (recommended); paste\n')
-  stdout.write('an existing secret only if you are migrating from another host.\n')
+  stdout.write('an existing secret only if you are migrating from another host.\n\n')
   const secretAns = (await prompt('Identity-issuer secret []: ')).trim()
   /** @type {string} */
   let secret
@@ -1088,6 +1089,7 @@ async function runServerFlow(args) {
   const upload = await askUpload(prompt, stdout, stderr)
   if (upload) config.upload = upload
 
+  stdout.write('\n')
   const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
   if (!await confirmAndWrite({ stdout, stderr, cfgPath, config, writeFile })) return 1
 

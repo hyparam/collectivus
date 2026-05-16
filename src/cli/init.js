@@ -206,7 +206,20 @@ export async function runInit(hooks = {}) {
 async function runSingleUserFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
-  stdout.write('\nStandalone mode.\n\n')
+  stdout.write('\nStandalone mode.\n')
+  stdout.write('Defaults: proxy on 127.0.0.1:8787 → Anthropic, sink at\n')
+  stdout.write(`${defaultSink}, config at ${defaultCfgPath}.\n\n`)
+  const acceptDefaults = isYes((await prompt('Accept defaults? [Y/n]: ')).trim())
+  if (acceptDefaults) {
+    return runSingleUserDefaults({
+      stdout, stderr, prompt, writeFile, platform, binPath,
+      defaultCfgPath, defaultSink,
+      installGlobal: args.installGlobal,
+      resolveGlobalBinPath: args.resolveGlobalBinPath,
+      runInstall: args.runInstall,
+    })
+  }
+
   const sources = await askStandaloneSources(prompt, stdout, stderr)
   const hasProxy = sources.includes('proxy')
   const hasGascity = sources.includes('gascity')
@@ -276,6 +289,64 @@ async function runSingleUserFlow(args) {
     resolveGlobalBinPath: args.resolveGlobalBinPath,
     runInstall: args.runInstall,
     offerClaudeCode: hasProxy,
+  })
+}
+
+/**
+ * Quick-setup variant of the standalone walkthrough. Builds a proxy-only config
+ * with all defaults, writes it without confirmation, and chains into the daemon
+ * install offer. Used when the user accepts defaults at the first standalone
+ * prompt.
+ *
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   writeFile: (path: string, contents: string) => void,
+ *   platform: NodeJS.Platform,
+ *   binPath: string,
+ *   defaultCfgPath: string,
+ *   defaultSink: string,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runSingleUserDefaults(args) {
+  const { stdout, stderr, prompt, writeFile, platform, binPath, defaultCfgPath, defaultSink } = args
+  const provider = PROVIDERS[0]
+  /** @type {CollectivusConfig} */
+  const config = {
+    version: 1,
+    sink: { type: 'file', dir: defaultSink },
+    query: { cache: { enabled: true } },
+    proxy: {
+      listen: SINGLE_PROXY_LISTEN,
+      upstreams: [
+        {
+          name: provider.id,
+          base_url: provider.baseUrl,
+          match: { path_prefix: provider.prefix },
+        },
+      ],
+      redact_headers: DEFAULT_REDACT,
+    },
+  }
+  try {
+    writeFile(defaultCfgPath, JSON.stringify(config, null, 2) + '\n')
+    stdout.write(`✓ Wrote ${defaultCfgPath}\n`)
+  } catch (err) {
+    stderr.write(`error: failed to write config: ${formatError(err)}\n`)
+    return 1
+  }
+  return offerDaemonInstall({
+    configPath: defaultCfgPath, wantDaemon: true,
+    stdout, stderr, prompt, platform, binPath,
+    installGlobal: args.installGlobal,
+    resolveGlobalBinPath: args.resolveGlobalBinPath,
+    runInstall: args.runInstall,
+    offerClaudeCode: true,
   })
 }
 

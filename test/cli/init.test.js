@@ -72,6 +72,7 @@ describe('runInit', function() {
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // accept default sink (resolves to override below)
         cfgPath, // save path
@@ -116,13 +117,47 @@ describe('runInit', function() {
       expect(asked.some(function(q) { return /Proxy listen/i.test(q) })).toBe(false)
     })
 
+    it('accepts standalone defaults to skip the long flow', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'default.json')
+      const sinkDir = path.join(tmpDir, 'sink')
+      const { prompt, asked } = scriptedPrompt([
+        '1', // standalone
+        '', // accept defaults (Y)
+        'n', // skip daemon
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultSinkDir: sinkDir,
+        defaultConfigPath: cfgPath,
+      })
+      expect(code).toBe(0)
+      expect(fs.existsSync(cfgPath)).toBe(true)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.version).toBe(1)
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.proxy.upstreams[0].name).toBe('anthropic')
+      expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
+      // None of the long-flow prompts should have been asked.
+      expect(asked.some(function(q) { return /Enable sources/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Sink directory/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Save config to/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Write this config/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Accept defaults/.test(q) })).toBe(true)
+      // The validator should accept the default config.
+      expect(function() { loadConfig(cfgPath) }).not.toThrow()
+    })
+
     it('produced config round-trips through loadConfig', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', 'n',
+        '1', 'n', '', '', cfgPath, 'y', 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -151,6 +186,7 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         'all', // proxy + gascity + otel
         '', // default sink
         citiesRoot, // scan for gas cities
@@ -191,6 +227,7 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '2', // gascity only
         '', // default sink
         cityDir,
@@ -233,6 +270,7 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '2', // gascity only
         '', // default sink
         cityDir,
@@ -265,6 +303,7 @@ describe('runInit', function() {
       const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // default sink
         '', // accept default save path
@@ -288,7 +327,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', // single / default sources / sink / save / confirm
+        '1', 'n', '', '', cfgPath, 'y', // single / decline defaults / sources / sink / save / confirm
         'y', // install daemon
         'y', // attach Claude Code
       ])
@@ -311,7 +350,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y',
+        '1', 'n', '', '', cfgPath, 'y',
         'y', // install daemon
         'n', // skip Claude Code
       ])
@@ -334,7 +373,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y',
+        '1', 'n', '', '', cfgPath, 'y',
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -355,7 +394,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'n',
+        '1', 'n', '', '', cfgPath, 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -373,7 +412,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', 'y', 'y',
+        '1', 'n', '', '', cfgPath, 'y', 'y', 'y',
       ])
       /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
@@ -409,7 +448,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
         'oops', '7', '', // two bad answers, then accept default (1 = standalone)
-        '', '', cfgPath, 'y', 'n',
+        'n', '', '', cfgPath, 'y', 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -632,6 +671,7 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '2', // reject reuse
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // default sink
         newCfgPath, // save to a new path

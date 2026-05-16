@@ -94,7 +94,10 @@ export async function runInstall(argv, hooks = {}) {
     return 2
   }
   if (!parsed.configPath) {
-    stderr.write(`error: --config is required\n\n${USAGE}\n`)
+    stderr.write(
+      `error: --config is required\n` +
+      `\nhint: run \`collectivus\` with no arguments for interactive setup\n\n${USAGE}\n`
+    )
     return 2
   }
 

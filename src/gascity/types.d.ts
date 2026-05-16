@@ -77,6 +77,26 @@ export interface LifecyclePayload {
 }
 
 /**
+ * Session entry returned by the supervisor session-list endpoint. The daemon
+ * uses the same shape for active-session seeding and explicit historical
+ * backfill discovery.
+ */
+export interface SupervisorSessionInfo {
+  /** Provider-side session id, or the supervisor alias when present. */
+  sessionId: string
+  /** Session template path. */
+  template?: string
+  /** Optional rig label. */
+  rig?: string
+  /** Optional alias label. */
+  alias?: string
+  /** Supervisor session state (e.g. active, stopped). */
+  state?: string
+  /** Best available timestamp for --since filtering during discovery. */
+  lastTimestamp?: string
+}
+
+/**
  * Type a normalizer function takes when registered on the dispatcher. Each
  * invocation produces zero or more rows ready for the parquet writer (bead 3).
  * Returning an empty array is valid and signals "skip this frame" — used by

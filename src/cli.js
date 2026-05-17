@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { readPackageVersion } from './cli/common.js'
+import { readPackageVersion, resolveDefaultConfigPath } from './cli/common.js'
 import { Collector } from './collector.js'
 import { ConfigError, loadConfigAsync, parseConfig, resolveRuntimeSecrets } from './config.js'
 import { resolveStandaloneGatewayId } from './gateway_id.js'
@@ -38,12 +38,12 @@ const PARQUET_PARTITION_DIMENSIONS = ['gateway_id', 'signal']
  */
 
 const USAGE = `Usage:
-  ctvs --config <path|url>                     Run with config file or http(s) URL
+  ctvs [--config <path|url>]                   Run with config file or http(s) URL
+                                               (default: ~/.hyp/collectivus.json)
   ctvs --config-env <env-var>                  Run from config JSON in an environment variable
   ctvs --config-endpoint <url>                 Run from a central-server setup URL
-  ctvs --config <path|url> --print-config
-                                               Load config, print resolved JSON, exit
-  ctvs --config <path|url> --strict            Reject unknown top-level config keys
+  ctvs [--config <path|url>] --print-config    Load config, print resolved JSON, exit
+  ctvs [--config <path|url>] --strict          Reject unknown top-level config keys
   ctvs --help                                  Show this help
   ctvs --version                               Print program version
 
@@ -142,10 +142,8 @@ export function parseArgs(argv) {
     return parseError(`unknown argument: ${arg}`)
   }
 
-  if (configPath === undefined && configEnv === undefined) {
-    return parseError('--config <path|url>, --config-env <env-var>, or --config-endpoint <url> is required')
-  }
-
+  // Defer the "no config source" check to `run()` so it can fall back to
+  // `~/.hyp/collectivus.json` when that file exists.
   /** @type {ConfigResult} */
   const result = { mode: 'config', printConfig, strict }
   if (configPath !== undefined) result.configPath = configPath
@@ -187,6 +185,7 @@ function isHttpUrl(value) {
  *   runInit?: () => Promise<number>,
  *   identityPersistedPath?: string,
  *   pidFilePath?: string,
+ *   homeDir?: string,
  * }} [hooks]
  * @returns {Promise<number>}
  */
@@ -218,6 +217,19 @@ export async function run(argv, env, hooks = {}) {
   if (parsed.mode === 'error') {
     stderr.write(`error: ${parsed.message}\n\n${USAGE}\n`)
     return parsed.exitCode
+  }
+
+  if (parsed.configPath === undefined && parsed.configEnv === undefined) {
+    const fallback = resolveDefaultConfigPath(hooks.homeDir)
+    if (fallback) {
+      parsed.configPath = fallback
+    } else {
+      stderr.write(
+        'error: --config <path|url>, --config-env <env-var>, or --config-endpoint <url> is required\n\n' +
+        USAGE + '\n'
+      )
+      return 2
+    }
   }
 
   /** @type {CollectivusConfig} */

@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { ConfigError, loadConfigAsync as defaultLoadConfig } from '../config.js'
+import { resolveDefaultConfigPath } from './common.js'
 import { rowsToParquet } from '../upload/parquet.js'
 import { iterExchangesWithStreamEvents, readJsonlRows } from '../upload/reader.js'
 import { loadClaudeContextLookup, sessionIdsFromExchanges } from './claude-transcripts.js'
@@ -16,7 +17,7 @@ import { reconstructAssistantMessage } from './stream-reconstruct.js'
  */
 
 const USAGE = `Usage:
-  ctvs export --config <path|url> [--out <dir>] [--date <YYYY-MM-DD>] [--gateway-id <id>] [--signal <s>]
+  ctvs export [--config <path|url>] [--out <dir>] [--date <YYYY-MM-DD>] [--gateway-id <id>] [--signal <s>]
 
 Convert recorded JSONL under the configured sink dir into local Parquet files.
 Runs once and exits. Does not invoke the daily upload pipeline.
@@ -26,7 +27,8 @@ Drains both:
   - <id>/<signal>/<date>.jsonl  → <out>/<id>/<signal>/date=<date>/data.parquet
 
 Options:
-  --config <path|url> Path or http(s) URL to the collectivus JSON config (required)
+  --config <path|url> Path or http(s) URL to the collectivus JSON config
+                      (default: ~/.hyp/collectivus.json)
   --out <dir>         Output directory (default: <sink.dir>/parquet)
   --date <date>       Only export this UTC date (YYYY-MM-DD; default: all). OTLP only.
   --gateway-id <id>   Only export this gateway_id (default: all). OTLP only.
@@ -118,8 +120,13 @@ export async function runExport(argv, hooks = {}) {
     return 2
   }
   if (!parsed.configPath) {
-    stderr.write(`error: --config is required\n\n${USAGE}\n`)
-    return 2
+    const fallback = resolveDefaultConfigPath(hooks.homeDir)
+    if (fallback) {
+      parsed.configPath = fallback
+    } else {
+      stderr.write(`error: --config is required\n\n${USAGE}\n`)
+      return 2
+    }
   }
 
   /** @type {CollectivusConfig} */

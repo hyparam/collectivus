@@ -281,12 +281,41 @@ describe('runExport', function() {
     expect(stderr.value()).toMatch(/sink is required/)
   })
 
-  it('errors on missing --config', async function() {
+  it('errors on missing --config when no default config exists', async function() {
     const stdout = memo()
     const stderr = memo()
-    const code = await runExport([], { stdout, stderr })
-    expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config is required/)
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-export-home-'))
+    try {
+      const code = await runExport([], { stdout, stderr, homeDir: emptyHome })
+      expect(code).toBe(2)
+      expect(stderr.value()).toMatch(/--config is required/)
+    } finally {
+      fs.rmSync(emptyHome, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to ~/.hyp/collectivus.json when --config is omitted', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-export-home-'))
+    try {
+      fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
+      fs.writeFileSync(path.join(home, '.hyp', 'collectivus.json'), '{}')
+      /** @type {string[]} */
+      const loadCalls = []
+      const code = await runExport([], {
+        stdout, stderr,
+        homeDir: home,
+        loadConfig(p) {
+          loadCalls.push(p)
+          return { version: 1, sink: { type: 'file', dir: sinkDir } }
+        },
+      })
+      expect(loadCalls).toEqual([path.join(home, '.hyp', 'collectivus.json')])
+      expect(code).toBe(0)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('drains proxy.jsonl to <out>/proxy/messages.parquet', async function() {

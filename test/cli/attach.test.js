@@ -30,8 +30,11 @@ afterEach(function() {
 })
 
 describe('parseAttachArgs', function() {
-  it('requires one of --config or --port', function() {
-    expect(parseAttachArgs([]).error).toMatch(/one of --config or --port/)
+  it('accepts no args (runAttach resolves the default config)', function() {
+    const r = parseAttachArgs([])
+    expect(r.error).toBeUndefined()
+    expect(r.configPath).toBeUndefined()
+    expect(r.port).toBeUndefined()
   })
 
   it('rejects both --config and --port', function() {
@@ -90,11 +93,47 @@ describe('runAttach', function() {
     expect(stdout.value()).toMatch(/Usage:/)
   })
 
-  it('exits 2 on missing args', async function() {
+  it('exits 2 on missing args when no default config exists', async function() {
     const stderr = memo()
-    const code = await runAttach([], { stdout: memo(), stderr })
-    expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/one of --config or --port/)
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-attach-home-'))
+    try {
+      const code = await runAttach([], { stdout: memo(), stderr, homeDir: emptyHome })
+      expect(code).toBe(2)
+      expect(stderr.value()).toMatch(/one of --config or --port/)
+    } finally {
+      fs.rmSync(emptyHome, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to ~/.hyp/collectivus.json when no args supplied', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-attach-home-'))
+    try {
+      fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
+      fs.writeFileSync(path.join(home, '.hyp', 'collectivus.json'), '{}')
+      /** @type {Array<AttachOptions>} */
+      const calls = []
+      /** @type {string[]} */
+      const loadCalls = []
+      const code = await runAttach([], {
+        stdout, stderr,
+        homeDir: home,
+        version: '2.0.0',
+        settingsPath: path.join(tmpDir, 'settings.json'),
+        loadConfig(p) {
+          loadCalls.push(p)
+          return { version: 1, proxy: { listen: '127.0.0.1:7777', upstreams: [] } }
+        },
+        attach(o) { calls.push(o); return Promise.resolve({ changed: true }) },
+      })
+      expect(code).toBe(0)
+      expect(loadCalls).toEqual([path.join(home, '.hyp', 'collectivus.json')])
+      expect(calls).toHaveLength(1)
+      expect(calls[0].port).toBe(7777)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('--port: attaches with given port', async function() {

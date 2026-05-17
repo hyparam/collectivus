@@ -69,6 +69,24 @@ export function defaultConfigPath(homeDir) {
 }
 
 /**
+ * Return `defaultConfigPath(homeDir)` when that file exists, otherwise
+ * undefined. Used by every CLI that accepts `--config` so callers can omit
+ * the flag when the standard `~/.hyp/collectivus.json` file is present.
+ *
+ * @param {string} [homeDir] Override for tests.
+ * @returns {string | undefined}
+ */
+export function resolveDefaultConfigPath(homeDir) {
+  const p = defaultConfigPath(homeDir)
+  try {
+    if (fs.statSync(p).isFile()) return p
+  } catch {
+    // ignore missing file
+  }
+  return undefined
+}
+
+/**
  * Path to the admin client config: `~/.hyp/collectivus/admin.json`.
  *
  * Stored beside the daemon log directory so a self-hosting operator can keep

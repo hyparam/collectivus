@@ -138,12 +138,53 @@ describe('runInstall', function() {
     expect(stderr.value()).toMatch(/unknown argument/)
   })
 
-  it('exits 2 when --config is missing', async function() {
+  it('exits 2 when --config is missing and no default exists', async function() {
     const stdout = memo()
     const stderr = memo()
-    const code = await runInstall([], { stdout, stderr, binPath: '/usr/local/bin/collectivus' })
-    expect(code).toBe(2)
-    expect(stderr.value()).toMatch(/--config is required/)
+    const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-install-home-'))
+    try {
+      const code = await runInstall([], {
+        stdout, stderr, binPath: '/usr/local/bin/collectivus', homeDir: emptyHome,
+      })
+      expect(code).toBe(2)
+      expect(stderr.value()).toMatch(/--config is required/)
+    } finally {
+      fs.rmSync(emptyHome, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to ~/.hyp/collectivus.json when --config is omitted', async function() {
+    const stdout = memo()
+    const stderr = memo()
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'collectivus-install-home-'))
+    try {
+      fs.mkdirSync(path.join(home, '.hyp'), { recursive: true })
+      fs.writeFileSync(
+        path.join(home, '.hyp', 'collectivus.json'),
+        JSON.stringify({ version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } })
+      )
+      const m = makeMocks({
+        loadConfigImpl() {
+          return { version: 1, otel: { listen: '0.0.0.0:4318' }, sink: { type: 'file', dir: '/tmp/x' } }
+        },
+      })
+      const code = await runInstall([], {
+        stdout, stderr,
+        binPath: '/usr/local/bin/collectivus',
+        homeDir: home,
+        logDir: path.join(tmpDir, 'logs'),
+        plistDir: path.join(tmpDir, 'plist'),
+        settingsPath: path.join(tmpDir, 'settings.json'),
+        installLaunchAgent: m.installLaunchAgent,
+        attach: m.attach,
+        loadConfig: m.loadConfig,
+      })
+      expect(code).toBe(0)
+      expect(m.installCalls).toHaveLength(1)
+      expect(m.installCalls[0].configPath).toBe(path.join(home, '.hyp', 'collectivus.json'))
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true })
+    }
   })
 
   it('refuses to install when invoked via npx', async function() {

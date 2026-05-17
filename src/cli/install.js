@@ -9,6 +9,7 @@ import {
   isNpxBinPath,
   parseListenPort,
   readPackageVersion,
+  resolveDefaultConfigPath,
 } from './common.js'
 import { installDaemon } from '../daemon/index.js'
 
@@ -18,10 +19,11 @@ import { installDaemon } from '../daemon/index.js'
  */
 
 const USAGE = `Usage:
-  ctvs install --config <path|url> [--yes|--no]
+  ctvs install [--config <path|url>] [--yes|--no]
 
 Options:
-  --config <path|url>  Path or http(s) URL to the collectivus JSON config (required)
+  --config <path|url>  Path or http(s) URL to the collectivus JSON config
+                       (default: ~/.hyp/collectivus.json)
   --yes                Attach Claude Code without prompting
   --no                 Skip the Claude Code attach step
   --help, -h           Show this help`
@@ -94,8 +96,16 @@ export async function runInstall(argv, hooks = {}) {
     return 2
   }
   if (!parsed.configPath) {
-    stderr.write(`error: --config is required\n\n${USAGE}\n`)
-    return 2
+    const fallback = resolveDefaultConfigPath(hooks.homeDir)
+    if (fallback) {
+      parsed.configPath = fallback
+    } else {
+      stderr.write(
+        'error: --config is required\n' +
+        `\nhint: run \`collectivus\` with no arguments for interactive setup\n\n${USAGE}\n`
+      )
+      return 2
+    }
   }
 
   if (isNpxBinPath(binPath)) {

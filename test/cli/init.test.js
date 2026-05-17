@@ -72,10 +72,10 @@ describe('runInit', function() {
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // accept default sink (resolves to override below)
         cfgPath, // save path
-        'y', // confirm write
         'n', // skip daemon
       ])
       /** @type {string[]} */
@@ -116,13 +116,47 @@ describe('runInit', function() {
       expect(asked.some(function(q) { return /Proxy listen/i.test(q) })).toBe(false)
     })
 
+    it('accepts standalone defaults to skip the long flow', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'default.json')
+      const sinkDir = path.join(tmpDir, 'sink')
+      const { prompt, asked } = scriptedPrompt([
+        '1', // standalone
+        '', // accept defaults (Y)
+        'n', // skip daemon
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        defaultSinkDir: sinkDir,
+        defaultConfigPath: cfgPath,
+      })
+      expect(code).toBe(0)
+      expect(fs.existsSync(cfgPath)).toBe(true)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.version).toBe(1)
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.proxy.upstreams[0].name).toBe('anthropic')
+      expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
+      // None of the long-flow prompts should have been asked.
+      expect(asked.some(function(q) { return /Enable sources/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Sink directory/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Save config to/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Write this config/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Accept defaults/.test(q) })).toBe(true)
+      // The validator should accept the default config.
+      expect(function() { loadConfig(cfgPath) }).not.toThrow()
+    })
+
     it('produced config round-trips through loadConfig', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', 'n',
+        '1', 'n', '', '', cfgPath, 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -151,6 +185,7 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         'all', // proxy + gascity + otel
         '', // default sink
         citiesRoot, // scan for gas cities
@@ -158,7 +193,6 @@ describe('runInit', function() {
         '', // add no more cities
         '', // default OTLP listen
         cfgPath,
-        'y',
         'n', // skip historical gascity backfill
         'n', // skip daemon
       ])
@@ -191,13 +225,13 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '2', // gascity only
         '', // default sink
         cityDir,
         '', // add discovered city
         '', // add no more cities
         cfgPath,
-        'y',
         'n', // skip historical gascity backfill
         'y', // install daemon
       ])
@@ -233,13 +267,13 @@ describe('runInit', function() {
       )
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '2', // gascity only
         '', // default sink
         cityDir,
         '', // add discovered city
         '', // add no more cities
         cfgPath,
-        'y', // confirm write
         'y', // run historical backfill
         'n', // skip daemon
       ])
@@ -265,10 +299,10 @@ describe('runInit', function() {
       const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
       const { prompt, asked } = scriptedPrompt([
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // default sink
         '', // accept default save path
-        'y', // confirm write
         'n', // skip daemon
       ])
       const code = await runInit({
@@ -288,7 +322,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', // single / default sources / sink / save / confirm
+        '1', 'n', '', '', cfgPath, // single / decline defaults / sources / sink / save
         'y', // install daemon
         'y', // attach Claude Code
       ])
@@ -311,7 +345,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y',
+        '1', 'n', '', '', cfgPath,
         'y', // install daemon
         'n', // skip Claude Code
       ])
@@ -334,7 +368,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y',
+        '1', 'n', '', '', cfgPath,
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -350,30 +384,12 @@ describe('runInit', function() {
       expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
     })
 
-    it('aborts cleanly when the write confirmation is declined', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt } = scriptedPrompt([
-        '1', '', '', cfgPath, 'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(fs.existsSync(cfgPath)).toBe(false)
-      expect(stdout.value()).toMatch(/Aborted/)
-    })
-
     it('bootstraps global install when running via npx and daemon install is selected', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', '', '', cfgPath, 'y', 'y', 'y',
+        '1', 'n', '', '', cfgPath, 'y', 'y',
       ])
       /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
@@ -409,7 +425,7 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
         'oops', '7', '', // two bad answers, then accept default (1 = standalone)
-        '', '', cfgPath, 'y', 'n',
+        'n', '', '', cfgPath, 'n',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -441,7 +457,6 @@ describe('runInit', function() {
         '', // generate identity-issuer secret
         '', // no S3 upload
         cfgPath, // save path
-        'y', // confirm write
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -481,7 +496,6 @@ describe('runInit', function() {
         'too-short', // shorter than 32 chars
         '', // no upload
         cfgPath,
-        'y',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -515,7 +529,6 @@ describe('runInit', function() {
         '', // default signals
         '', // no custom endpoint
         cfgPath,
-        'y',
       ])
       const code = await runInit({
         stdout, stderr, prompt,
@@ -632,10 +645,10 @@ describe('runInit', function() {
       const { prompt } = scriptedPrompt([
         '2', // reject reuse
         '1', // standalone
+        'n', // decline quick-setup defaults
         '', // default source selection (proxy)
         '', // default sink
         newCfgPath, // save to a new path
-        'y', // confirm write
         'n', // skip daemon
       ])
       const code = await runInit({

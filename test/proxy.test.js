@@ -341,6 +341,16 @@ describe('Proxy — forwarding behavior', () => {
     expect(upstream.requests).toHaveLength(0)
   })
 
+  it('returns an ASCII banner on GET / when no upstream matches', async () => {
+    const res = await fetch(`${proxyOrigin(proxy)}/`)
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toMatch(/^text\/plain/)
+    const body = await res.text()
+    expect(body).toContain('npx collectivus')
+    expect(upstream.requests).toHaveLength(0)
+  })
+
   it('does not match a path that only shares the prefix as a substring', async () => {
     const res = await fetch(`${proxyOrigin(proxy)}/v1/messagesfoo`)
 

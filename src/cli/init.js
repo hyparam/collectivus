@@ -206,14 +206,27 @@ export async function runInit(hooks = {}) {
 async function runSingleUserFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
-  stdout.write('\nStandalone mode.\n\n')
+  stdout.write('\nStandalone mode.\n')
+  stdout.write('Defaults: proxy on 127.0.0.1:8787 → Anthropic, sink at\n')
+  stdout.write(`${defaultSink}, config at ${defaultCfgPath}.\n\n`)
+  const acceptDefaults = isYes((await prompt('Accept defaults? [Y/n]: ')).trim())
+  if (acceptDefaults) {
+    return runSingleUserDefaults({
+      stdout, stderr, prompt, writeFile, platform, binPath,
+      defaultCfgPath, defaultSink,
+      installGlobal: args.installGlobal,
+      resolveGlobalBinPath: args.resolveGlobalBinPath,
+      runInstall: args.runInstall,
+    })
+  }
+
   const sources = await askStandaloneSources(prompt, stdout, stderr)
   const hasProxy = sources.includes('proxy')
   const hasGascity = sources.includes('gascity')
   const hasOtel = sources.includes('otel')
 
-  stdout.write('Where should collectivus write recordings? Each signal lands in a\n')
-  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n')
+  stdout.write('\nWhere should collectivus write recordings? Each signal lands in a\n')
+  stdout.write('per-day JSONL file under <sink>/<id>/<signal>/ (e.g. <id>/proxy/<date>.jsonl).\n\n')
   const sinkAns = (await prompt(`Sink directory [${defaultSink}]: `)).trim()
   const sinkDir = sinkAns === '' ? defaultSink : sinkAns
 
@@ -228,7 +241,7 @@ async function runSingleUserFlow(args) {
 
   if (hasProxy) {
     stdout.write('\nProxy capture will listen on 127.0.0.1:8787 and forward LLM\n')
-    stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n')
+    stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n\n')
     const provider = PROVIDERS[0]
     config.proxy = {
       listen: SINGLE_PROXY_LISTEN,
@@ -249,16 +262,18 @@ async function runSingleUserFlow(args) {
   }
 
   if (hasOtel) {
-    stdout.write('\nOTLP receiver\n')
+    stdout.write('\nOTLP receiver listens for OpenTelemetry logs, traces, and metrics\n')
+    stdout.write('over HTTP. Apps with OTLP exporters point to this address.\n\n')
     const listenAns = (await prompt(`OTLP listen [${DEFAULT_OTEL_LISTEN}]: `)).trim()
     config.otel = { listen: listenAns === '' ? DEFAULT_OTEL_LISTEN : listenAns }
   }
 
+  stdout.write('\n')
   const cfgPathAns = (await prompt(`Save config to [${defaultCfgPath}]: `)).trim()
   const cfgPath = cfgPathAns === '' ? defaultCfgPath : path.resolve(cwd, cfgPathAns)
 
-  const written = await confirmAndWrite({ stdout, stderr, prompt, writeFile, config, cfgPath })
-  if (!written) return 0
+  const written = await confirmAndWrite({ stdout, stderr, writeFile, config, cfgPath })
+  if (!written) return 1
   if (gascityCities.length > 0) {
     const backfillCode = await offerGascityBackfill({
       cities: gascityCities,
@@ -276,6 +291,64 @@ async function runSingleUserFlow(args) {
     resolveGlobalBinPath: args.resolveGlobalBinPath,
     runInstall: args.runInstall,
     offerClaudeCode: hasProxy,
+  })
+}
+
+/**
+ * Quick-setup variant of the standalone walkthrough. Builds a proxy-only config
+ * with all defaults, writes it without confirmation, and chains into the daemon
+ * install offer. Used when the user accepts defaults at the first standalone
+ * prompt.
+ *
+ * @param {{
+ *   stdout: { write: (s: string) => void },
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ *   writeFile: (path: string, contents: string) => void,
+ *   platform: NodeJS.Platform,
+ *   binPath: string,
+ *   defaultCfgPath: string,
+ *   defaultSink: string,
+ *   installGlobal?: () => Promise<boolean>,
+ *   resolveGlobalBinPath?: () => Promise<string>,
+ *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
+ * }} args
+ * @returns {Promise<number>}
+ */
+async function runSingleUserDefaults(args) {
+  const { stdout, stderr, prompt, writeFile, platform, binPath, defaultCfgPath, defaultSink } = args
+  const provider = PROVIDERS[0]
+  /** @type {CollectivusConfig} */
+  const config = {
+    version: 1,
+    sink: { type: 'file', dir: defaultSink },
+    query: { cache: { enabled: true } },
+    proxy: {
+      listen: SINGLE_PROXY_LISTEN,
+      upstreams: [
+        {
+          name: provider.id,
+          base_url: provider.baseUrl,
+          match: { path_prefix: provider.prefix },
+        },
+      ],
+      redact_headers: DEFAULT_REDACT,
+    },
+  }
+  try {
+    writeFile(defaultCfgPath, JSON.stringify(config, null, 2) + '\n')
+    stdout.write(`✓ Wrote ${defaultCfgPath}\n`)
+  } catch (err) {
+    stderr.write(`error: failed to write config: ${formatError(err)}\n`)
+    return 1
+  }
+  return offerDaemonInstall({
+    configPath: defaultCfgPath, wantDaemon: true,
+    stdout, stderr, prompt, platform, binPath,
+    installGlobal: args.installGlobal,
+    resolveGlobalBinPath: args.resolveGlobalBinPath,
+    runInstall: args.runInstall,
+    offerClaudeCode: true,
   })
 }
 
@@ -300,7 +373,7 @@ async function offerGascityBackfill(args) {
   stdout.write('  Yes -> asks each supervisor for all recoverable sessions and replays transcripts.\n')
   stdout.write('         This can take a while for large cities.\n')
   stdout.write('  No  -> starts capturing new and active sessions only; run\n')
-  stdout.write('         `ctvs gascity backfill <city> --all` later.\n')
+  stdout.write('         `ctvs gascity backfill <city> --all` later.\n\n')
   const ans = (await prompt('Backfill all recoverable gascity sessions? [y/N]: ')).trim()
   if (!/^y(es)?$/i.test(ans)) return 0
 
@@ -323,7 +396,7 @@ async function offerGascityBackfill(args) {
  * @returns {Promise<StandaloneSource[]>}
  */
 async function askStandaloneSources(prompt, stdout, stderr) {
-  stdout.write('Which capture sources should this Standalone config enable?\n\n')
+  stdout.write('\nWhich capture sources should this Standalone config enable?\n\n')
   stdout.write('  1) Proxy\n')
   stdout.write('     LLM API traffic through a localhost proxy.\n\n')
   stdout.write('  2) Gas city supervisor\n')
@@ -563,13 +636,11 @@ function dedupeGascityCities(entries) {
 }
 
 /**
- * Render the config preview, ask the user to confirm, and write the file.
- * Returns true if the file was written, false if the user aborted.
+ * Write the config file. Returns true on success, false on error.
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
  *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
  *   writeFile: (path: string, contents: string) => void,
  *   config: CollectivusConfig,
  *   cfgPath: string,
@@ -577,20 +648,11 @@ function dedupeGascityCities(entries) {
  * @returns {Promise<boolean>}
  */
 async function confirmAndWrite(args) {
-  const { stdout, stderr, prompt, writeFile, config, cfgPath } = args
+  const { stdout, stderr, writeFile, config, cfgPath } = args
   const json = JSON.stringify(config, null, 2)
-  stdout.write('\n--- ' + cfgPath + ' ---\n')
-  stdout.write(json + '\n')
-  stdout.write('-'.repeat(cfgPath.length + 8) + '\n\n')
-
-  const confirmAns = (await prompt(`Write this config to ${cfgPath}? [Y/n]: `)).trim()
-  if (!isYes(confirmAns)) {
-    stdout.write('Aborted. No changes made.\n')
-    return false
-  }
   try {
     writeFile(cfgPath, json + '\n')
-    stdout.write(`✓ Wrote ${cfgPath}\n`)
+    stdout.write(`\n✓ Wrote ${cfgPath}\n`)
     if (config.upload) {
       stdout.write('ⓘ Upload uses AWS env credentials or an ECS task role.\n')
       stdout.write('  Daemon will fail fast at start if no credential source is available.\n')
@@ -731,7 +793,7 @@ async function offerDaemonInstall(args) {
     stdout.write('        if it crashes.\n')
     stdout.write('        Logs go to ~/.hyp/collectivus/. Reversible with `ctvs uninstall`.\n')
     stdout.write('  No  → only runs while you launch it manually with\n')
-    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n`)
+    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n\n`)
     const dAns = (await prompt('Install as background daemon? [Y/n]: ')).trim()
     if (isYes(dAns)) {
       let installFlag
@@ -741,7 +803,7 @@ async function offerDaemonInstall(args) {
         stdout.write('        ~/.claude/settings.json so the `claude` CLI uses the proxy.\n')
         stdout.write('        Reversible with `ctvs detach`.\n')
         stdout.write('  No  → leaves Claude Code untouched; attach later with\n')
-        stdout.write('        `ctvs attach`.\n')
+        stdout.write('        `ctvs attach`.\n\n')
         const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
         installFlag = isYes(cAns) ? '--yes' : '--no'
       } else {
@@ -957,19 +1019,18 @@ function formatError(err) {
 async function runServerFlow(args) {
   const { stdout, stderr, prompt, cwd, defaultCfgPath, writeFile } = args
 
-  stdout.write('\nCentral server\n')
-  stdout.write('──────────────\n')
+  stdout.write('\nCentral server mode.\n')
   stdout.write('This binary will run the central-server HTTP listener that\n')
   stdout.write('vendors per-gateway configs and accepts ingest from gateways.\n')
 
   stdout.write('\nWhere should the control plane listen? Gateways will reach this\n')
-  stdout.write('address; 0.0.0.0 listens on all interfaces.\n')
+  stdout.write('address; 0.0.0.0 listens on all interfaces.\n\n')
   const listenAns = (await prompt(`Central server listen [${DEFAULT_CONTROL_PLANE_LISTEN}]: `)).trim()
   const controlPlaneListen = listenAns === '' ? DEFAULT_CONTROL_PLANE_LISTEN : listenAns
 
   const defaultPublicUrl = publicUrlDefault(controlPlaneListen)
   stdout.write('\nWhat URL will gateways use to reach this server? For ECS/Docker,\n')
-  stdout.write('use the load balancer or service URL, not 0.0.0.0.\n')
+  stdout.write('use the load balancer or service URL, not 0.0.0.0.\n\n')
   const publicUrl = await askUrlWithDefault({
     prompt,
     stderr,
@@ -983,7 +1044,7 @@ async function runServerFlow(args) {
   const defaultDataDir = defaultServerDataDir()
   stdout.write('\nWhere should server-side state live? Per-gateway config files land\n')
   stdout.write('under <data_dir>/configs/ and the bootstrap-token store defaults to\n')
-  stdout.write('<data_dir>/bootstrap.json.\n')
+  stdout.write('<data_dir>/bootstrap.json.\n\n')
   const dataDirAns = (await prompt(`Server data directory [${defaultDataDir}]: `)).trim()
   const dataDir = dataDirAns === '' ? defaultDataDir : dataDirAns
 
@@ -992,7 +1053,7 @@ async function runServerFlow(args) {
   const generatedSecret = crypto.randomBytes(IDENTITY_SECRET_BYTES).toString('hex')
   stdout.write('\nThe server signs gateway JWTs with an HMAC secret. Pressing Enter\n')
   stdout.write('uses a freshly generated 32-byte random hex value (recommended); paste\n')
-  stdout.write('an existing secret only if you are migrating from another host.\n')
+  stdout.write('an existing secret only if you are migrating from another host.\n\n')
   const secretAns = (await prompt('Identity-issuer secret []: ')).trim()
   /** @type {string} */
   let secret
@@ -1028,8 +1089,9 @@ async function runServerFlow(args) {
   const upload = await askUpload(prompt, stdout, stderr)
   if (upload) config.upload = upload
 
+  stdout.write('\n')
   const cfgPath = await askSavePath(prompt, cwd, defaultCfgPath)
-  if (!await confirmAndWrite({ stdout, stderr, prompt, cfgPath, config, writeFile })) return 0
+  if (!await confirmAndWrite({ stdout, stderr, cfgPath, config, writeFile })) return 1
 
   if (secretAns === '') {
     stdout.write('\nGenerated identity-issuer secret was written to the config file.\n')

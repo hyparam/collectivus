@@ -82,6 +82,8 @@ export interface ExportParseResult {
 export interface ExportHooks {
   stdout?: { write(chunk: string): unknown }
   stderr?: { write(chunk: string): unknown }
+  /** Override for `os.homedir()` when resolving the default config path. */
+  homeDir?: string
   loadConfig?: (pathOrUrl: string) => CollectivusConfig | Promise<CollectivusConfig>
 }
 
@@ -273,6 +275,8 @@ export interface AttachHooks {
   stdout?: WriteStream
   stderr?: WriteStream
   version?: string
+  /** Override for `os.homedir()` when resolving the default config path. */
+  homeDir?: string
   /** CLI path written into managed Claude Code hooks. */
   binPath?: string
   /** Override for `~/.claude/settings.json`. */
@@ -368,6 +372,8 @@ export interface InstallHooks {
   binPath?: string
   /** Override for the version recorded in the marker. */
   version?: string
+  /** Override for `os.homedir()` when resolving the default config path. */
+  homeDir?: string
   /** Override for `~/.hyp/collectivus`. */
   logDir?: string
   /** Forwarded to installDaemon (`~/Library/LaunchAgents` override). */

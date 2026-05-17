@@ -307,6 +307,14 @@ describe('OTLP endpoints', () => {
     expect(res.status).toBe(405)
   })
 
+  it('returns an ASCII banner on GET /', async () => {
+    const res = await fetch(`${baseUrl}/`)
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toMatch(/^text\/plain/)
+    const body = await res.text()
+    expect(body).toContain('npx collectivus')
+  })
+
   it('returns 404 for unknown routes', async () => {
     const res = await fetch(`${baseUrl}/v1/unknown`, { method: 'POST' })
     expect(res.status).toBe(404)

@@ -91,12 +91,10 @@ function defaultSinkDir(homeDir) {
 }
 
 /**
- * Run the no-arg interactive walkthrough. The top-level question chooses
- * between standalone local capture and a central server. Each branch asks just
- * the questions it needs, builds a v1
- * `CollectivusConfig`, writes it to disk, and (for proxy setups on
- * darwin/linux) chains into `runInstall` to install the daemon and optionally
- * attach Claude Code.
+ * Run the no-arg interactive walkthrough. The default onboarding path builds a
+ * Standalone local capture config, writes it to disk, and (on darwin/linux)
+ * chains into `runInstall` to install the daemon and attach Claude Code when
+ * Claude Code capture was selected.
  *
  * If a config already exists at the default save path, summarizes it first and
  * offers the user the choice to reuse it (skipping straight to the daemon
@@ -145,37 +143,14 @@ export async function runInit(hooks = {}) {
     }
   }
 
-  stdout.write('\nHow will you use collectivus?\n\n')
-  stdout.write('  1) Standalone\n')
-  stdout.write('     Run on this machine only. The proxy listens on localhost and\n')
-  stdout.write('     recordings stay on disk here. Best for personal dev work.\n\n')
-  stdout.write('  2) Central server\n')
-  stdout.write('     Vendors per-gateway configs over /v1/config, accepts ingest from\n')
-  stdout.write('     gateways, and issues JWTs from one-shot bootstrap tokens.\n\n')
-
-  /** @type {'single' | 'server'} */
-  let kind
-  for (;;) {
-    const raw = (await prompt('Choose [1]: ')).trim()
-    const c = raw === '' ? '1' : raw
-    if (c === '1') { kind = 'single'; break }
-    if (c === '2') { kind = 'server'; break }
-    stderr.write(`error: please choose 1 or 2 (got ${JSON.stringify(raw)})\n`)
-  }
-
-  if (kind === 'single') {
-    return runSingleUserFlow({
-      stdout, stderr, prompt, writeFile, platform, binPath, cwd,
-      defaultCfgPath, defaultSink,
-      installGlobal: hooks.installGlobal,
-      resolveGlobalBinPath: hooks.resolveGlobalBinPath,
-      runInstall: hooks.runInstall,
-      runGascityBackfill: hooks.runGascityBackfill,
-    })
-  }
-  return runServerFlow({
-    stdout, stderr, prompt, writeFile, cwd,
-    defaultCfgPath,
+  return runSingleUserFlow({
+    stdout, stderr, prompt, writeFile, platform, binPath, cwd,
+    defaultCfgPath, defaultSink,
+    installGlobal: hooks.installGlobal,
+    resolveGlobalBinPath: hooks.resolveGlobalBinPath,
+    runInstall: hooks.runInstall,
+    runGascityBackfill: hooks.runGascityBackfill,
+    hasGcBinary: hooks.hasGcBinary,
   })
 }
 
@@ -200,6 +175,7 @@ export async function runInit(hooks = {}) {
  *   resolveGlobalBinPath?: () => Promise<string>,
  *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
  *   runGascityBackfill?: (args: string[], hooks?: { stdout?: { write: (s: string) => void }, stderr?: { write: (s: string) => void } }) => Promise<number>,
+ *   hasGcBinary?: () => boolean | Promise<boolean>,
  * }} args
  * @returns {Promise<number>}
  */
@@ -207,21 +183,9 @@ async function runSingleUserFlow(args) {
   const { stdout, stderr, prompt, writeFile, platform, binPath, cwd, defaultCfgPath, defaultSink } = args
 
   stdout.write('\nStandalone mode.\n')
-  stdout.write('Defaults: proxy on 127.0.0.1:8787 → Anthropic, sink at\n')
-  stdout.write(`${defaultSink}, config at ${defaultCfgPath}.\n\n`)
-  const acceptDefaults = isYes((await prompt('Accept defaults? [Y/n]: ')).trim())
-  if (acceptDefaults) {
-    return runSingleUserDefaults({
-      stdout, stderr, prompt, writeFile, platform, binPath,
-      defaultCfgPath, defaultSink,
-      installGlobal: args.installGlobal,
-      resolveGlobalBinPath: args.resolveGlobalBinPath,
-      runInstall: args.runInstall,
-    })
-  }
-
-  const sources = await askStandaloneSources(prompt, stdout, stderr)
-  const hasProxy = sources.includes('proxy')
+  const hasGc = await detectGcBinary(args.hasGcBinary)
+  const sources = await askStandaloneSources(prompt, stdout, stderr, hasGc)
+  const hasClaudeCode = sources.includes('proxy')
   const hasGascity = sources.includes('gascity')
   const hasOtel = sources.includes('otel')
 
@@ -239,7 +203,7 @@ async function runSingleUserFlow(args) {
   /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
   let gascityCities = []
 
-  if (hasProxy) {
+  if (hasClaudeCode) {
     stdout.write('\nProxy capture will listen on 127.0.0.1:8787 and forward LLM\n')
     stdout.write('traffic to Anthropic. Edit the config later to switch upstreams.\n\n')
     const provider = PROVIDERS[0]
@@ -286,69 +250,11 @@ async function runSingleUserFlow(args) {
 
   return offerDaemonInstall({
     configPath: cfgPath, wantDaemon: true,
-    stdout, stderr, prompt, platform, binPath,
+    stdout, stderr, platform, binPath,
     installGlobal: args.installGlobal,
     resolveGlobalBinPath: args.resolveGlobalBinPath,
     runInstall: args.runInstall,
-    offerClaudeCode: hasProxy,
-  })
-}
-
-/**
- * Quick-setup variant of the standalone walkthrough. Builds a proxy-only config
- * with all defaults, writes it without confirmation, and chains into the daemon
- * install offer. Used when the user accepts defaults at the first standalone
- * prompt.
- *
- * @param {{
- *   stdout: { write: (s: string) => void },
- *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
- *   writeFile: (path: string, contents: string) => void,
- *   platform: NodeJS.Platform,
- *   binPath: string,
- *   defaultCfgPath: string,
- *   defaultSink: string,
- *   installGlobal?: () => Promise<boolean>,
- *   resolveGlobalBinPath?: () => Promise<string>,
- *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
- * }} args
- * @returns {Promise<number>}
- */
-async function runSingleUserDefaults(args) {
-  const { stdout, stderr, prompt, writeFile, platform, binPath, defaultCfgPath, defaultSink } = args
-  const provider = PROVIDERS[0]
-  /** @type {CollectivusConfig} */
-  const config = {
-    version: 1,
-    sink: { type: 'file', dir: defaultSink },
-    query: { cache: { enabled: true } },
-    proxy: {
-      listen: SINGLE_PROXY_LISTEN,
-      upstreams: [
-        {
-          name: provider.id,
-          base_url: provider.baseUrl,
-          match: { path_prefix: provider.prefix },
-        },
-      ],
-      redact_headers: DEFAULT_REDACT,
-    },
-  }
-  try {
-    writeFile(defaultCfgPath, JSON.stringify(config, null, 2) + '\n')
-    stdout.write(`✓ Wrote ${defaultCfgPath}\n`)
-  } catch (err) {
-    stderr.write(`error: failed to write config: ${formatError(err)}\n`)
-    return 1
-  }
-  return offerDaemonInstall({
-    configPath: defaultCfgPath, wantDaemon: true,
-    stdout, stderr, prompt, platform, binPath,
-    installGlobal: args.installGlobal,
-    resolveGlobalBinPath: args.resolveGlobalBinPath,
-    runInstall: args.runInstall,
-    offerClaudeCode: true,
+    offerClaudeCode: hasClaudeCode,
   })
 }
 
@@ -390,36 +296,79 @@ async function offerGascityBackfill(args) {
  */
 
 /**
+ * @typedef {object} StandaloneSourceOption
+ * @property {StandaloneSource} id
+ * @property {string} number
+ * @property {string} label
+ * @property {string} description
+ * @property {readonly string[]} aliases
+ */
+
+/**
  * @param {(q: string) => Promise<string>} prompt
  * @param {{ write: (s: string) => void }} stdout
  * @param {{ write: (s: string) => void }} stderr
+ * @param {boolean} hasGcBinary
  * @returns {Promise<StandaloneSource[]>}
  */
-async function askStandaloneSources(prompt, stdout, stderr) {
-  stdout.write('\nWhich capture sources should this Standalone config enable?\n\n')
-  stdout.write('  1) Proxy\n')
-  stdout.write('     LLM API traffic through a localhost proxy.\n\n')
-  stdout.write('  2) Gas city supervisor\n')
-  stdout.write('     Agent-attributed transcripts from a gas city supervisor.\n\n')
-  stdout.write('  3) OTLP receiver\n')
-  stdout.write('     OpenTelemetry logs, traces, and metrics over HTTP.\n\n')
-  stdout.write('  4) All\n\n')
+async function askStandaloneSources(prompt, stdout, stderr, hasGcBinary) {
+  const options = standaloneSourceOptions(hasGcBinary)
+  stdout.write('\nWhat do you want to collect?\n\n')
+  for (const option of options) {
+    stdout.write(`  ${option.number}) ${option.label}\n`)
+    stdout.write(`     ${option.description}\n\n`)
+  }
 
   for (;;) {
-    const raw = (await prompt('Enable sources [1]: ')).trim()
-    const parsed = parseStandaloneSources(raw)
+    const raw = (await prompt('Collect [all]: ')).trim()
+    const parsed = parseStandaloneSources(raw, options)
     if (parsed) return parsed
-    stderr.write('error: choose 1, 2, 3, 4, all, or a comma-separated list such as 1,2\n')
+    stderr.write(`error: choose all or a comma-separated subset of: ${options.map((o) => o.number).join(', ')}\n`)
   }
 }
 
 /**
+ * @param {boolean} hasGcBinary
+ * @returns {StandaloneSourceOption[]}
+ */
+function standaloneSourceOptions(hasGcBinary) {
+  /** @type {StandaloneSourceOption[]} */
+  const options = [
+    {
+      id: 'otel',
+      number: '1',
+      label: 'OTEL',
+      description: 'OpenTelemetry logs, traces, and metrics over HTTP.',
+      aliases: ['otel', 'otlp', 'opentelemetry'],
+    },
+    {
+      id: 'proxy',
+      number: '2',
+      label: 'Claude Code',
+      description: 'Claude Code traffic through a localhost proxy.',
+      aliases: ['claude', 'claudecode', 'claude-code', 'proxy', 'llm'],
+    },
+  ]
+  if (hasGcBinary) {
+    options.push({
+      id: 'gascity',
+      number: '3',
+      label: 'Gascity',
+      description: 'Agent-attributed transcripts from a gascity supervisor.',
+      aliases: ['gascity', 'gas', 'gc', 'supervisor'],
+    })
+  }
+  return options
+}
+
+/**
  * @param {string} raw
+ * @param {StandaloneSourceOption[]} options
  * @returns {StandaloneSource[] | undefined}
  */
-function parseStandaloneSources(raw) {
+function parseStandaloneSources(raw, options) {
   const input = raw.trim()
-  if (input === '') return ['proxy']
+  if (input === '' || input.toLowerCase() === 'all') return options.map((option) => option.id)
 
   let chunks = input.split(',').map((s) => s.trim()).filter(Boolean)
   if (chunks.length === 1 && /^[0-9\s]+$/.test(input)) {
@@ -430,22 +379,46 @@ function parseStandaloneSources(raw) {
   const out = new Set()
   for (const chunk of chunks) {
     const normalized = chunk.toLowerCase().replace(/[\s_-]+/g, '')
-    if (normalized === '4' || normalized === 'all') return ['proxy', 'gascity', 'otel']
-    if (normalized === '1' || normalized === 'proxy' || normalized === 'llm') {
-      out.add('proxy')
-      continue
-    }
-    if (normalized === '2' || normalized === 'gascity' || normalized === 'gas' || normalized === 'gc' || normalized === 'supervisor') {
-      out.add('gascity')
-      continue
-    }
-    if (normalized === '3' || normalized === 'otel' || normalized === 'otlp') {
-      out.add('otel')
-      continue
-    }
-    return undefined
+    if (normalized === 'all') return options.map((option) => option.id)
+    const option = options.find((o) => {
+      return normalized === o.number || o.aliases.some((alias) => normalized === alias.replace(/[\s_-]+/g, ''))
+    })
+    if (!option) return undefined
+    out.add(option.id)
   }
   return out.size > 0 ? Array.from(out) : undefined
+}
+
+/**
+ * @param {(() => boolean | Promise<boolean>) | undefined} hasGcBinary
+ * @returns {Promise<boolean>}
+ */
+async function detectGcBinary(hasGcBinary) {
+  if (hasGcBinary) return Boolean(await hasGcBinary())
+  return commandExistsOnPath('gc')
+}
+
+/**
+ * @param {string} name
+ * @returns {boolean}
+ */
+function commandExistsOnPath(name) {
+  const pathValue = process.env.PATH ?? ''
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';')
+    : ['']
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue
+    for (const ext of extensions) {
+      try {
+        fs.accessSync(path.join(dir, `${name}${ext}`), fs.constants.X_OK)
+        return true
+      } catch {
+        // Try the next PATH entry.
+      }
+    }
+  }
+  return false
 }
 
 /**
@@ -761,8 +734,8 @@ async function askUpload(prompt, stdout, stderr) {
 }
 
 /**
- * Prompt for daemon install + optional Claude Code attach when the platform
- * supports it and the config has a long-running Standalone listener.
+ * Install the background daemon when the platform supports it and the config
+ * has a long-running Standalone listener.
  * Otherwise prints next-step hints.
  *
  * When invoked through npx, bootstraps the daemon install through the global
@@ -773,7 +746,6 @@ async function askUpload(prompt, stdout, stderr) {
  *   wantDaemon: boolean,
  *   stdout: { write: (s: string) => void },
  *   stderr: { write: (s: string) => void },
- *   prompt: (q: string) => Promise<string>,
  *   platform: NodeJS.Platform,
  *   binPath: string,
  *   installGlobal?: () => Promise<boolean>,
@@ -784,59 +756,38 @@ async function askUpload(prompt, stdout, stderr) {
  * @returns {Promise<number>}
  */
 async function offerDaemonInstall(args) {
-  const { configPath, wantDaemon, stdout, stderr, prompt, platform, binPath, offerClaudeCode } = args
+  const { configPath, wantDaemon, stdout, stderr, platform, binPath, offerClaudeCode } = args
   const viaNpx = isNpxBinPath(binPath)
   if (wantDaemon && (platform === 'darwin' || platform === 'linux')) {
     const daemonKind = platform === 'darwin' ? 'launchd LaunchAgent' : 'systemd user unit'
-    stdout.write('\nRun ctvs as a background daemon?\n')
-    stdout.write(`  Yes → installs a ${daemonKind} that starts at login and respawns\n`)
-    stdout.write('        if it crashes.\n')
-    stdout.write('        Logs go to ~/.hyp/collectivus/. Reversible with `ctvs uninstall`.\n')
-    stdout.write('  No  → only runs while you launch it manually with\n')
-    stdout.write(`        \`${viaNpx ? 'npx collectivus' : 'ctvs'} --config <path>\` in a terminal.\n\n`)
-    const dAns = (await prompt('Install as background daemon? [Y/n]: ')).trim()
-    if (isYes(dAns)) {
-      let installFlag
-      if (offerClaudeCode) {
-        stdout.write('\nConfigure Claude Code to route through this proxy?\n')
-        stdout.write('  Yes → adds ANTHROPIC_BASE_URL=http://127.0.0.1:<port> to\n')
-        stdout.write('        ~/.claude/settings.json so the `claude` CLI uses the proxy.\n')
-        stdout.write('        Reversible with `ctvs detach`.\n')
-        stdout.write('  No  → leaves Claude Code untouched; attach later with\n')
-        stdout.write('        `ctvs attach`.\n\n')
-        const cAns = (await prompt('Configure Claude Code? [Y/n]: ')).trim()
-        installFlag = isYes(cAns) ? '--yes' : '--no'
-      } else {
-        // Non-proxy configs do not need client attach; install the daemon only.
-        installFlag = '--no'
+    stdout.write(`\nInstalling ctvs as a background daemon (${daemonKind})...\n`)
+    let installBinPath = binPath
+    if (viaNpx) {
+      const installGlobal = args.installGlobal ?? installGlobalCollectivus
+      const resolveGlobalBinPath = args.resolveGlobalBinPath ?? resolveGlobalCollectivusBinPath
+      stdout.write('Installing collectivus globally with npm...\n')
+      let installed
+      try {
+        installed = await installGlobal()
+      } catch (err) {
+        stderr.write(`error: failed to install collectivus globally: ${formatError(err)}\n`)
+        return 1
       }
-      let installBinPath = binPath
-      if (viaNpx) {
-        const installGlobal = args.installGlobal ?? installGlobalCollectivus
-        const resolveGlobalBinPath = args.resolveGlobalBinPath ?? resolveGlobalCollectivusBinPath
-        stdout.write('\nInstalling collectivus globally with npm...\n')
-        let installed
-        try {
-          installed = await installGlobal()
-        } catch (err) {
-          stderr.write(`error: failed to install collectivus globally: ${formatError(err)}\n`)
-          return 1
-        }
-        if (!installed) {
-          stderr.write('error: npm install -g collectivus failed\n')
-          return 1
-        }
-        try {
-          installBinPath = await resolveGlobalBinPath()
-        } catch (err) {
-          stderr.write(`error: failed to locate globally installed collectivus: ${formatError(err)}\n`)
-          return 1
-        }
+      if (!installed) {
+        stderr.write('error: npm install -g collectivus failed\n')
+        return 1
       }
-      const installArgs = ['--config', configPath, installFlag]
-      const runInstallFn = args.runInstall ?? await loadRunInstall()
-      return runInstallFn(installArgs, { stdout, stderr, binPath: installBinPath })
+      try {
+        installBinPath = await resolveGlobalBinPath()
+      } catch (err) {
+        stderr.write(`error: failed to locate globally installed collectivus: ${formatError(err)}\n`)
+        return 1
+      }
     }
+    const installFlag = offerClaudeCode ? '--yes' : '--no'
+    const installArgs = ['--config', configPath, installFlag]
+    const runInstallFn = args.runInstall ?? await loadRunInstall()
+    return runInstallFn(installArgs, { stdout, stderr, binPath: installBinPath })
   }
 
   stdout.write('\nNext steps:\n')
@@ -885,7 +836,7 @@ function useExistingConfig(args) {
   )
   return offerDaemonInstall({
     configPath: args.configPath, wantDaemon,
-    stdout: args.stdout, stderr: args.stderr, prompt: args.prompt, platform: args.platform,
+    stdout: args.stdout, stderr: args.stderr, platform: args.platform,
     binPath: args.binPath,
     installGlobal: args.installGlobal,
     resolveGlobalBinPath: args.resolveGlobalBinPath,
@@ -1210,26 +1161,34 @@ async function askSavePath(prompt, cwd, defaultPath) {
  * CLI subcommand entry point for `ctvs init [...args]`.
  *
  * Routing:
+ * - `ctvs init server` → run the Central server walkthrough.
  * - `ctvs init <preset>` → dispatches to the named preset (e.g. gascity).
  * - `ctvs init` (no args) → runs the existing interactive walkthrough via `runInit`.
  * - `ctvs init --help` → prints subcommand usage including available presets.
  *
  * @param {string[]} argv
- * @param {object} [hooks]
+ * @param {InitHooks} [hooks]
  * @returns {Promise<number>}
  */
 export async function runInitSubcommand(argv, hooks = {}) {
-  const stdout = /** @type {{ write: (s: string) => void }} */ (
-    /** @type {any} */ (hooks).stdout ?? process.stdout
-  )
-  const stderr = /** @type {{ write: (s: string) => void }} */ (
-    /** @type {any} */ (hooks).stderr ?? process.stderr
-  )
+  const stdout = hooks.stdout ?? process.stdout
+  const stderr = hooks.stderr ?? process.stderr
   const first = argv[0]
 
   if (first === '--help' || first === '-h') {
     stdout.write(initSubcommandUsage() + '\n')
     return 0
+  }
+
+  if (first === 'server') {
+    return runServerFlow({
+      stdout,
+      stderr,
+      prompt: hooks.prompt ?? defaultPrompt,
+      cwd: hooks.cwd ?? process.cwd(),
+      defaultCfgPath: hooks.defaultConfigPath ?? defaultConfigPath(),
+      writeFile: hooks.writeFile ?? defaultWriteFile,
+    })
   }
 
   if (first && !first.startsWith('-')) {
@@ -1257,6 +1216,7 @@ function initSubcommandUsage() {
     .join('\n')
   return `Usage:
   ctvs init                 Interactive Collectivus config walkthrough
+  ctvs init server          Central server config walkthrough
   ctvs init <preset>        Run a named preset scaffolder
   ctvs init --help          Show this help
 

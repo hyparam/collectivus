@@ -355,6 +355,8 @@ export interface InitHooks {
   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>
   /** Override `ctvs gascity backfill` chain entry. */
   runGascityBackfill?: (args: string[], hooks?: { stdout?: WriteStream, stderr?: WriteStream }) => Promise<number>
+  /** Override PATH lookup for the gc binary in tests. */
+  hasGcBinary?: () => boolean | Promise<boolean>
   /** Override `process.platform`. */
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { runInit } from '../../src/cli/init.js'
+import { runInit, runInitSubcommand } from '../../src/cli/init.js'
 import { loadConfig } from '../../src/config.js'
 
 /**
@@ -71,21 +71,19 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
       const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        '', // default source selection (proxy)
-        '', // accept default sink (resolves to override below)
+        '2', // Claude Code
+        '', // accept default sink
         cfgPath, // save path
-        'n', // skip daemon
       ])
       /** @type {string[]} */
       const installCalls = []
       const code = await runInit({
         stdout, stderr, prompt,
-        platform: 'darwin',
+        platform: 'win32',
         cwd: tmpDir,
         defaultSinkDir: sinkDir,
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
         runInstall(args) { installCalls.push(args.join(' ')); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
@@ -109,68 +107,17 @@ describe('runInit', function() {
       expect(written.otel).toBeUndefined()
       expect(written.upload).toBeUndefined()
       expect(stdout.value()).toMatch(/Wrote/)
-      // Standalone does not ask about provider, OTLP, upload, or proxy listen.
+      // Standalone does not ask about mode, provider, OTLP, upload, or proxy listen.
+      expect(asked.some(function(q) { return /How will you use collectivus/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /OTLP/i.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Upload daily/i.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Proxy listen/i.test(q) })).toBe(false)
-    })
-
-    it('accepts standalone defaults to skip the long flow', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'default.json')
-      const sinkDir = path.join(tmpDir, 'sink')
-      const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        '', // accept defaults (Y)
-        'n', // skip daemon
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultSinkDir: sinkDir,
-        defaultConfigPath: cfgPath,
-      })
-      expect(code).toBe(0)
-      expect(fs.existsSync(cfgPath)).toBe(true)
-      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      expect(written.version).toBe(1)
-      expect(written.proxy.listen).toBe('127.0.0.1:8787')
-      expect(written.proxy.upstreams[0].name).toBe('anthropic')
-      expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
-      // None of the long-flow prompts should have been asked.
-      expect(asked.some(function(q) { return /Enable sources/.test(q) })).toBe(false)
-      expect(asked.some(function(q) { return /Sink directory/.test(q) })).toBe(false)
-      expect(asked.some(function(q) { return /Save config to/.test(q) })).toBe(false)
-      expect(asked.some(function(q) { return /Write this config/.test(q) })).toBe(false)
-      expect(asked.some(function(q) { return /Accept defaults/.test(q) })).toBe(true)
-      // The validator should accept the default config.
+      expect(asked).toContain('Collect [all]: ')
       expect(function() { loadConfig(cfgPath) }).not.toThrow()
     })
 
-    it('produced config round-trips through loadConfig', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'collectivus.json')
-      const sinkDir = path.join(tmpDir, 'sink')
-      const { prompt } = scriptedPrompt([
-        '1', 'n', '', '', cfgPath, 'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultSinkDir: sinkDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      // The validator should accept the file the walkthrough wrote.
-      expect(function() { loadConfig(cfgPath) }).not.toThrow()
-    })
-
-    it('supports selecting all capture sources and auto-adds discovered gas cities', async function() {
+    it('defaults to all available sources when gc is detected', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
@@ -184,9 +131,7 @@ describe('runInit', function() {
         'utf8'
       )
       const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        'all', // proxy + gascity + otel
+        '', // all available: OTEL + Claude Code + Gascity
         '', // default sink
         citiesRoot, // scan for gas cities
         '', // add discovered city
@@ -194,22 +139,90 @@ describe('runInit', function() {
         '', // default OTLP listen
         cfgPath,
         'n', // skip historical gascity backfill
-        'n', // skip daemon
       ])
+      /** @type {string[][]} */
+      const installCalls = []
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultSinkDir: sinkDir,
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return true },
+        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
       const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
       expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
       expect(written.otel).toEqual({ listen: '127.0.0.1:4318' })
-      expect(asked).toContain('Enable sources [1]: ')
-      expect(stdout.value()).toMatch(/Discovered gas city supervisors/)
+      expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
+      expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
+      expect(asked).toContain('Collect [all]: ')
+      expect(asked.some(function(q) { return /Install as background daemon/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
+      expect(stdout.value()).toMatch(/3\) Gascity/)
+    })
+
+    it('defaults to OTEL and Claude Code when gc is not detected', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'collectivus.json')
+      const sinkDir = path.join(tmpDir, 'sink')
+      const { prompt, asked } = scriptedPrompt([
+        '', // all available: OTEL + Claude Code
+        '', // default sink
+        '', // default OTLP listen
+        cfgPath,
+      ])
+      /** @type {string[][]} */
+      const installCalls = []
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'darwin',
+        cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
+        defaultSinkDir: sinkDir,
+        defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
+        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.otel).toEqual({ listen: '127.0.0.1:4318' })
+      expect(written.gascity).toBeUndefined()
+      expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
+      expect(stdout.value()).not.toMatch(/Gascity/)
+      expect(asked.some(function(q) { return /Gas city search path/.test(q) })).toBe(false)
+    })
+
+    it('rejects gascity selection when gc is not detected', async function() {
+      const stdout = memo()
+      const stderr = memo()
+      const cfgPath = path.join(tmpDir, 'collectivus.json')
+      const sinkDir = path.join(tmpDir, 'sink')
+      const { prompt, asked } = scriptedPrompt([
+        '3', // unavailable without gc
+        '2', // Claude Code
+        '', // sink
+        cfgPath,
+      ])
+      const code = await runInit({
+        stdout, stderr, prompt,
+        platform: 'win32',
+        cwd: tmpDir,
+        defaultSinkDir: sinkDir,
+        defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
+      })
+      expect(code).toBe(0)
+      const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      expect(written.proxy.listen).toBe('127.0.0.1:8787')
+      expect(written.gascity).toBeUndefined()
+      expect(stderr.value()).toMatch(/subset of: 1, 2/)
+      expect(asked.filter(function(q) { return q === 'Collect [all]: ' })).toHaveLength(2)
     })
 
     it('supports a gascity-only source without asking to attach Claude Code', async function() {
@@ -224,16 +237,13 @@ describe('runInit', function() {
         'utf8'
       )
       const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        '2', // gascity only
+        '3', // gascity only
         '', // default sink
         cityDir,
         '', // add discovered city
         '', // add no more cities
         cfgPath,
         'n', // skip historical gascity backfill
-        'y', // install daemon
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -243,6 +253,7 @@ describe('runInit', function() {
         cwd: tmpDir,
         binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return true },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
@@ -252,6 +263,7 @@ describe('runInit', function() {
       expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
       expect(installCalls).toEqual([['--config', cfgPath, '--no']])
       expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Install as background daemon/.test(q) })).toBe(false)
     })
 
     it('offers to backfill gascity history after writing the config', async function() {
@@ -266,28 +278,31 @@ describe('runInit', function() {
         'utf8'
       )
       const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        '2', // gascity only
+        '3', // gascity only
         '', // default sink
         cityDir,
         '', // add discovered city
         '', // add no more cities
         cfgPath,
         'y', // run historical backfill
-        'n', // skip daemon
       ])
       /** @type {string[][]} */
       const backfillCalls = []
+      /** @type {string[][]} */
+      const installCalls = []
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return true },
         runGascityBackfill(args) { backfillCalls.push(args); return Promise.resolve(0) },
+        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
       expect(backfillCalls).toEqual([['mycity', '--all', '--config', cfgPath]])
+      expect(installCalls).toEqual([['--config', cfgPath, '--no']])
       expect(asked).toContain('Backfill all recoverable gascity sessions? [y/N]: ')
       expect(stdout.value()).toMatch(/This can take a while/)
     })
@@ -298,18 +313,16 @@ describe('runInit', function() {
       const fakeHome = path.join(tmpDir, 'home')
       const expectedCfg = path.join(fakeHome, '.hyp', 'collectivus.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        '', // default source selection (proxy)
+        '2', // Claude Code
         '', // default sink
         '', // accept default save path
-        'n', // skip daemon
       ])
       const code = await runInit({
         stdout, stderr, prompt,
-        platform: 'darwin',
+        platform: 'win32',
         cwd: tmpDir,
         defaultConfigPath: expectedCfg,
+        hasGcBinary() { return false },
       })
       expect(code).toBe(0)
       expect(asked.some(function(q) { return q.includes(expectedCfg) })).toBe(true)
@@ -317,14 +330,12 @@ describe('runInit', function() {
       expect(fs.existsSync(path.dirname(expectedCfg))).toBe(true)
     })
 
-    it('chains into runInstall with --yes when daemon + Claude Code accepted', async function() {
+    it('chains into runInstall with --yes when Claude Code is selected', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
-      const { prompt } = scriptedPrompt([
-        '1', 'n', '', '', cfgPath, // single / decline defaults / sources / sink / save
-        'y', // install daemon
-        'y', // attach Claude Code
+      const { prompt, asked } = scriptedPrompt([
+        '2', '', cfgPath,
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -334,20 +345,24 @@ describe('runInit', function() {
         cwd: tmpDir,
         binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
       expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
+      expect(asked.some(function(q) { return /Install as background daemon/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
     })
 
-    it('chains into runInstall with --no when daemon accepted but Claude Code declined', async function() {
+    it('chains into runInstall with --no when no Claude Code proxy is configured', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt } = scriptedPrompt([
-        '1', 'n', '', '', cfgPath,
-        'y', // install daemon
-        'n', // skip Claude Code
+        '1', // OTEL only
+        '', // sink
+        '', // default OTLP listen
+        cfgPath,
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -357,6 +372,7 @@ describe('runInit', function() {
         cwd: tmpDir,
         binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
@@ -368,7 +384,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', 'n', '', '', cfgPath,
+        '2', '', cfgPath,
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -377,6 +393,7 @@ describe('runInit', function() {
         platform: 'win32',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
+        hasGcBinary() { return false },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
@@ -389,7 +406,7 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'cfg.json')
       const { prompt, asked } = scriptedPrompt([
-        '1', 'n', '', '', cfgPath, 'y', 'y',
+        '2', '', cfgPath,
       ])
       /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
@@ -400,6 +417,7 @@ describe('runInit', function() {
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
         binPath: '/Users/test/.npm/_npx/abc123/node_modules/.bin/collectivus',
+        hasGcBinary() { return false },
         installGlobal() { globalInstallCalls++; return Promise.resolve(true) },
         resolveGlobalBinPath() { return Promise.resolve('/usr/local/lib/node_modules/collectivus/bin/cli.js') },
         runInstall(args, hooks) {
@@ -413,33 +431,8 @@ describe('runInit', function() {
         args: ['--config', cfgPath, '--yes'],
         binPath: '/usr/local/lib/node_modules/collectivus/bin/cli.js',
       }])
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
       expect(stdout.value()).toMatch(/Installing collectivus globally with npm/)
-    })
-  })
-
-  describe('mode prompt', function() {
-    it('re-prompts on invalid mode answer until a valid one is given', async function() {
-      const stdout = memo()
-      const stderr = memo()
-      const cfgPath = path.join(tmpDir, 'cfg.json')
-      const { prompt, asked } = scriptedPrompt([
-        'oops', '7', '', // two bad answers, then accept default (1 = standalone)
-        'n', '', '', cfgPath, 'n',
-      ])
-      const code = await runInit({
-        stdout, stderr, prompt,
-        platform: 'darwin',
-        cwd: tmpDir,
-        defaultConfigPath: absentDefaultCfg,
-      })
-      expect(code).toBe(0)
-      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "oops"\)/)
-      expect(stderr.value()).toMatch(/please choose 1 or 2 \(got "7"\)/)
-      expect(asked.filter(function(q) { return q === 'Choose [1]: ' })).toHaveLength(3)
-      expect(fs.existsSync(cfgPath)).toBe(true)
-      expect(stdout.value()).toMatch(/2\) Central server/)
-      expect(stdout.value()).not.toMatch(/2\) Gateway/)
     })
   })
 
@@ -450,7 +443,6 @@ describe('runInit', function() {
       const cfgPath = path.join(tmpDir, 'server.json')
       const dataDir = path.join(tmpDir, 'server-data')
       const { prompt } = scriptedPrompt([
-        '2', // central server
         '', // accept default central-server listen
         'https://collectivus.example.com:8788', // gateway-facing URL
         dataDir, // server data directory
@@ -458,9 +450,8 @@ describe('runInit', function() {
         '', // no S3 upload
         cfgPath, // save path
       ])
-      const code = await runInit({
+      const code = await runInitSubcommand(['server'], {
         stdout, stderr, prompt,
-        platform: 'darwin',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
       })
@@ -489,7 +480,6 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '2',
         '127.0.0.1:9999', // explicit central-server listen
         '', // default gateway-facing URL derived from listen
         '', // default data_dir
@@ -497,9 +487,8 @@ describe('runInit', function() {
         '', // no upload
         cfgPath,
       ])
-      const code = await runInit({
+      const code = await runInitSubcommand(['server'], {
         stdout, stderr, prompt,
-        platform: 'darwin',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
       })
@@ -516,7 +505,6 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'server.json')
       const { prompt } = scriptedPrompt([
-        '2',
         '', // default listen
         '', // default gateway-facing URL
         path.join(tmpDir, 'server-data'),
@@ -530,9 +518,8 @@ describe('runInit', function() {
         '', // no custom endpoint
         cfgPath,
       ])
-      const code = await runInit({
+      const code = await runInitSubcommand(['server'], {
         stdout, stderr, prompt,
-        platform: 'darwin',
         cwd: tmpDir,
         defaultConfigPath: absentDefaultCfg,
       })
@@ -559,8 +546,6 @@ describe('runInit', function() {
       }
       const { prompt, asked } = scriptedPrompt([
         '', // accept reuse (default = use)
-        'y', // install daemon
-        'y', // attach Claude Code
       ])
       /** @type {string[][]} */
       const installCalls = []
@@ -578,9 +563,11 @@ describe('runInit', function() {
       expect(stdout.value()).toMatch(/Found an existing config/)
       expect(stdout.value()).toMatch(/127\.0\.0\.1:8787/)
       expect(stdout.value()).toMatch(/anthropic → https:\/\/api\.anthropic\.com\/v1\/messages/)
-      // Did not ask the new top-level mode question or provider.
+      // Did not ask the removed mode question, provider, daemon, or Claude attach prompts.
       expect(asked.some(function(q) { return /How will you use collectivus/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Provider \[1\]/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Install as background daemon/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
     })
 
     it('bootstraps global install when reusing an existing config via npx', async function() {
@@ -598,8 +585,6 @@ describe('runInit', function() {
       }
       const { prompt, asked } = scriptedPrompt([
         '', // accept reuse
-        'y', // install daemon
-        'y', // attach Claude Code
       ])
       /** @type {Array<{ args: string[], binPath: string | undefined }>} */
       const installCalls = []
@@ -624,7 +609,7 @@ describe('runInit', function() {
         args: ['--config', cfgPath, '--yes'],
         binPath: '/usr/local/lib/node_modules/collectivus/bin/cli.js',
       }])
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
       expect(stdout.value()).toMatch(/Installing collectivus globally with npm/)
     })
 
@@ -644,18 +629,16 @@ describe('runInit', function() {
       }
       const { prompt } = scriptedPrompt([
         '2', // reject reuse
-        '1', // standalone
-        'n', // decline quick-setup defaults
-        '', // default source selection (proxy)
+        '2', // Claude Code
         '', // default sink
         newCfgPath, // save to a new path
-        'n', // skip daemon
       ])
       const code = await runInit({
         stdout, stderr, prompt,
-        platform: 'darwin',
+        platform: 'win32',
         cwd: tmpDir,
         defaultConfigPath: existingPath,
+        hasGcBinary() { return false },
         readConfig() { return existing },
       })
       expect(code).toBe(0)
@@ -664,7 +647,7 @@ describe('runInit', function() {
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
     })
 
-    it('reusing an otel-only config offers the daemon prompt without Claude Code attach', async function() {
+    it('reusing an otel-only config installs the daemon without Claude Code attach', async function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'existing.json')
@@ -676,19 +659,23 @@ describe('runInit', function() {
       }
       const { prompt, asked } = scriptedPrompt([
         '1', // reuse explicitly
-        'n', // skip daemon
       ])
+      /** @type {string[][]} */
+      const installCalls = []
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
         cwd: tmpDir,
+        binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: cfgPath,
         readConfig() { return existing },
+        runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
-      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(true)
+      expect(installCalls).toEqual([['--config', cfgPath, '--no']])
+      expect(asked.some(function(q) { return /background daemon/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
-      expect(stdout.value()).toMatch(/Next steps:/)
+      expect(stdout.value()).toMatch(/Installing ctvs as a background daemon/)
     })
 
     it('summary surfaces the upload block when present', async function() {
@@ -713,11 +700,10 @@ describe('runInit', function() {
       }
       const { prompt } = scriptedPrompt([
         '1', // reuse
-        'n', // skip daemon
       ])
       const code = await runInit({
         stdout, stderr, prompt,
-        platform: 'darwin',
+        platform: 'win32',
         cwd: tmpDir,
         defaultConfigPath: cfgPath,
         readConfig() { return existing },

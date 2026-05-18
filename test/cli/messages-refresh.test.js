@@ -82,6 +82,19 @@ function writeProxyJsonl(gatewayId, date, rows) {
 }
 
 /**
+ * @param {string} sessionId
+ * @param {Record<string, unknown>[]} rows
+ */
+function writeClaudeTranscript(sessionId, rows) {
+  const dir = path.join(tmpDir, '.claude', 'projects', '-repo')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, `${sessionId}.jsonl`),
+    rows.map((row) => JSON.stringify(row)).join('\n') + '\n'
+  )
+}
+
+/**
  * @param {string} gatewayId
  * @param {string} date
  * @param {Record<string, unknown>[]} rows
@@ -208,6 +221,71 @@ describe('refreshQueryCache — proxy_messages incremental', function() {
       cwd: '/repo/app',
       git_branch: 'main',
       attributes: { client: { claude_version: '2.1.140' } },
+    })
+  })
+
+  it('enriches proxy_messages from local Claude transcript frames', async function() {
+    writeProxyJsonl('gw-test', '2026-05-13', [
+      buildExchange({
+        exchangeId: 'ex-transcript-1',
+        tsStart: '2026-05-13T10:00:00.000Z',
+        sessionId: 'sess-transcript',
+        userContent: 'hello',
+        assistant: { content: 'hi back' },
+      }),
+    ])
+    writeClaudeTranscript('sess-transcript', [
+      {
+        type: 'user',
+        uuid: 'uuid-user',
+        parentUuid: null,
+        sessionId: 'sess-transcript',
+        timestamp: '2026-05-13T09:59:59.900Z',
+        cwd: '/repo/app',
+        gitBranch: 'main',
+        version: '2.1.141',
+        userType: 'external',
+        entrypoint: 'cli',
+        message: { role: 'user', content: 'hello' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'uuid-assistant',
+        parentUuid: 'uuid-user',
+        requestId: 'req-abc',
+        sessionId: 'sess-transcript',
+        timestamp: '2026-05-13T10:00:00.100Z',
+        cwd: '/repo/app',
+        gitBranch: 'main',
+        version: '2.1.141',
+        userType: 'external',
+        entrypoint: 'cli',
+        message: {
+          id: 'msg_ex-transcript-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hi back' }],
+        },
+      },
+    ])
+
+    const result = await refreshQueryCache({ paths: paths(), scope: { limit: 100 }, stdout: memo() })
+    expect(result.failures).toBe(0)
+
+    const rows = await readMessagesPartition('gw-test', '2026-05-13')
+    const user = rows.find((row) => row.role === 'user')
+    const assistant = rows.find((row) => row.role === 'assistant')
+    expect(user).toMatchObject({
+      provider_uuid: 'uuid-user',
+      provider_type: 'user',
+      client_version: '2.1.141',
+      entrypoint: 'cli',
+      user_type: 'external',
+    })
+    expect(assistant).toMatchObject({
+      provider_uuid: 'uuid-assistant',
+      parent_uuid: 'uuid-user',
+      request_id: 'req-abc',
+      provider_type: 'assistant',
     })
   })
 

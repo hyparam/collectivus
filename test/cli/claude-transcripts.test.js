@@ -58,4 +58,55 @@ describe('loadClaudeContextLookup', function() {
     })
     expect(lookup('missing', '2026-05-13T10:09:00.000Z')).toBeUndefined()
   })
+
+  it('matches transcript frames by Anthropic message id and by role/content', async function() {
+    writeTranscript('-repo', 'sess.jsonl', [
+      {
+        type: 'user',
+        sessionId: 'sess-1',
+        uuid: 'uuid-user',
+        parentUuid: null,
+        timestamp: '2026-05-13T10:00:00.000Z',
+        cwd: '/repo',
+        gitBranch: 'main',
+        version: '2.1.141',
+        userType: 'external',
+        entrypoint: 'cli',
+        message: { role: 'user', content: 'hello' },
+      },
+      {
+        type: 'assistant',
+        sessionId: 'sess-1',
+        uuid: 'uuid-assistant',
+        parentUuid: 'uuid-user',
+        requestId: 'req-abc',
+        timestamp: '2026-05-13T10:00:01.000Z',
+        cwd: '/repo',
+        gitBranch: 'main',
+        version: '2.1.141',
+        userType: 'external',
+        entrypoint: 'cli',
+        message: {
+          id: 'msg-abc',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hi back' }],
+        },
+      },
+    ])
+
+    const lookup = await loadClaudeContextLookup({ projectsDir: tmpDir })
+    expect(lookup.matchMessage?.('sess-1', { role: 'user', content: 'hello' }, '2026-05-13T10:00:00.100Z')).toMatchObject({
+      provider_uuid: 'uuid-user',
+      provider_type: 'user',
+      entrypoint: 'cli',
+      client_version: '2.1.141',
+      user_type: 'external',
+    })
+    expect(lookup.matchMessage?.('sess-1', { id: 'msg-abc', role: 'assistant', content: 'ignored for id match' }, '2026-05-13T10:00:01.100Z')).toMatchObject({
+      provider_uuid: 'uuid-assistant',
+      parent_uuid: 'uuid-user',
+      request_id: 'req-abc',
+      provider_type: 'assistant',
+    })
+  })
 })

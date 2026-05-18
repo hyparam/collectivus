@@ -179,10 +179,38 @@ describe('extractMessageParts', function() {
       claude_version: '2.1.141',
     }))
     expect(rows[0]).toMatchObject({
-      schema_version: 2,
+      schema_version: 3,
       cwd: '/repo/app',
       git_branch: 'main',
+      client_version: '2.1.141',
       attributes: { client: { claude_version: '2.1.141' } },
+    })
+  })
+
+  it('hoists matched Claude transcript metadata into typed columns', function() {
+    const rows = extractMessageParts(undefined, { id: 'msg-local', role: 'assistant', content: 'hello' }, ctx({
+      claude_transcript: {
+        provider_uuid: 'uuid-assistant',
+        parent_uuid: 'uuid-user',
+        request_id: 'req-123',
+        provider_type: 'assistant',
+        entrypoint: 'cli',
+        client_version: '2.1.141',
+        user_type: 'external',
+        is_sidechain: false,
+        raw_frame: { uuid: 'uuid-assistant' },
+      },
+    }))
+    expect(rows[0]).toMatchObject({
+      provider_uuid: 'uuid-assistant',
+      parent_uuid: 'uuid-user',
+      request_id: 'req-123',
+      provider_type: 'assistant',
+      entrypoint: 'cli',
+      client_version: '2.1.141',
+      user_type: 'external',
+      is_sidechain: false,
+      raw_frame: { uuid: 'uuid-assistant' },
     })
   })
 

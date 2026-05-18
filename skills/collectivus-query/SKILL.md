@@ -16,7 +16,7 @@ Use `ctvs query` to inspect local Collectivus recordings. It reads local JSONL r
    - **Missing partitions still error.** Run the exact `ctvs query refresh …` command the CLI prints, or rerun the target query with `--refresh always`.
    - Broad manual refreshes are explicit: `ctvs query refresh --all [dataset]`. Do not run a broad refresh when the printed file-targeted command is enough.
    - Pass `--strict-freshness` only when the user explicitly needs the pre-1.7 strict mode (e.g., scheduled checks that must never read stale data); it turns stale partitions back into a hard error.
-4. Prefer structured output for analysis: use `--format json` for follow-up reasoning, `--format markdown` when showing a table to the user, and `--limit` to keep output bounded.
+4. Prefer structured output for analysis: use `--format json` for follow-up reasoning and `--format markdown` when showing a table to the user. Query output is hard-capped at 100 rows (`--limit` defaults to 100 and cannot exceed 100), so use filters, `COUNT(*)`, aggregations, `ORDER BY`, and `OFFSET`/narrower predicates when you need more than the first page. For random samples, use `ORDER BY RANDOM() LIMIT n`; top-level random ordering is reservoir-sampled.
 5. Use high-level query commands before custom SQL. Switch to `ctvs query sql` only when the built-in commands cannot answer the question.
 6. For unfamiliar SQL tables, run `ctvs query schema <table> --format json` before querying. It works for built-in recording tables and tables registered with `ctvs collect`.
 
@@ -116,6 +116,7 @@ Use `JSON_VALUE(<col>, '$.path')` to extract scalars from the `attributes` / `st
 - Do not paste `--config` into every command by habit. Use it when discovery shows the service is not using `~/.hyp/collectivus.json`.
 - Do not read arbitrary Parquet or Iceberg files directly for `ctvs query sql`; the CLI resolves SQL table names and injects only known query tables.
 - Keep SQL read-only and use only query tables from `ctvs query catalog`: built-ins (`logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`) and registered collection tables.
+- `ctvs query sql` never returns more than 100 rows, even if the SQL text asks for a larger top-level `LIMIT`. Treat table-shaped results as samples unless the query is an aggregate/count that proves completeness.
 - Use UTC dates with `--date YYYY-MM-DD`; repeat `--date` when the user wants a union across multiple date partitions.
 - Use `--service`, `--gateway-id`, `--from`, `--to`, or `--since` to narrow broad investigations.
 

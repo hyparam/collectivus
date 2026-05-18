@@ -35,7 +35,7 @@ Commands default to `~/.hyp/collectivus.json`. If the running gateway or OTEL co
 - `--date <YYYY-MM-DD>`: Restrict to one UTC date partition. Repeat it to query or refresh multiple days.
 - `--gateway-id <id>`: Restrict to one gateway id.
 - `--service <name>`: Restrict `serviceName` for logs, traces, and metrics.
-- `--limit <n>`: Maximum rows to render. Default `100`, maximum `1000`.
+- `--limit <n>`: Maximum rows to return. Default `100`, maximum `100`.
 - `--format <fmt>`: `table`, `json`, `jsonl`, or `markdown`.
 - `--refresh <mode>`: `never` or `always`. Default `never`.
 - `--all`: Refresh all matching source files for `ctvs query refresh`.
@@ -140,3 +140,7 @@ ctvs query sql "select model, sum(cast(JSON_VALUE(attributes, '\$.usage.input_to
 ```
 
 SQL must be a read-only `select` over known query tables. Table names are resolved from the SQL AST and may be built-ins (`logs`, `traces`, `metrics`, `proxy_messages`, `gascity_messages`) or registered collection tables from `ctvs query catalog`.
+
+`ctvs query sql` hard-caps top-level result sets at 100 rows. If the SQL omits a top-level `LIMIT`, the CLI applies `LIMIT 100`; if the SQL asks for a larger top-level limit, the CLI clamps it to 100. Use aggregates/counts for complete summaries, or add filters and `OFFSET` to page through wider table-shaped results.
+
+Top-level `ORDER BY RANDOM() LIMIT n` uses reservoir sampling instead of sorting the full result set. It is still capped at 100 rows by the normal top-level limit rules.

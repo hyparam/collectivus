@@ -42,7 +42,7 @@ import { computeMessageId, extractMessageParts } from './messages-parquet.js'
  * @param {WalkerOptions} [opts]
  * @yields {Record<string, unknown>}
  *   Part rows ready to be written to Parquet. Each row carries
- *   `gateway_id` (from opts) plus the 26 schema columns declared in
+ *   `gateway_id` (from opts) plus the schema columns declared in
  *   `messages-parquet.js`.
  */
 export async function* walkExchanges(exchanges, opts) {
@@ -74,6 +74,7 @@ export async function* walkExchanges(exchanges, opts) {
     const exchangeRow = /** @type {Record<string, unknown>} */ (exchange)
 
     const conversation_id = resolveConversationId(reqBody, exchangeRow)
+    const claudeSessionId = resolveClaudeSessionId(reqBody, exchangeRow)
     const user_id = resolveUserId(reqBody)
     const conversation_source = resolveConversationSource(exchangeRow)
     const claudeContext = resolveClaudeContext(reqBody, exchangeRow, opts?.contextLookup)
@@ -141,6 +142,7 @@ export async function* walkExchanges(exchanges, opts) {
         previous_message_id,
         message_created_at: /** @type {string} */ (ts_start),
         tool_call_lookup,
+        claude_transcript: resolveClaudeTranscript(opts?.contextLookup, claudeSessionId, m, ts_start),
       }
 
       const rows = extractMessageParts(exchangeRow, m, ctx)
@@ -199,6 +201,15 @@ function resolveConversationId(reqBody, exchange) {
 
   const exchangeId = readKey(exchange, 'exchange_id')
   return sha256Hex(typeof exchangeId === 'string' ? exchangeId : String(exchangeId ?? '')).slice(0, 16)
+}
+
+/**
+ * @param {Record<string, unknown>} reqBody
+ * @param {Record<string, unknown>} exchange
+ * @returns {string | undefined}
+ */
+function resolveClaudeSessionId(reqBody, exchange) {
+  return readMetadataSessionId(reqBody) ?? readHeader(exchange, 'x-claude-code-session-id')
 }
 
 /**
@@ -269,6 +280,22 @@ function readTranscriptContext(lookup, sessionId, timestamp) {
   if (!lookup || !sessionId) return undefined
   try {
     return lookup(sessionId, timestamp)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * @param {ClaudeContextLookup | undefined} lookup
+ * @param {string | undefined} sessionId
+ * @param {Record<string, unknown>} message
+ * @param {unknown} timestamp
+ * @returns {import('./messages-parquet.js').ClaudeTranscriptMatch | undefined}
+ */
+function resolveClaudeTranscript(lookup, sessionId, message, timestamp) {
+  if (!lookup || !sessionId || typeof lookup.matchMessage !== 'function') return undefined
+  try {
+    return lookup.matchMessage(sessionId, message, timestamp)
   } catch {
     return undefined
   }
@@ -565,5 +592,7 @@ function readKey(obj, key) {
  */
 
 /**
- * @typedef {(sessionId: string | undefined, timestamp: unknown) => ({ cwd?: string, git_branch?: string, claude_version?: string } | undefined)} ClaudeContextLookup
+ * @typedef {((sessionId: string | undefined, timestamp: unknown) => ({ cwd?: string, git_branch?: string, claude_version?: string } | undefined)) & {
+ *   matchMessage?: (sessionId: string | undefined, message: Record<string, unknown>, timestamp: unknown) => import('./messages-parquet.js').ClaudeTranscriptMatch | undefined,
+ * }} ClaudeContextLookup
  */

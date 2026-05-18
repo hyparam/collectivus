@@ -14,8 +14,10 @@ import { GASCITY_MESSAGES_COLUMNS } from '../gascity/schema.js'
  * `proxy_exchanges` / `proxy_stream_events` layout).
  * Bumped to 3 when Claude local context (`cwd`, `git_branch`) was added to
  * `proxy_messages`.
+ * Bumped to 4 when local Claude transcript fields were added to
+ * `proxy_messages`.
  */
-export const QUERY_CACHE_SCHEMA_VERSION = 3
+export const QUERY_CACHE_SCHEMA_VERSION = 4
 
 /** @type {readonly QueryDataset[]} */
 export const QUERY_DATASETS = [

@@ -4,7 +4,7 @@
  * content-derived `message_id`.
  *
  * This module is the foundational pure-function layer. It declares the
- * 26-column schema and decomposes one (exchange, message) pair into a list
+ * schema and decomposes one (exchange, message) pair into a list
  * of part rows. No I/O happens on import or during decomposition; callers
  * (the walker in a sibling bead, the refresh pipeline in another) feed in
  * exchanges plus reconstructed assistant messages and pass the
@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto'
  * @import { ColumnSpec } from '../upload/upload.d.ts'
  */
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 
 /**
  * Parquet schema for `proxy_messages`. Grain is one row per content part.
@@ -39,21 +39,42 @@ export const MESSAGES_COLUMNS = [
   { name: 'conversation_source', type: 'STRING', nullable: true },
   { name: 'cwd', type: 'STRING', nullable: true },
   { name: 'git_branch', type: 'STRING', nullable: true },
+  { name: 'client_version', type: 'STRING', nullable: true },
+  { name: 'entrypoint', type: 'STRING', nullable: true },
+  { name: 'user_type', type: 'STRING', nullable: true },
+  { name: 'permission_mode', type: 'STRING', nullable: true },
+  { name: 'is_sidechain', type: 'BOOLEAN', nullable: true },
   { name: 'message_id', type: 'STRING', nullable: false },
   { name: 'previous_message_id', type: 'STRING', nullable: true },
+  { name: 'provider_uuid', type: 'STRING', nullable: true },
+  { name: 'parent_uuid', type: 'STRING', nullable: true },
+  { name: 'logical_parent_uuid', type: 'STRING', nullable: true },
+  { name: 'source_tool_assistant_uuid', type: 'STRING', nullable: true },
+  { name: 'request_id', type: 'STRING', nullable: true },
+  { name: 'prompt_id', type: 'STRING', nullable: true },
   { name: 'message_index', type: 'INT32', nullable: false },
   { name: 'message_created_at', type: 'TIMESTAMP', nullable: false },
   { name: 'role', type: 'STRING', nullable: false },
   { name: 'part_id', type: 'STRING', nullable: false },
   { name: 'part_index', type: 'INT32', nullable: false },
   { name: 'part_type', type: 'STRING', nullable: false },
+  { name: 'provider_type', type: 'STRING', nullable: true },
+  { name: 'provider_subtype', type: 'STRING', nullable: true },
   { name: 'content_text', type: 'STRING', nullable: true },
   { name: 'tool_name', type: 'STRING', nullable: true },
   { name: 'tool_call_id', type: 'STRING', nullable: true },
   { name: 'tool_args', type: 'JSON', nullable: true },
+  { name: 'caller_type', type: 'STRING', nullable: true },
+  { name: 'tool_result_for', type: 'STRING', nullable: true },
   { name: 'thinking_signature', type: 'STRING', nullable: true },
+  { name: 'attachment_type', type: 'STRING', nullable: true },
+  { name: 'hook_event', type: 'STRING', nullable: true },
+  { name: 'is_error', type: 'BOOLEAN', nullable: true },
+  { name: 'is_compact_summary', type: 'BOOLEAN', nullable: true },
+  { name: 'compact_metadata', type: 'JSON', nullable: true },
   { name: 'status', type: 'JSON', nullable: true },
   { name: 'attributes', type: 'JSON', nullable: true },
+  { name: 'raw_frame', type: 'JSON', nullable: true },
 ]
 
 /**
@@ -361,6 +382,7 @@ export function extractMessageParts(exchange, message, ctx) {
   if (content.length === 0) return []
 
   const message_id = computeMessageId(ctx.conversation_id, role, content)
+  const transcript = ctx.claude_transcript
   const attributes = withClientAttributes(extractAttributes(exchange, message), ctx.claude_version)
   const stopReason = readKey(message, 'stop_reason')
   const finishReason = typeof stopReason === 'string' ? mapFinishReason(stopReason) : undefined
@@ -378,8 +400,19 @@ export function extractMessageParts(exchange, message, ctx) {
     conversation_source: ctx.conversation_source,
     cwd: ctx.cwd,
     git_branch: ctx.git_branch,
+    client_version: ctx.claude_version ?? transcript?.client_version,
+    entrypoint: transcript?.entrypoint,
+    user_type: transcript?.user_type,
+    permission_mode: transcript?.permission_mode,
+    is_sidechain: transcript?.is_sidechain,
     message_id,
     previous_message_id: ctx.previous_message_id,
+    provider_uuid: transcript?.provider_uuid,
+    parent_uuid: transcript?.parent_uuid,
+    logical_parent_uuid: transcript?.logical_parent_uuid,
+    source_tool_assistant_uuid: transcript?.source_tool_assistant_uuid,
+    request_id: transcript?.request_id,
+    prompt_id: transcript?.prompt_id,
     message_index: ctx.message_index,
     message_created_at: ctx.message_created_at,
     role,
@@ -395,17 +428,29 @@ export function extractMessageParts(exchange, message, ctx) {
       part_id: `${message_id}#${part_index}`,
       part_index,
       part_type,
+      provider_type: transcript?.provider_type,
+      provider_subtype: transcript?.provider_subtype,
       content_text: extractContentText(block),
       tool_name,
       tool_call_id,
       tool_args: block?.type === 'tool_use' || block?.type === 'server_tool_use'
         ? readKey(block, 'input')
         : undefined,
+      caller_type: readCallerType(block),
+      tool_result_for: block?.type === 'tool_result' || block?.type === 'web_search_tool_result'
+        ? tool_call_id
+        : undefined,
       thinking_signature: block?.type === 'thinking' || block?.type === 'redacted_thinking'
         ? readKey(block, 'signature')
         : undefined,
+      attachment_type: transcript?.attachment_type,
+      hook_event: transcript?.hook_event,
+      is_error: readKey(block, 'is_error') === true ? true : undefined,
+      is_compact_summary: transcript?.is_compact_summary,
+      compact_metadata: transcript?.compact_metadata,
       status: buildStatus(block, isLast, role, finishReason),
       attributes,
+      raw_frame: transcript?.raw_frame,
     }
   })
 }
@@ -502,6 +547,18 @@ function extractToolName(block, tool_call_id, lookup) {
     return entry?.tool_name
   }
   return undefined
+}
+
+/**
+ * @param {unknown} block
+ * @returns {string | undefined}
+ */
+function readCallerType(block) {
+  if (!block || typeof block !== 'object') return undefined
+  const caller = readKey(block, 'caller')
+  if (!caller || typeof caller !== 'object') return undefined
+  const type = /** @type {Record<string, unknown>} */ (caller).type
+  return typeof type === 'string' && type.length > 0 ? type : undefined
 }
 
 /**
@@ -646,4 +703,29 @@ function copyIfPresent(src, dst, key) {
  * @property {string | undefined} [previous_message_id]
  * @property {Date | string | number} message_created_at
  * @property {ToolCallLookup | undefined} [tool_call_lookup]
+ * @property {ClaudeTranscriptMatch | undefined} [claude_transcript]
+ */
+
+/**
+ * Matched metadata from a local Claude Code JSONL transcript frame.
+ *
+ * @typedef {object} ClaudeTranscriptMatch
+ * @property {string | undefined} [provider_uuid]
+ * @property {string | undefined} [parent_uuid]
+ * @property {string | undefined} [logical_parent_uuid]
+ * @property {string | undefined} [source_tool_assistant_uuid]
+ * @property {string | undefined} [request_id]
+ * @property {string | undefined} [prompt_id]
+ * @property {string | undefined} [provider_type]
+ * @property {string | undefined} [provider_subtype]
+ * @property {string | undefined} [entrypoint]
+ * @property {string | undefined} [client_version]
+ * @property {string | undefined} [user_type]
+ * @property {string | undefined} [permission_mode]
+ * @property {boolean | undefined} [is_sidechain]
+ * @property {string | undefined} [attachment_type]
+ * @property {string | undefined} [hook_event]
+ * @property {boolean | undefined} [is_compact_summary]
+ * @property {unknown} [compact_metadata]
+ * @property {unknown} [raw_frame]
  */

@@ -6,6 +6,7 @@ import { collect } from 'squirreling'
 import { parseQueryArgs, runQuery } from '../../src/cli/query.js'
 import { ParquetWriter } from '../../src/gascity/parquet_writer.js'
 import { GASCITY_GATEWAY_ID, GASCITY_MESSAGES_SCHEMA_VERSION } from '../../src/gascity/schema.js'
+import { QUERY_CACHE_SCHEMA_VERSION } from '../../src/query/schema.js'
 import { prepareReadOnlySql } from '../../src/query/sql.js'
 import { executeSqlWithRandomSample, getRandomSamplePlan } from '../../src/query/random-sample.js'
 
@@ -362,7 +363,7 @@ describe('ctvs query', function() {
     expect(fs.existsSync(proxyCursorPath)).toBe(true)
     const cursor = readCursor(proxyCursorPath)
     expect(cursor).toMatchObject({
-      cache_schema_version: 3,
+      cache_schema_version: QUERY_CACHE_SCHEMA_VERSION,
       kind: 'builtin',
       dataset: 'proxy_messages',
       gateway_id: 'gw1',

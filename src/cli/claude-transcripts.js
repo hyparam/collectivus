@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,6 +16,43 @@ import readline from 'node:readline'
  */
 
 /**
+ * @typedef {object} ClaudeTranscriptMatch
+ * @property {string | undefined} [provider_uuid]
+ * @property {string | undefined} [parent_uuid]
+ * @property {string | undefined} [logical_parent_uuid]
+ * @property {string | undefined} [source_tool_assistant_uuid]
+ * @property {string | undefined} [request_id]
+ * @property {string | undefined} [prompt_id]
+ * @property {string | undefined} [provider_type]
+ * @property {string | undefined} [provider_subtype]
+ * @property {string | undefined} [entrypoint]
+ * @property {string | undefined} [client_version]
+ * @property {string | undefined} [user_type]
+ * @property {string | undefined} [permission_mode]
+ * @property {boolean | undefined} [is_sidechain]
+ * @property {string | undefined} [attachment_type]
+ * @property {string | undefined} [hook_event]
+ * @property {boolean | undefined} [is_compact_summary]
+ * @property {unknown} [compact_metadata]
+ * @property {unknown} [raw_frame]
+ */
+
+/**
+ * @typedef {ClaudeTranscriptMatch & {
+ *   sessionId: string,
+ *   timestampMs?: number,
+ *   messageId?: string,
+ *   contentKey?: string,
+ * }} ClaudeTranscriptEntry
+ */
+
+/**
+ * @typedef {((sessionId: string | undefined, timestamp: unknown) => ClaudeContext | undefined) & {
+ *   matchMessage?: (sessionId: string | undefined, message: Record<string, unknown>, timestamp: unknown) => ClaudeTranscriptMatch | undefined,
+ * }} ClaudeContextLookup
+ */
+
+/**
  * @param {string} [homeDir]
  * @returns {string}
  */
@@ -23,37 +61,44 @@ export function defaultClaudeProjectsDir(homeDir = os.homedir()) {
 }
 
 /**
- * Build a lookup over Claude Code transcript metadata. The scanner only
- * retains session id, timestamp, cwd, git branch, and Claude version; prompt
- * text, message content, tool output, and snapshots are not kept.
+ * Build a lookup over Claude Code transcript metadata. The call signature
+ * returns session context (`cwd`, git branch, version); the returned function
+ * also carries `matchMessage()` for proxy-message enrichment with local JSONL
+ * frame fields.
  *
  * @param {{ projectsDir?: string, sessionIds?: Iterable<string> }} [opts]
- * @returns {Promise<(sessionId: string | undefined, timestamp: unknown) => ClaudeContext | undefined>}
+ * @returns {Promise<ClaudeContextLookup>}
  */
 export async function loadClaudeContextLookup(opts = {}) {
   const projectsDir = opts.projectsDir ?? defaultClaudeProjectsDir()
   const sessionIds = opts.sessionIds ? new Set(opts.sessionIds) : undefined
   if (sessionIds && sessionIds.size === 0) return emptyLookup
   /** @type {Map<string, ClaudeContextEntry[]>} */
-  const bySession = new Map()
+  const contextBySession = new Map()
+  /** @type {Map<string, ClaudeTranscriptEntry[]>} */
+  const transcriptBySession = new Map()
 
   for (const filePath of walkJsonlFiles(projectsDir, sessionIds)) {
-    await readTranscriptFile(filePath, bySession)
+    await readTranscriptFile(filePath, contextBySession, transcriptBySession)
   }
 
-  for (const entries of bySession.values()) {
+  for (const entries of contextBySession.values()) {
     entries.sort((a, b) => (a.timestampMs ?? Number.POSITIVE_INFINITY) - (b.timestampMs ?? Number.POSITIVE_INFINITY))
     compactEntries(entries)
   }
+  for (const entries of transcriptBySession.values()) {
+    entries.sort((a, b) => (a.timestampMs ?? Number.POSITIVE_INFINITY) - (b.timestampMs ?? Number.POSITIVE_INFINITY))
+  }
+  const transcriptIndexes = buildTranscriptIndexes(transcriptBySession)
 
   /**
    * @param {string | undefined} sessionId
    * @param {unknown} timestamp
    * @returns {ClaudeContext | undefined}
    */
-  return function lookup(sessionId, timestamp) {
+  function lookup(sessionId, timestamp) {
     if (!sessionId) return undefined
-    const entries = bySession.get(sessionId)
+    const entries = contextBySession.get(sessionId)
     if (!entries || entries.length === 0) return undefined
     const entry = nearestEntry(entries, timestampMs(timestamp))
     return entry ? {
@@ -62,6 +107,26 @@ export async function loadClaudeContextLookup(opts = {}) {
       claude_version: entry.claude_version,
     } : undefined
   }
+  const out = /** @type {ClaudeContextLookup} */ (lookup)
+  out.matchMessage = function matchMessage(sessionId, message, timestamp) {
+    if (!sessionId || !message || typeof message !== 'object') return undefined
+    const sessionIndex = transcriptIndexes.get(sessionId)
+    if (!sessionIndex) return undefined
+    const targetMs = timestampMs(timestamp)
+    const messageId = stringValue(message.id)
+    if (messageId) {
+      const byId = sessionIndex.byMessageId.get(messageId)
+      const matched = nearestTranscriptEntry(byId, targetMs)
+      if (matched) return projectTranscriptMatch(matched)
+    }
+    const role = stringValue(message.role)
+    if (!role) return undefined
+    const key = contentKey(role, normalizeContent(message.content))
+    const byContent = sessionIndex.byContentKey.get(key)
+    const matched = nearestTranscriptEntry(byContent, targetMs)
+    return matched ? projectTranscriptMatch(matched) : undefined
+  }
+  return out
 }
 
 /**
@@ -112,10 +177,11 @@ function* walkJsonlFiles(dir, sessionIds) {
 
 /**
  * @param {string} filePath
- * @param {Map<string, ClaudeContextEntry[]>} bySession
+ * @param {Map<string, ClaudeContextEntry[]>} contextBySession
+ * @param {Map<string, ClaudeTranscriptEntry[]>} transcriptBySession
  * @returns {Promise<void>}
  */
-async function readTranscriptFile(filePath, bySession) {
+async function readTranscriptFile(filePath, contextBySession, transcriptBySession) {
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' })
   stream.on('error', () => {})
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
@@ -129,13 +195,23 @@ async function readTranscriptFile(filePath, bySession) {
         continue
       }
       const entry = contextEntryFromRow(row)
-      if (!entry) continue
-      let entries = bySession.get(entry.sessionId)
-      if (!entries) {
-        entries = []
-        bySession.set(entry.sessionId, entries)
+      if (entry) {
+        let entries = contextBySession.get(entry.sessionId)
+        if (!entries) {
+          entries = []
+          contextBySession.set(entry.sessionId, entries)
+        }
+        entries.push(entry)
       }
-      entries.push(entry)
+      const transcript = transcriptEntryFromRow(row)
+      if (transcript) {
+        let entries = transcriptBySession.get(transcript.sessionId)
+        if (!entries) {
+          entries = []
+          transcriptBySession.set(transcript.sessionId, entries)
+        }
+        entries.push(transcript)
+      }
     }
   } catch {
     // A transcript file can be rotated or truncated while we scan it. Treat
@@ -166,6 +242,48 @@ function contextEntryFromRow(row) {
 }
 
 /**
+ * @param {unknown} row
+ * @returns {ClaudeTranscriptEntry | undefined}
+ */
+function transcriptEntryFromRow(row) {
+  if (!row || typeof row !== 'object') return undefined
+  const obj = /** @type {Record<string, unknown>} */ (row)
+  const sessionId = stringValue(obj.sessionId)
+  if (!sessionId) return undefined
+  const message = isObject(obj.message) ? obj.message : undefined
+  const role = stringValue(readKey(message, 'role')) ?? (obj.type === 'user' || obj.type === 'assistant' ? obj.type : undefined)
+  const content = readKey(message, 'content')
+  const attachment = isObject(obj.attachment) ? obj.attachment : undefined
+  /** @type {ClaudeTranscriptEntry} */
+  const entry = {
+    sessionId,
+    timestampMs: timestampMs(obj.timestamp),
+    messageId: stringValue(readKey(message, 'id')) ?? stringValue(obj.messageId),
+    contentKey: role ? contentKey(role, normalizeContent(content)) : undefined,
+    provider_uuid: stringValue(obj.uuid),
+    parent_uuid: stringValue(obj.parentUuid) ?? stringValue(obj.parent_uuid),
+    logical_parent_uuid: stringValue(obj.logicalParentUuid) ?? stringValue(obj.logical_parent_uuid),
+    source_tool_assistant_uuid: stringValue(obj.sourceToolAssistantUUID) ?? stringValue(obj.source_tool_assistant_uuid),
+    request_id: stringValue(obj.requestId) ?? stringValue(obj.request_id),
+    prompt_id: stringValue(obj.promptId) ?? stringValue(obj.prompt_id),
+    provider_type: stringValue(obj.type),
+    provider_subtype: stringValue(obj.subtype),
+    entrypoint: stringValue(obj.entrypoint),
+    client_version: stringValue(obj.version) ?? stringValue(obj.claude_version),
+    user_type: stringValue(obj.userType) ?? stringValue(obj.user_type),
+    permission_mode: stringValue(obj.permissionMode) ?? stringValue(obj.permission_mode),
+    is_sidechain: typeof obj.isSidechain === 'boolean' ? obj.isSidechain : undefined,
+    attachment_type: stringValue(readKey(attachment, 'type')),
+    hook_event: stringValue(readKey(attachment, 'hookEvent')) ?? stringValue(obj.hookEvent),
+    is_compact_summary: typeof obj.isCompactSummary === 'boolean' ? obj.isCompactSummary : undefined,
+    compact_metadata: obj.compactMetadata,
+    raw_frame: cloneJson(obj),
+  }
+  if (!entry.messageId && !entry.contentKey && !entry.provider_uuid) return undefined
+  return entry
+}
+
+/**
  * @param {ClaudeContextEntry[]} entries
  * @returns {void}
  */
@@ -193,9 +311,10 @@ function sameContext(a, b) {
 }
 
 /**
- * @param {ClaudeContextEntry[]} entries
+ * @template {{ timestampMs?: number }} T
+ * @param {T[]} entries
  * @param {number | undefined} targetMs
- * @returns {ClaudeContextEntry | undefined}
+ * @returns {T | undefined}
  */
 function nearestEntry(entries, targetMs) {
   if (entries.length === 0) return undefined
@@ -217,6 +336,151 @@ function nearestEntry(entries, targetMs) {
   const beforeDistance = Math.abs((before.timestampMs ?? targetMs) - targetMs)
   const afterDistance = Math.abs((after.timestampMs ?? targetMs) - targetMs)
   return beforeDistance <= afterDistance ? before : after
+}
+
+/**
+ * @param {Map<string, ClaudeTranscriptEntry[]>} transcriptBySession
+ * @returns {Map<string, {
+ *   byMessageId: Map<string, ClaudeTranscriptEntry[]>,
+ *   byContentKey: Map<string, ClaudeTranscriptEntry[]>,
+ * }>}
+ */
+function buildTranscriptIndexes(transcriptBySession) {
+  /** @type {Map<string, { byMessageId: Map<string, ClaudeTranscriptEntry[]>, byContentKey: Map<string, ClaudeTranscriptEntry[]> }>} */
+  const out = new Map()
+  for (const [sessionId, entries] of transcriptBySession) {
+    const index = { byMessageId: new Map(), byContentKey: new Map() }
+    for (const entry of entries) {
+      if (entry.messageId) pushIndex(index.byMessageId, entry.messageId, entry)
+      if (entry.contentKey) pushIndex(index.byContentKey, entry.contentKey, entry)
+    }
+    out.set(sessionId, index)
+  }
+  return out
+}
+
+/**
+ * @param {Map<string, ClaudeTranscriptEntry[]>} map
+ * @param {string} key
+ * @param {ClaudeTranscriptEntry} entry
+ * @returns {void}
+ */
+function pushIndex(map, key, entry) {
+  let entries = map.get(key)
+  if (!entries) {
+    entries = []
+    map.set(key, entries)
+  }
+  entries.push(entry)
+}
+
+/**
+ * @param {ClaudeTranscriptEntry[] | undefined} entries
+ * @param {number | undefined} targetMs
+ * @returns {ClaudeTranscriptEntry | undefined}
+ */
+function nearestTranscriptEntry(entries, targetMs) {
+  if (!entries || entries.length === 0) return undefined
+  return nearestEntry(entries, targetMs)
+}
+
+/**
+ * @param {ClaudeTranscriptEntry} entry
+ * @returns {ClaudeTranscriptMatch}
+ */
+function projectTranscriptMatch(entry) {
+  return {
+    provider_uuid: entry.provider_uuid,
+    parent_uuid: entry.parent_uuid,
+    logical_parent_uuid: entry.logical_parent_uuid,
+    source_tool_assistant_uuid: entry.source_tool_assistant_uuid,
+    request_id: entry.request_id,
+    prompt_id: entry.prompt_id,
+    provider_type: entry.provider_type,
+    provider_subtype: entry.provider_subtype,
+    entrypoint: entry.entrypoint,
+    client_version: entry.client_version,
+    user_type: entry.user_type,
+    permission_mode: entry.permission_mode,
+    is_sidechain: entry.is_sidechain,
+    attachment_type: entry.attachment_type,
+    hook_event: entry.hook_event,
+    is_compact_summary: entry.is_compact_summary,
+    compact_metadata: entry.compact_metadata,
+    raw_frame: entry.raw_frame,
+  }
+}
+
+/**
+ * @param {string} role
+ * @param {unknown} content
+ * @returns {string}
+ */
+function contentKey(role, content) {
+  return sha256Hex(`${role}:${canonicalJson(content)}`)
+}
+
+/**
+ * @param {unknown} content
+ * @returns {unknown}
+ */
+function normalizeContent(content) {
+  if (typeof content === 'string') {
+    return content.length === 0 ? [] : [{ type: 'text', text: content }]
+  }
+  if (Array.isArray(content)) return content
+  return []
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string}
+ */
+function canonicalJson(value) {
+  return JSON.stringify(sortKeys(value))
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function sortKeys(value) {
+  if (Array.isArray(value)) return value.map(sortKeys)
+  if (value && typeof value === 'object') {
+    const obj = /** @type {Record<string, unknown>} */ (value)
+    /** @type {Record<string, unknown>} */
+    const out = {}
+    for (const key of Object.keys(obj).sort()) {
+      out[key] = sortKeys(obj[key])
+    }
+    return out
+  }
+  return value
+}
+
+/**
+ * @param {string} input
+ * @returns {string}
+ */
+function sha256Hex(input) {
+  return createHash('sha256').update(input).digest('hex')
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function cloneJson(value) {
+  if (value === undefined || value === null) return value
+  return JSON.parse(JSON.stringify(value))
 }
 
 /**

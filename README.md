@@ -36,11 +36,12 @@ The fastest path is the `npx` walkthrough:
 npx collectivus
 ```
 
-Choose Standalone and keep Proxy enabled. The walkthrough writes
-`~/.hyp/collectivus.json`, stores recordings under `~/.hyp/collectivus/`, and
-offers to install a background daemon and attach Claude Code.
+Choose Claude Code when asked what to collect, or press Enter to collect all
+available sources. The walkthrough writes `~/.hyp/collectivus.json`, stores
+recordings under `~/.hyp/collectivus/`, installs a background daemon, and
+attaches Claude Code when selected.
 
-If you skip the daemon, run the proxy in the foreground:
+To run the proxy in the foreground with an existing config:
 
 ```bash
 npx collectivus --config ~/.hyp/collectivus.json
@@ -543,9 +544,8 @@ The recommended path is the top-level walkthrough:
 
 ```bash
 npx collectivus
-# Choose Standalone, keep Proxy enabled, then answer:
-# Install as background daemon? [Y/n] y
-# Configure Claude Code to use this proxy? [Y/n] y
+# What do you want to collect? Press Enter for all available sources,
+# or choose Claude Code.
 # ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
 # ✓ Claude Code attached (~/.claude/settings.json)
 ```
@@ -554,8 +554,7 @@ If you prefer direct `ctvs` commands:
 
 ```bash
 npm install -g collectivus
-ctvs install --config /path/to/collectivus.json
-# Configure Claude Code to use this proxy? [Y/n] y
+ctvs install --config /path/to/collectivus.json --yes
 # ✓ Daemon installed (LaunchAgent: com.hyparam.collectivus)
 # ✓ Claude Code attached (~/.claude/settings.json)
 # Logs: ~/.hyp/collectivus/collectivus.log
@@ -574,9 +573,8 @@ The same walkthrough creates the systemd user unit:
 
 ```bash
 npx collectivus
-# Choose Standalone, keep Proxy enabled, then answer:
-# Install as background daemon? [Y/n] y
-# Configure Claude Code to use this proxy? [Y/n] y
+# What do you want to collect? Press Enter for all available sources,
+# or choose Claude Code.
 # ✓ Daemon installed (systemd unit: com.hyparam.collectivus.service)
 # ✓ Claude Code attached (~/.claude/settings.json)
 ```

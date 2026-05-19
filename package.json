@@ -1,6 +1,6 @@
 {
   "name": "collectivus",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "OTLP collector and pass-through LLM proxy",
   "author": "Hyperparam",
   "homepage": "https://hyperparam.app",
@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",
-    "@types/node": "25.8.0",
+    "@types/node": "25.9.1",
     "eslint": "9.39.4",
     "eslint-plugin-jsdoc": "62.9.0",
     "globals": "17.6.0",

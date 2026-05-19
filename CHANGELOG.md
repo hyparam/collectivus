@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-05-19
+
+### Added
+
+- Claude Code proxy message rows can now be enriched from local transcripts
+  with provider UUIDs, parent UUIDs, request IDs, entrypoints, client versions,
+  user types, compact metadata, and raw frame details when matching transcript
+  rows are available.
+- `ctvs query sql` now caps table-shaped result sets at 100 rows and handles
+  `ORDER BY RANDOM() LIMIT n` with reservoir sampling for bounded random
+  samples.
+- `ctvs init server` opens the Central server configuration walkthrough
+  directly.
+
+### Changed
+
+- The default `npx collectivus` walkthrough now focuses on Standalone capture
+  sources, installs the background daemon automatically on supported platforms,
+  and attaches Claude Code when Claude Code capture is selected.
+- `ctvs`, `ctvs attach`, and `ctvs install` now fall back to
+  `~/.hyp/collectivus.json` when no config path is supplied and the default
+  config exists.
+
 ## [3.0.0] — 2026-05-15
 
 ### Added

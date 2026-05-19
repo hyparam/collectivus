@@ -59,7 +59,7 @@ Commands:
   ctvs export --config <path|url> [...]        Convert recorded JSONL to Parquet
   ctvs query <command> [...]                   Query local recordings through query cache
   ctvs collect <file.jsonl> --name <name>      Add external JSONL as a query table
-  ctvs skills install [...]                    Install the Collectivus query LLM skill
+  ctvs skills install [...]                    Install bundled Collectivus LLM skills
   ctvs ignore <add|remove|list> [path]         Suppress Claude recording for a folder
   ctvs config <set|get|list|delete|bootstrap-token> ...
                                                Operator CLI for per-gateway configs

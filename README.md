@@ -362,15 +362,17 @@ their cross-source joins with `proxy_messages`.
 
 ### LLM skill
 
-Install the bundled `collectivus-query` skill so Claude Code and Codex know how
-to inspect local recordings with `ctvs query`:
+Install the bundled Collectivus skills so Claude Code and Codex know how to
+inspect local recordings with `ctvs query` and build log-driven development
+loops:
 
 ```bash
 ctvs skills install --client all
 ```
 
-The skill assumes the default `~/.hyp/collectivus.json` config unless the agent
-discovers a non-default service config from `ctvs status` or the service unit.
+The query skill assumes the default `~/.hyp/collectivus.json` config unless the
+agent discovers a non-default service config from `ctvs status` or the service
+unit.
 
 ## OTLP receiver
 
@@ -627,7 +629,7 @@ supported in this build.
 | `ctvs export --config <path> [...]` | Convert recorded JSONL to local Parquet without invoking the upload scheduler |
 | `ctvs query <command> [...]` | Query local recordings through the explicit query cache |
 | `ctvs collect <file.jsonl>\|--glob <pattern> --name <name>` | Register external JSONL as a dynamic query table |
-| `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus query LLM skill |
+| `ctvs skills install [--client claude\|codex\|all]` | Install the bundled Collectivus LLM skills |
 
 If stdin is not a TTY, `install` refuses to guess: pass `--yes` to attach
 Claude Code unattended, or `--no` to skip the attach step.

@@ -187,8 +187,8 @@ export async function runAttach(argv, hooks = {}) {
     }
 
     // Auto-install the Claude-targeted helper skills so the user gets
-    // `/ctvs-ignore`, `/ctvs-unignore`, and `collectivus-query` without a
-    // second command. Failure is a warning, not an error, so a transient
+    // `/ctvs-ignore`, `/ctvs-unignore`, and the bundled Collectivus skills
+    // without a second command. Failure is a warning, not an error, so a transient
     // filesystem problem doesn't undo a successful Claude attach.
     if (installSkillBundle) {
       try {

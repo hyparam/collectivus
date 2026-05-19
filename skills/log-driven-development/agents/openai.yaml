@@ -1,0 +1,6 @@
+interface:
+  display_name: "Log Driven Development"
+  short_description: "Instrument apps and close feedback loops"
+  default_prompt: "Use $log-driven-development to instrument this app with Collectivus OTEL and JSONL feedback loops, then smoke test by querying the captured logs."
+policy:
+  allow_implicit_invocation: true

@@ -24,10 +24,11 @@ afterEach(function() {
 })
 
 describe('BUNDLED_SKILLS', function() {
-  it('includes the three packaged skills with the expected client targets', function() {
+  it('includes the packaged skills with the expected client targets', function() {
     const summary = BUNDLED_SKILLS.map((s) => `${s.name}:${s.clients.join('+')}`)
     expect(summary).toEqual([
       'collectivus-query:claude+codex',
+      'log-driven-development:claude+codex',
       'ctvs-ignore:claude',
       'ctvs-unignore:claude',
     ])
@@ -47,20 +48,20 @@ describe('installSkillBundle', function() {
     const result = await installSkillBundle({ client: 'claude', homeDir, skillsRoot })
 
     const installed = result.destinations.map((d) => path.basename(d.path))
-    expect(installed).toEqual(['collectivus-query', 'ctvs-ignore', 'ctvs-unignore'])
+    expect(installed).toEqual(['collectivus-query', 'log-driven-development', 'ctvs-ignore', 'ctvs-unignore'])
     for (const destination of result.destinations) {
       expect(destination.client).toBe('claude')
       expect(fs.existsSync(path.join(destination.path, 'SKILL.md'))).toBe(true)
     }
   })
 
-  it('only installs collectivus-query when client=codex (the helper skills are Claude-only)', async function() {
+  it('only installs Codex-compatible skills when client=codex', async function() {
     const homeDir = path.join(tmpDir, 'home')
     const codexHome = path.join(tmpDir, 'codex-home')
     const result = await installSkillBundle({ client: 'codex', homeDir, codexHome, skillsRoot })
 
     const names = new Set(result.destinations.map((d) => path.basename(d.path)))
-    expect(names).toEqual(new Set(['collectivus-query']))
+    expect(names).toEqual(new Set(['collectivus-query', 'log-driven-development']))
     for (const destination of result.destinations) {
       expect(destination.client).toBe('codex')
     }
@@ -79,6 +80,8 @@ describe('installSkillBundle', function() {
     expect(fingerprints).toEqual(new Set([
       'claude:collectivus-query',
       'codex:collectivus-query',
+      'claude:log-driven-development',
+      'codex:log-driven-development',
       'claude:ctvs-ignore',
       'claude:ctvs-unignore',
     ]))

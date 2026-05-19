@@ -33,11 +33,15 @@ describe('package.json', () => {
       squirreling: '0.12.19',
     })
   })
-  it('ships the bundled Collectivus query skill', () => {
+  it('ships the bundled Collectivus skills', () => {
     expect(packageJson.files).toContain('skills')
-    const skillPath = fileURLToPath(new URL('../skills/collectivus-query/SKILL.md', import.meta.url))
+    const querySkillPath = fileURLToPath(new URL('../skills/collectivus-query/SKILL.md', import.meta.url))
     const referencePath = fileURLToPath(new URL('../skills/collectivus-query/references/query-cli.md', import.meta.url))
-    expect(fs.readFileSync(skillPath, 'utf8')).toMatch(/name: collectivus-query/)
+    const lddSkillPath = fileURLToPath(new URL('../skills/log-driven-development/SKILL.md', import.meta.url))
+    const lddReferencePath = fileURLToPath(new URL('../skills/log-driven-development/references/agent-jsonl.md', import.meta.url))
+    expect(fs.readFileSync(querySkillPath, 'utf8')).toMatch(/name: collectivus-query/)
     expect(fs.readFileSync(referencePath, 'utf8')).toMatch(/ctvs query/)
+    expect(fs.readFileSync(lddSkillPath, 'utf8')).toMatch(/name: log-driven-development/)
+    expect(fs.readFileSync(lddReferencePath, 'utf8')).toMatch(/ctvs collect/)
   })
 })

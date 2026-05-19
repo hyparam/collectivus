@@ -28,6 +28,7 @@ const SKILLS_ROOT = fileURLToPath(new URL('../../skills', import.meta.url))
  */
 export const BUNDLED_SKILLS = Object.freeze([
   { name: 'collectivus-query', clients: ['claude', 'codex'] },
+  { name: 'log-driven-development', clients: ['claude', 'codex'] },
   { name: 'ctvs-ignore', clients: ['claude'] },
   { name: 'ctvs-unignore', clients: ['claude'] },
 ])

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-05-20
+
+### Added
+
+- The gascity source now captures supervisor and city event bus snapshots and
+  streams into the built-in `gascity_events` dataset, with catalog, schema, and
+  SQL query support.
+
 ## [3.1.0] — 2026-05-19
 
 ### Added

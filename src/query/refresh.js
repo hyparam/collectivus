@@ -5,6 +5,7 @@ import { reconstructAssistantMessage } from '../cli/stream-reconstruct.js'
 import {
   cachePartitionForSource,
   datasetsForSource,
+  discoverGascityEventPartitions,
   discoverSourceFiles,
   discoverGascityPartitions as expectedGascityPartitions,
   inspectCachePartition,
@@ -43,10 +44,16 @@ export async function refreshQueryCache(args) {
   const result = { written: 0, skipped: 0, rows: 0, failures: 0, files: [] }
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const datasets = requestedDatasets?.filter(isQueryDataset)
-  const wantsGascity = !datasets || datasets.includes('gascity_messages')
-  if (wantsGascity) countGascityPartitions(scope, result, stdout)
+  const wantsGascityMessages = !datasets || datasets.includes('gascity_messages')
+  if (wantsGascityMessages) countDirectGascityPartitions('gascity_messages', expectedGascityPartitions(scope), result, stdout)
+  const wantsGascityEvents = !datasets || datasets.includes('gascity_events')
+  if (wantsGascityEvents) {
+    countDirectGascityPartitions('gascity_events', discoverGascityEventPartitions(scope), result, stdout)
+  }
 
-  const otherDatasets = datasets ? datasets.filter((d) => d !== 'gascity_messages') : undefined
+  const otherDatasets = datasets
+    ? datasets.filter((d) => d !== 'gascity_messages' && d !== 'gascity_events')
+    : undefined
   const wantsOther = !datasets || (otherDatasets && otherDatasets.length > 0)
   if (!wantsOther) return result
 
@@ -64,23 +71,24 @@ export async function refreshQueryCache(args) {
 }
 
 /**
- * @param {QueryScope} scope
+ * @param {QueryDataset} dataset
+ * @param {CachePartition[]} partitions
  * @param {RefreshResult} result
  * @param {{ write: (s: string) => void } | undefined} stdout
  * @returns {void}
  */
-function countGascityPartitions(scope, result, stdout) {
-  for (const partition of expectedGascityPartitions(scope)) {
+function countDirectGascityPartitions(dataset, partitions, result, stdout) {
+  for (const partition of partitions) {
     result.skipped++
     result.files.push({
-      dataset: 'gascity_messages',
+      dataset,
       gatewayId: partition.gatewayId,
       date: partition.date,
       rows: 0,
       cachePath: partition.cachePath,
       status: 'skipped',
     })
-    stdout?.write(`fresh gascity_messages/${partition.date}/${partition.cachePath}\n`)
+    stdout?.write(`fresh ${dataset}/${partition.date}/${partition.cachePath}\n`)
   }
 }
 

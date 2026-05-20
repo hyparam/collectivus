@@ -55,6 +55,9 @@ const IDENTITY_SECRET_BYTES = 32
 const DEFAULT_UPLOAD_REGION = 'us-east-1'
 const DEFAULT_UPLOAD_PREFIX = 'collectivus'
 const DEFAULT_UPLOAD_TIME = '00:10'
+const DEFAULT_GASCITY_SUPERVISOR_PORT = 8372
+const DEFAULT_GASCITY_SUPERVISOR_API_URL = `http://127.0.0.1:${DEFAULT_GASCITY_SUPERVISOR_PORT}`
+const GASCITY_DISCOVERY_TIMEOUT_MS = 5000
 /** @type {readonly import('../types.js').UploadSignal[]} */
 const ALLOWED_UPLOAD_SIGNALS = ['logs', 'traces', 'metrics', 'proxy']
 const DEFAULT_UPLOAD_SIGNALS_INPUT = ALLOWED_UPLOAD_SIGNALS.join(',')
@@ -151,6 +154,7 @@ export async function runInit(hooks = {}) {
     runInstall: hooks.runInstall,
     runGascityBackfill: hooks.runGascityBackfill,
     hasGcBinary: hooks.hasGcBinary,
+    fetchFn: hooks.fetchFn,
   })
 }
 
@@ -158,8 +162,8 @@ export async function runInit(hooks = {}) {
  * Minimal standalone walkthrough. Lets the operator choose which local
  * capture sources to enable, then asks only the details those sources need.
  * Proxy defaults to 127.0.0.1:8787 forwarding to Anthropic; OTLP defaults to
- * 127.0.0.1:4318; gascity tries to discover city roots from the current
- * workspace before falling back to manual city/API entry.
+ * 127.0.0.1:4318; gascity asks for the local supervisor port and reads the
+ * registered city list from that supervisor.
  *
  * @param {{
  *   stdout: { write: (s: string) => void },
@@ -176,6 +180,7 @@ export async function runInit(hooks = {}) {
  *   runInstall?: (args: string[], hooks?: InstallHooks) => Promise<number>,
  *   runGascityBackfill?: (args: string[], hooks?: { stdout?: { write: (s: string) => void }, stderr?: { write: (s: string) => void } }) => Promise<number>,
  *   hasGcBinary?: () => boolean | Promise<boolean>,
+ *   fetchFn?: typeof fetch,
  * }} args
  * @returns {Promise<number>}
  */
@@ -221,7 +226,7 @@ async function runSingleUserFlow(args) {
   }
 
   if (hasGascity) {
-    gascityCities = await askGascityCities({ stdout, stderr, prompt, cwd })
+    gascityCities = await askGascityCities({ stdout, stderr, prompt, cwd, fetchFn: args.fetchFn })
     config.gascity = gascityCities
   }
 
@@ -427,33 +432,48 @@ function commandExistsOnPath(name) {
  *   stderr: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   cwd: string,
+ *   fetchFn?: typeof fetch,
  * }} args
  * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
  */
 async function askGascityCities(args) {
   const { stdout, stderr, prompt, cwd } = args
   stdout.write('\nGas city supervisor capture\n')
-  stdout.write('Enter a city root or a parent directory. Press Enter to scan the current directory.\n')
-  const searchAns = (await prompt(`Gas city search path [${cwd}]: `)).trim()
-  const searchRoot = searchAns === '' ? cwd : path.resolve(cwd, searchAns)
-  const discovered = await discoverGascityCityEntries(searchRoot)
+  stdout.write('Collectivus reads the registered city list from the local gc supervisor.\n')
+
+  const apiUrl = await askGascitySupervisorApiUrl({ stderr, prompt })
+  /** @type {Array<{ name: string, api_url: string, path?: string, running?: boolean }>} */
+  let discovered = []
+  try {
+    discovered = await fetchSupervisorGascityCities({
+      apiUrl,
+      fetchFn: args.fetchFn ?? globalThis.fetch,
+    })
+  } catch (err) {
+    stderr.write(`  Could not read gas cities from ${apiUrl}: ${formatError(err)}\n`)
+  }
+
   if (discovered.length > 0) {
-    stdout.write('\nDiscovered gas city supervisors:\n')
+    stdout.write('\nDiscovered gas cities:\n')
     for (const city of discovered) {
-      stdout.write(`  - ${city.name} (${city.api_url})\n`)
+      const state = city.running === undefined ? '' : city.running ? ' running' : ' stopped'
+      const location = city.path === undefined ? '' : ` ${city.path}`
+      stdout.write(`  - ${city.name}${state}${location}\n`)
     }
     const addAns = (await prompt(`Add ${discovered.length === 1 ? 'this city' : 'these cities'}? [Y/n]: `)).trim()
     if (isYes(addAns)) {
       return askManualGascityCities({
         stdout, stderr, prompt, cwd,
-        defaultTarget: searchRoot,
-        initial: discovered,
+        defaultApiUrl: apiUrl,
+        initial: discovered.map(function(city) {
+          return { name: city.name, api_url: city.api_url }
+        }),
       })
     }
   } else {
-    stdout.write('No gas city supervisors were discovered from that path.\n')
+    stdout.write('No gas cities were reported by that supervisor.\n')
   }
-  return askManualGascityCities({ stdout, stderr, prompt, cwd, defaultTarget: searchRoot, initial: [] })
+  return askManualGascityCities({ stdout, stderr, prompt, cwd, defaultApiUrl: apiUrl, initial: [] })
 }
 
 /**
@@ -462,13 +482,13 @@ async function askGascityCities(args) {
  *   stderr: { write: (s: string) => void },
  *   prompt: (q: string) => Promise<string>,
  *   cwd: string,
- *   defaultTarget: string,
+ *   defaultApiUrl: string,
  *   initial: import('../gascity/types.d.ts').GascityCityConfig[],
  * }} args
  * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
  */
 async function askManualGascityCities(args) {
-  const { stdout, stderr, prompt, cwd, defaultTarget } = args
+  const { stdout, stderr, prompt, cwd, defaultApiUrl } = args
   /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
   const cities = dedupeGascityCities(args.initial)
 
@@ -478,21 +498,18 @@ async function askManualGascityCities(args) {
       if (!/^y(es)?$/i.test(more)) return cities
     }
 
-    const targetDefault = cities.length === 0 ? defaultTarget : ''
-    const question = targetDefault
-      ? `Gas city directory or name [${targetDefault}]: `
-      : 'Gas city directory or name: '
+    const question = 'Gas city name or directory: '
     const targetAns = (await prompt(question)).trim()
-    const target = targetAns === '' ? targetDefault : targetAns
+    const target = targetAns
     if (!target) {
-      stderr.write('  city directory or name is required\n')
+      stderr.write('  city name or directory is required\n')
       continue
     }
 
     const resolvedTarget = resolvePromptPath(cwd, target)
     let entry
     try {
-      entry = await resolveGascityCityEntry(resolvedTarget, undefined)
+      entry = await resolveGascityCityEntry(resolvedTarget, isDirectory(resolvedTarget) ? undefined : defaultApiUrl)
     } catch (err) {
       stderr.write(`  ${formatError(err)}\n`)
       continue
@@ -504,55 +521,142 @@ async function askManualGascityCities(args) {
 }
 
 /**
- * @param {string} root
- * @returns {Promise<import('../gascity/types.d.ts').GascityCityConfig[]>}
+ * @param {{
+ *   stderr: { write: (s: string) => void },
+ *   prompt: (q: string) => Promise<string>,
+ * }} args
+ * @returns {Promise<string>}
  */
-async function discoverGascityCityEntries(root) {
-  const dirs = discoverGascityCityDirs(root)
-  /** @type {import('../gascity/types.d.ts').GascityCityConfig[]} */
-  const entries = []
-  for (const dir of dirs) {
-    try {
-      const entry = await resolveGascityCityEntry(dir, undefined)
-      upsertGascityCity(entries, entry)
-    } catch {
-      // A city.toml without an API hint can still be added manually below.
-    }
+async function askGascitySupervisorApiUrl(args) {
+  const { stderr, prompt } = args
+  for (;;) {
+    const ans = (await prompt(`Gas city supervisor port [${DEFAULT_GASCITY_SUPERVISOR_PORT}]: `)).trim()
+    const apiUrl = parseSupervisorApiUrl(ans)
+    if (apiUrl !== undefined) return apiUrl
+    stderr.write('  supervisor port must be a number from 1 to 65535\n')
   }
-  entries.sort((a, b) => a.name.localeCompare(b.name))
-  return entries
 }
 
 /**
- * @param {string} root
- * @returns {string[]}
+ * @param {{
+ *   apiUrl: string,
+ *   fetchFn: typeof fetch,
+ * }} args
+ * @returns {Promise<Array<{ name: string, api_url: string, path?: string, running?: boolean }>>}
  */
-function discoverGascityCityDirs(root) {
-  /** @type {string[]} */
-  const dirs = []
-  if (hasCityToml(root)) dirs.push(root)
-  let children
+async function fetchSupervisorGascityCities(args) {
+  const url = `${args.apiUrl.replace(/\/+$/, '')}/v0/cities`
+  const controller = new AbortController()
+  const timer = setTimeout(function() { controller.abort() }, GASCITY_DISCOVERY_TIMEOUT_MS)
+  /** @type {Response} */
+  let response
   try {
-    children = fs.readdirSync(root, { withFileTypes: true })
-  } catch {
-    return dirs
+    response = await args.fetchFn(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
   }
-  for (const child of children) {
-    if (!child.isDirectory()) continue
-    const childDir = path.join(root, child.name)
-    if (hasCityToml(childDir)) dirs.push(childDir)
+  if (!response.ok) {
+    await response.body?.cancel().catch(function() {})
+    throw new Error(`HTTP ${response.status}`)
   }
-  dirs.sort()
-  return dirs
+  /** @type {unknown} */
+  const body = await response.json()
+  return parseSupervisorGascityCities(body, args.apiUrl)
 }
 
 /**
- * @param {string} dir
+ * @param {unknown} body
+ * @param {string} apiUrl
+ * @returns {Array<{ name: string, api_url: string, path?: string, running?: boolean }>}
+ */
+function parseSupervisorGascityCities(body, apiUrl) {
+  const items = supervisorCityItems(body)
+  /** @type {Array<{ name: string, api_url: string, path?: string, running?: boolean }>} */
+  const cities = []
+  for (const item of items) {
+    if (item === null || typeof item !== 'object') continue
+    const name = pickString(item, 'name') ?? pickString(item, 'city')
+    if (name === undefined || name.length === 0) continue
+    /** @type {{ name: string, api_url: string, path?: string, running?: boolean }} */
+    const entry = { name, api_url: apiUrl }
+    const cityPath = pickString(item, 'path')
+    if (cityPath !== undefined) entry.path = cityPath
+    const running = pickBoolean(item, 'running')
+    if (running !== undefined) entry.running = running
+    cities.push(entry)
+  }
+  cities.sort(function(a, b) { return a.name.localeCompare(b.name) })
+  return cities
+}
+
+/**
+ * @param {unknown} body
+ * @returns {unknown[]}
+ */
+function supervisorCityItems(body) {
+  if (Array.isArray(body)) return body
+  if (body === null || typeof body !== 'object') return []
+  const obj = /** @type {Record<string, unknown>} */ (body)
+  if (Array.isArray(obj.items)) return obj.items
+  if (Array.isArray(obj.cities)) return obj.cities
+  return []
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {string | undefined}
+ */
+function parseSupervisorApiUrl(raw) {
+  const input = String(raw).trim()
+  if (input === '') return DEFAULT_GASCITY_SUPERVISOR_API_URL
+  const portOnly = /^:?\d+$/.test(input) ? input.replace(/^:/, '') : undefined
+  if (portOnly !== undefined) {
+    const port = Number(portOnly)
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      return `http://127.0.0.1:${port}`
+    }
+    return undefined
+  }
+  try {
+    const url = new URL(input.includes('://') ? input : `http://${input}`)
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && url.port !== '') {
+      return url.origin
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * @param {unknown} obj
+ * @param {string} key
+ * @returns {string | undefined}
+ */
+function pickString(obj, key) {
+  if (obj === null || typeof obj !== 'object') return undefined
+  const value = /** @type {Record<string, unknown>} */ (obj)[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * @param {unknown} obj
+ * @param {string} key
+ * @returns {boolean | undefined}
+ */
+function pickBoolean(obj, key) {
+  if (obj === null || typeof obj !== 'object') return undefined
+  const value = /** @type {Record<string, unknown>} */ (obj)[key]
+  return typeof value === 'boolean' ? value : undefined
+}
+
+/**
+ * @param {string} target
  * @returns {boolean}
  */
-function hasCityToml(dir) {
+function isDirectory(target) {
   try {
-    return fs.statSync(path.join(dir, 'city.toml')).isFile()
+    return fs.statSync(target).isDirectory()
   } catch {
     return false
   }

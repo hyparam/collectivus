@@ -122,18 +122,12 @@ describe('runInit', function() {
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'collectivus.json')
       const sinkDir = path.join(tmpDir, 'sink')
-      const citiesRoot = path.join(tmpDir, 'cities')
-      const cityDir = path.join(citiesRoot, 'mycity')
-      fs.mkdirSync(cityDir, { recursive: true })
-      fs.writeFileSync(
-        path.join(cityDir, 'city.toml'),
-        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
-        'utf8'
-      )
+      /** @type {string[]} */
+      const seenUrls = []
       const { prompt, asked } = scriptedPrompt([
         '', // all available: OTEL + Claude Code + Gascity
         '', // default sink
-        citiesRoot, // scan for gas cities
+        '', // default supervisor port
         '', // add discovered city
         '', // add no more cities
         '', // default OTLP listen
@@ -142,6 +136,16 @@ describe('runInit', function() {
       ])
       /** @type {string[][]} */
       const installCalls = []
+      /**
+       * @param {Parameters<typeof fetch>[0]} url
+       * @returns {Promise<Response>}
+       */
+      function fetchFn(url) {
+        seenUrls.push(String(url))
+        return Promise.resolve(new Response(JSON.stringify({
+          items: [{ name: 'mycity', path: path.join(tmpDir, 'mycity'), running: true }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
@@ -150,9 +154,11 @@ describe('runInit', function() {
         defaultSinkDir: sinkDir,
         defaultConfigPath: absentDefaultCfg,
         hasGcBinary() { return true },
+        fetchFn,
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
+      expect(seenUrls).toEqual(['http://127.0.0.1:8372/v0/cities'])
       const written = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
       expect(written.proxy.listen).toBe('127.0.0.1:8787')
       expect(written.gascity).toEqual([{ name: 'mycity', api_url: 'http://127.0.0.1:8372' }])
@@ -160,6 +166,7 @@ describe('runInit', function() {
       expect(written.sink).toEqual({ type: 'file', dir: sinkDir })
       expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
       expect(asked).toContain('Collect [all]: ')
+      expect(asked).toContain('Gas city supervisor port [8372]: ')
       expect(asked.some(function(q) { return /Install as background daemon/.test(q) })).toBe(false)
       expect(asked.some(function(q) { return /Configure Claude Code/.test(q) })).toBe(false)
       expect(stdout.value()).toMatch(/3\) Gascity/)
@@ -196,6 +203,7 @@ describe('runInit', function() {
       expect(installCalls).toEqual([['--config', cfgPath, '--yes']])
       expect(stdout.value()).not.toMatch(/Gascity/)
       expect(asked.some(function(q) { return /Gas city search path/.test(q) })).toBe(false)
+      expect(asked.some(function(q) { return /Gas city supervisor port/.test(q) })).toBe(false)
     })
 
     it('rejects gascity selection when gc is not detected', async function() {
@@ -229,17 +237,10 @@ describe('runInit', function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gascity.json')
-      const cityDir = path.join(tmpDir, 'mycity')
-      fs.mkdirSync(cityDir, { recursive: true })
-      fs.writeFileSync(
-        path.join(cityDir, 'city.toml'),
-        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
-        'utf8'
-      )
       const { prompt, asked } = scriptedPrompt([
         '3', // gascity only
         '', // default sink
-        cityDir,
+        '', // default supervisor port
         '', // add discovered city
         '', // add no more cities
         cfgPath,
@@ -247,6 +248,14 @@ describe('runInit', function() {
       ])
       /** @type {string[][]} */
       const installCalls = []
+      /**
+       * @returns {Promise<Response>}
+       */
+      function fetchFn() {
+        return Promise.resolve(new Response(JSON.stringify({
+          items: [{ name: 'mycity', running: true }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
@@ -254,6 +263,7 @@ describe('runInit', function() {
         binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
         hasGcBinary() { return true },
+        fetchFn,
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })
       expect(code).toBe(0)
@@ -270,17 +280,10 @@ describe('runInit', function() {
       const stdout = memo()
       const stderr = memo()
       const cfgPath = path.join(tmpDir, 'gascity.json')
-      const cityDir = path.join(tmpDir, 'mycity')
-      fs.mkdirSync(cityDir, { recursive: true })
-      fs.writeFileSync(
-        path.join(cityDir, 'city.toml'),
-        'name = "mycity"\napi = "http://127.0.0.1:8372"\n',
-        'utf8'
-      )
       const { prompt, asked } = scriptedPrompt([
         '3', // gascity only
         '', // default sink
-        cityDir,
+        '', // default supervisor port
         '', // add discovered city
         '', // add no more cities
         cfgPath,
@@ -290,6 +293,14 @@ describe('runInit', function() {
       const backfillCalls = []
       /** @type {string[][]} */
       const installCalls = []
+      /**
+       * @returns {Promise<Response>}
+       */
+      function fetchFn() {
+        return Promise.resolve(new Response(JSON.stringify({
+          items: [{ name: 'mycity', running: true }],
+        }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
       const code = await runInit({
         stdout, stderr, prompt,
         platform: 'darwin',
@@ -297,6 +308,7 @@ describe('runInit', function() {
         binPath: '/usr/local/bin/ctvs',
         defaultConfigPath: absentDefaultCfg,
         hasGcBinary() { return true },
+        fetchFn,
         runGascityBackfill(args) { backfillCalls.push(args); return Promise.resolve(0) },
         runInstall(args) { installCalls.push(args); return Promise.resolve(0) },
       })

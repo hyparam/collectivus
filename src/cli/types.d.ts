@@ -357,6 +357,8 @@ export interface InitHooks {
   runGascityBackfill?: (args: string[], hooks?: { stdout?: WriteStream, stderr?: WriteStream }) => Promise<number>
   /** Override PATH lookup for the gc binary in tests. */
   hasGcBinary?: () => boolean | Promise<boolean>
+  /** Override fetch used by gascity supervisor discovery. */
+  fetchFn?: typeof fetch
   /** Override `process.platform`. */
   platform?: NodeJS.Platform
   /** Override `process.cwd()`. */

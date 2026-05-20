@@ -1,15 +1,16 @@
 ---
 name: ctvs-gascity
-description: Query the gascity event log, session-reconciler segments, and `gascity_messages` agent transcripts. Use when the user asks about gc agents, beads, orders, mail, sessions, session-reconciler decisions, agent tool calls, or LLM token usage by rig/template.
+description: Query gascity event logs, session-reconciler segments, and captured agent transcripts. Use when the user asks about gc agents, beads, orders, mail, sessions, session-reconciler decisions, agent tool calls, or LLM token usage by rig/template.
 ---
 
 # Gascity Query
 
-This workspace has been registered with the `ctvs query` cache via `ctvs init gascity`. Three tables are available alongside the global built-in datasets:
+This workspace has been registered with the `ctvs query` cache via `ctvs init gascity`. Four gascity-oriented tables are available alongside the global built-in datasets:
 
 - **`events`** — one row per gascity event from `.gc/events.jsonl` (bead lifecycle, order execution, mail, sessions, controller events). Single source file, registered as a collection.
 - **`session_segments`** — one row per tracepoint from `.gc/runtime/session-reconciler-trace/segments/**/*.jsonl` (baseline, decision, mutation, operation records per session reconciler cycle). Glob-backed collection; many source files, one cache partition each.
 - **`gascity_messages`** — one row per content block from gascity-captured agent sessions (text, thinking, tool_use, tool_result, attachment). Captured by the `ctvs gascity` source from the supervisor REST API; provider-native frames preserved verbatim in `raw_frame`. Built-in dataset (no `ctvs init gascity` needed) — partitioned at `~/.collectivus/sink/gascity_messages/date=<YYYY-MM-DD>/city=<name>/`.
+- **`gascity_events`** — one row per supervisor/city event bus item captured from `/v0/events`, `/v0/events/stream`, `/v0/city/{city}/events`, and `/v0/city/{city}/events/stream`. Built-in dataset — partitioned at `~/.collectivus/sink/gascity_events/date=<YYYY-MM-DD>/event_scope=<scope>/city=<name>/`.
 
 Refer to the global [`collectivus-query`](../collectivus-query/SKILL.md) skill for cache freshness rules, `--format` options, and the wire-level `proxy_messages` dataset.
 
@@ -18,6 +19,7 @@ Refer to the global [`collectivus-query`](../collectivus-query/SKILL.md) skill f
 Each table identifies the originating agent through a different column. There is no `cwd` on `events` or `session_segments`; on `gascity_messages` the `cwd` is the agent's working directory at frame time.
 
 - `events.actor` — e.g. `hypcity-overrides.mayor`, `hypcity-overrides.refinery`, `hypcity-overrides.deacon`.
+- `gascity_events.actor` / `gascity_events.subject` — supervisor-scope rows may also carry `city`; city-scope rows carry the configured `city`.
 - `session_segments.template` — e.g. `hypcity-overrides.mayor` (city-scoped) or `collectivus/hypcity-overrides.polecat` (rig-scoped: `<rig>/<pack>.<agent>`).
 - `gascity_messages.gascity_template` — same shape as `session_segments.template`. Pair with `gascity_rig` and `gascity_alias` for finer cuts. The provider-side session id is `gascity_session_id` / `provider_session_id`.
 
@@ -156,6 +158,7 @@ ORDER BY source, idx;
 ## When to use which source
 
 - Use **`gascity_messages`** when you want: agent identity (`gascity_template` / `gascity_rig`), structured content blocks, tool calls + arguments + results in one table, per-frame token usage with cache breakdown, no need for HTTP wire detail.
+- Use **`gascity_events`** when you want: supervisor event bus activity as observed by Collectivus, including stream events and snapshot backfill, without relying on the workspace-local `.gc/events.jsonl` collection.
 - Use **`proxy_messages`** when you want: HTTP retry visibility, request timing, response status codes, end-user attribution via the Anthropic `user_id`, conversation-grain dedup of replayed history.
 - Use **both** (UNION ALL or FULL OUTER JOIN) for cross-source aggregations, sanity checks, or to recover content that one source missed (e.g., gascity captured an in-process supervisor frame the proxy never saw).
 
@@ -165,9 +168,9 @@ ORDER BY source, idx;
 
 `events` is append-only single-file; mtime/size changes trigger re-materialization on refresh.
 
-`gascity_messages` is **always fresh** — the daemon writes Parquet directly into the sink (no JSONL stage, no `.meta.json` sidecar), so query-time discovery picks up every part-file the writer has flushed. `ctvs query refresh --all gascity_messages` is a documented no-op (it lists existing partitions as already-fresh). To pull in newly-flushed rows simply rerun the query.
+`gascity_messages` and `gascity_events` are **always fresh** — the daemon writes directly into the sink, so query-time discovery picks up every flushed part-file or event JSONL. `ctvs query refresh --all gascity_messages` and `ctvs query refresh --all gascity_events` are documented no-ops. To pull in newly-flushed rows simply rerun the query.
 
-Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema session_segments --format markdown`, `ctvs query schema gascity_messages --format markdown`. Catalog: `ctvs query catalog --format markdown`.
+Full schemas: `ctvs query schema events --format markdown`, `ctvs query schema session_segments --format markdown`, `ctvs query schema gascity_messages --format markdown`, `ctvs query schema gascity_events --format markdown`. Catalog: `ctvs query catalog --format markdown`.
 
 ## Refresh cost
 

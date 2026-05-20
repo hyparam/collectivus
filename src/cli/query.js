@@ -12,6 +12,7 @@ import {
   sourceSignalForDataset,
 } from '../query/schema.js'
 import {
+  discoverGascityEventPartitions,
   discoverGascityPartitions,
   discoverSourceFiles,
   expectedCachePartitions,
@@ -851,8 +852,8 @@ async function ensureCacheReady(paths, scope, parsed) {
   // setting when the query touches a dataset that actually needs it.
   const requestedDatasets = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const cacheBackedDatasets = requestedDatasets
-    ? requestedDatasets.filter((dataset) => dataset !== 'gascity_messages')
-    : QUERY_DATASETS.filter((dataset) => dataset !== 'gascity_messages')
+    ? requestedDatasets.filter((dataset) => !isDirectGascityDataset(dataset))
+    : QUERY_DATASETS.filter((dataset) => !isDirectGascityDataset(dataset))
   const needsCache = cacheBackedDatasets.length > 0
   if (needsCache && (!paths.cacheEnabled || !paths.cacheDir)) {
     return { ok: false, message: 'error: query cache is disabled; pass --cache-dir or set query.cache.enabled: true' }
@@ -1045,6 +1046,14 @@ function scopeForCollections(scope) {
 }
 
 /**
+ * @param {string} dataset
+ * @returns {boolean}
+ */
+function isDirectGascityDataset(dataset) {
+  return dataset === 'gascity_messages' || dataset === 'gascity_events'
+}
+
+/**
  * @param {QueryPaths} paths
  * @param {QueryScope} scope
  * @returns {Array<ReturnType<typeof inspectCachePartitions>[number] | ReturnType<typeof inspectCollectionCachePartitions>[number]>}
@@ -1065,11 +1074,13 @@ function allSourceCount(paths, scope) {
   const builtinSources = discoverSourceFiles(paths.recordingRoot, scopeForBuiltins(scope) ?? { ...scope, datasets: [] }).length
   const requested = scope.datasets ?? (scope.dataset ? [scope.dataset] : undefined)
   const wantsGascity = !requested || requested.includes('gascity_messages')
+  const wantsGascityEvents = !requested || requested.includes('gascity_events')
   const gascitySources = wantsGascity ? discoverGascityPartitions(scope).length : 0
+  const gascityEventSources = wantsGascityEvents ? discoverGascityEventPartitions(scope).length : 0
   const collectionSources = expectedCollectionPartitions(paths, scopeForCollections(scope) ?? { ...scope, datasets: [] })
     .filter((partition) => partition.sourceExists)
     .length
-  return builtinSources + gascitySources + collectionSources
+  return builtinSources + gascitySources + gascityEventSources + collectionSources
 }
 
 /**
@@ -1131,12 +1142,10 @@ function statusRows(paths, scope) {
   const rows = []
   for (const dataset of datasets) {
     const datasetScope = { ...scope, datasets: [dataset] }
-    if (dataset === 'gascity_messages') {
-      // The gascity sink IS the cache (no JSONL stage, no `.meta.json`).
-      // Each part-file counts as both a "source partition" and a fresh
-      // cache partition. `cached_rows` stays 0 unless we want to peek at
-      // every Parquet footer — leave that off the hot path of `status` /
-      // `catalog` and let users run `select count(*)` for the real number.
+    if (isDirectGascityDataset(dataset)) {
+      // The gascity sinks are the cache. Each direct file counts as both a
+      // source partition and a fresh cache partition. `cached_rows` stays 0
+      // to keep `status` / `catalog` cheap; run `select count(*)` for counts.
       const partitions = expectedCachePartitions(paths, datasetScope)
       const states = inspectCachePartitions(partitions)
       rows.push({

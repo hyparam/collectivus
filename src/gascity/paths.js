@@ -12,6 +12,26 @@ export function defaultGascityRoot() {
 }
 
 /**
+ * Default sink root for gascity event bus recordings.
+ *
+ * @returns {string}
+ */
+export function defaultGascityEventsRoot() {
+  return path.join(os.homedir(), '.collectivus', 'sink', 'gascity_events')
+}
+
+/**
+ * Resolve the event sink beside the message sink so tests and custom sink roots
+ * keep gascity data together.
+ *
+ * @param {string} messagesRoot
+ * @returns {string}
+ */
+export function gascityEventsRootForMessagesRoot(messagesRoot) {
+  return path.join(path.dirname(messagesRoot), 'gascity_events')
+}
+
+/**
  * Directory holding lifecycle and per-session cursors for one city.
  *
  * @param {string} root Sink root from `defaultGascityRoot` or an override.
@@ -20,6 +40,38 @@ export function defaultGascityRoot() {
  */
 export function cursorsDir(root, city) {
   return path.join(root, '.cursors', city)
+}
+
+/**
+ * Directory holding event bus cursors.
+ *
+ * @param {string} root Event sink root.
+ * @returns {string}
+ */
+export function eventCursorsDir(root) {
+  return path.join(root, '.cursors')
+}
+
+/**
+ * Path to the supervisor-scope event cursor.
+ *
+ * @param {string} root Event sink root.
+ * @param {string} apiUrl Supervisor API URL.
+ * @returns {string}
+ */
+export function supervisorEventCursorPath(root, apiUrl) {
+  return path.join(eventCursorsDir(root), 'supervisors', `${encodeURIComponent(apiUrl)}.json`)
+}
+
+/**
+ * Path to the city-scope event cursor.
+ *
+ * @param {string} root Event sink root.
+ * @param {string} city Configured city name.
+ * @returns {string}
+ */
+export function cityEventCursorPath(root, city) {
+  return path.join(eventCursorsDir(root), 'cities', `${encodeURIComponent(city)}.json`)
 }
 
 /**
@@ -58,6 +110,20 @@ export function sessionCursorPath(root, city, sessionId) {
  */
 export function parquetPartitionDir(root, date, city) {
   return path.join(root, `date=${date}`, `city=${city}`)
+}
+
+/**
+ * Path to a JSONL event bus partition.
+ *
+ * @param {string} root Event sink root.
+ * @param {string} date ISO `YYYY-MM-DD` (UTC).
+ * @param {'supervisor' | 'city'} eventScope
+ * @param {string | undefined | null} city
+ * @returns {string}
+ */
+export function eventJsonlPath(root, date, eventScope, city) {
+  const citySegment = city ? encodeURIComponent(city) : '_supervisor'
+  return path.join(root, `date=${date}`, `event_scope=${eventScope}`, `city=${citySegment}`, 'events.jsonl')
 }
 
 /**

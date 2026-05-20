@@ -1,8 +1,10 @@
 import { backfillCity } from './backfill.js'
+import { SupervisorEventSubscriber } from './event_bus.js'
+import { GascityEventWriter } from './event_writer.js'
 import { NormalizerDispatcher } from './normalizer_dispatcher.js'
 import { registerProductionNormalizers } from './normalizers/index.js'
 import { ParquetWriter } from './parquet_writer.js'
-import { defaultGascityRoot } from './paths.js'
+import { defaultGascityRoot, gascityEventsRootForMessagesRoot } from './paths.js'
 import { GascityRuntimeStateWriter } from './runtime_state.js'
 import { defaultGascityStatePath } from '../runtime/paths.js'
 import { SupervisorSubscriber } from './supervisor_subscriber.js'
@@ -53,6 +55,7 @@ import { SupervisorSubscriber } from './supervisor_subscriber.js'
  * @param {{
  *   cities: GascityCityConfig[],
  *   sinkRoot?: string,
+ *   eventSinkRoot?: string,
  *   stderr?: { write: (s: string) => void },
  *   debug?: boolean,
  *   fetchFn?: typeof fetch,
@@ -69,6 +72,7 @@ import { SupervisorSubscriber } from './supervisor_subscriber.js'
 export async function startGascitySource(opts) {
   const stderr = opts.stderr ?? process.stderr
   const sinkRoot = opts.sinkRoot ?? defaultGascityRoot()
+  const eventSinkRoot = opts.eventSinkRoot ?? gascityEventsRootForMessagesRoot(sinkRoot)
   const debug = opts.debug ?? isDebugEnabled()
 
   /** @type {ConstructorParameters<typeof ParquetWriter>[0]} */
@@ -77,6 +81,7 @@ export async function startGascitySource(opts) {
   if (opts.flushIntervalMs !== undefined) writerOpts.flushIntervalMs = opts.flushIntervalMs
   if (opts.dedupLimit !== undefined) writerOpts.dedupLimit = opts.dedupLimit
   const writer = new ParquetWriter(writerOpts)
+  const eventWriter = new GascityEventWriter({ root: eventSinkRoot, stderr })
 
   const dispatcher = new NormalizerDispatcher({ stderr, writer })
   registerProductionNormalizers(dispatcher)
@@ -87,11 +92,16 @@ export async function startGascitySource(opts) {
 
   /** @type {Map<string, SupervisorSubscriber>} */
   const subscribers = new Map()
+  /** @type {Map<string, SupervisorEventSubscriber>} */
+  const eventSubscribers = new Map()
+  await syncSupervisorEventSubscribers(opts.cities)
   for (const city of opts.cities) {
     const subscriber = buildSubscriber(city, {
       sinkRoot,
+      eventSinkRoot,
       dispatcher,
       writer,
+      eventWriter,
       stateWriter,
       stderr,
       debug,
@@ -120,8 +130,11 @@ export async function startGascitySource(opts) {
     stop: async () => {
       await Promise.all(Array.from(subscribers.values()).map((s) => s.stop()))
       subscribers.clear()
+      await Promise.all(Array.from(eventSubscribers.values()).map((s) => s.stop()))
+      eventSubscribers.clear()
       await dispatcher.drain()
       await writer.stop()
+      await eventWriter.stop()
       await stateWriter.stop()
     },
     applyCityDiff: async (newCities) => {
@@ -139,8 +152,10 @@ export async function startGascitySource(opts) {
         }
         const replacement = buildSubscriber(city, {
           sinkRoot,
+          eventSinkRoot,
           dispatcher,
           writer,
+          eventWriter,
           stateWriter,
           stderr,
           debug,
@@ -164,6 +179,7 @@ export async function startGascitySource(opts) {
         })())
       }
       await Promise.all([...additions, ...removals])
+      await syncSupervisorEventSubscribers(newCities)
       await stateWriter.flush()
       // Run backfill for newly added cities — but only those, otherwise we
       // re-poll already-live sessions for unchanged cities and waste a
@@ -208,6 +224,38 @@ export async function startGascitySource(opts) {
       stderr.write(`[gascity] backfill_unhandled city=${city.name} err=${formatError(err)}\n`)
     })
   }
+
+  /**
+   * @param {GascityCityConfig[]} cities
+   * @returns {Promise<void>}
+   */
+  async function syncSupervisorEventSubscribers(cities) {
+    const desired = new Set(cities.map((city) => city.api_url.replace(/\/+$/, '')))
+    for (const apiUrl of desired) {
+      if (eventSubscribers.has(apiUrl)) continue
+      const subscriber = new SupervisorEventSubscriber({
+        apiUrl,
+        eventSinkRoot,
+        writer: eventWriter,
+        stderr,
+        debug,
+        fetchFn: opts.fetchFn,
+        sleep: opts.sleep,
+      })
+      subscriber.start()
+      eventSubscribers.set(apiUrl, subscriber)
+    }
+    /** @type {Promise<void>[]} */
+    const stops = []
+    for (const [apiUrl, subscriber] of eventSubscribers) {
+      if (desired.has(apiUrl)) continue
+      stops.push((async () => {
+        await subscriber.stop()
+        eventSubscribers.delete(apiUrl)
+      })())
+    }
+    await Promise.all(stops)
+  }
 }
 
 /**
@@ -218,8 +266,10 @@ export async function startGascitySource(opts) {
  * @param {GascityCityConfig} city
  * @param {{
  *   sinkRoot: string,
+ *   eventSinkRoot: string,
  *   dispatcher: NormalizerDispatcher,
  *   writer: ParquetWriter,
+ *   eventWriter: GascityEventWriter,
  *   stateWriter: GascityRuntimeStateWriter,
  *   stderr: { write: (s: string) => void },
  *   debug: boolean,
@@ -233,8 +283,10 @@ function buildSubscriber(city, infra) {
   const subOpts = {
     city,
     sinkRoot: infra.sinkRoot,
+    eventSinkRoot: infra.eventSinkRoot,
     dispatcher: infra.dispatcher,
     writer: infra.writer,
+    eventWriter: infra.eventWriter,
     stateWriter: infra.stateWriter,
     stderr: infra.stderr,
     debug: infra.debug,

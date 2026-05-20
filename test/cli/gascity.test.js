@@ -508,6 +508,25 @@ describe('runBackfill', () => {
     expect(stdout.value()).toMatch(/Discovered 2 sessions/)
   })
 
+  it('reports --all session discovery timeouts clearly', async () => {
+    const paths = buildPaths()
+    await writeConfig(paths.configPath, {
+      gascity: [{ name: 'hyptown', api_url: 'http://127.0.0.1:8372' }],
+    })
+    const abort = new Error('This operation was aborted')
+    abort.name = 'AbortError'
+    const fetchFn = vi.fn(async () => { throw abort })
+    const stderr = memo()
+    const code = await runBackfill(['hyptown', '--all', '--config', paths.configPath], {
+      stdout: memo(), stderr,
+      sinkRoot: paths.sinkRoot,
+      fetchFn: /** @type {typeof fetch} */ (/** @type {unknown} */ (fetchFn)),
+    })
+    expect(code).toBe(1)
+    expect(stderr.value()).toMatch(/session discovery timed out after 2m/)
+    expect(stderr.value()).not.toMatch(/This operation was aborted/)
+  })
+
   it('skips sessions whose cursor is older than --since', async () => {
     const paths = buildPaths()
     await writeConfig(paths.configPath, {

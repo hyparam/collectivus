@@ -7,7 +7,7 @@ import { cursorsDir } from './paths.js'
  * @import { SessionCursor, SessionContext } from './types.d.ts'
  */
 
-const POLL_TIMEOUT_MS = 5000
+const POLL_TIMEOUT_MS = 120_000
 
 /**
  * Run a one-shot backfill against the supervisor's `/transcript` endpoint
@@ -128,6 +128,11 @@ export async function backfillSession(args) {
   let response
   try {
     response = await args.fetchFn(url, { signal: ac.signal })
+  } catch (err) {
+    if (ac.signal.aborted || isAbortError(err)) {
+      throw new Error(`transcript fetch timed out after ${formatTimeout(POLL_TIMEOUT_MS)}`)
+    }
+    throw err
   } finally {
     clearTimeout(timer)
   }
@@ -209,4 +214,23 @@ function wrapProviderFrames(frames, provider) {
  */
 function formatError(err) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isAbortError(err) {
+  if (err === null || typeof err !== 'object') return false
+  return /** @type {{ name?: unknown }} */ (err).name === 'AbortError'
+}
+
+/**
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatTimeout(ms) {
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`
+  if (ms % 1000 === 0) return `${ms / 1000}s`
+  return `${ms}ms`
 }

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-05-20
+
+### Fixed
+
+- `ctvs gascity backfill --all` now gives large city session discovery and
+  transcript fetches up to two minutes before timing out, and reports timeout
+  failures clearly instead of the raw aborted fetch message.
+
 ## [3.2.0] — 2026-05-20
 
 ### Added

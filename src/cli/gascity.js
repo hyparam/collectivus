@@ -761,7 +761,7 @@ Options:
   --config <path>      collectivus config (default: ~/.hyp/collectivus.json)
   --help, -h           Show this help
 `
-const BACKFILL_DISCOVERY_TIMEOUT_MS = 5000
+const BACKFILL_DISCOVERY_TIMEOUT_MS = 120_000
 
 /**
  * @typedef {object} BackfillParseResult
@@ -1013,6 +1013,11 @@ async function fetchSupervisorSessions(args) {
   let response
   try {
     response = await args.fetchFn(url, { signal: ac.signal })
+  } catch (err) {
+    if (ac.signal.aborted || isAbortError(err)) {
+      throw new Error(`session discovery timed out after ${formatTimeout(BACKFILL_DISCOVERY_TIMEOUT_MS)}`)
+    }
+    throw err
   } finally {
     clearTimeout(timer)
   }
@@ -1098,6 +1103,25 @@ function pickString(obj, key) {
   if (obj === null || typeof obj !== 'object') return undefined
   const value = /** @type {Record<string, unknown>} */ (obj)[key]
   return typeof value === 'string' ? value : undefined
+}
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isAbortError(err) {
+  if (err === null || typeof err !== 'object') return false
+  return /** @type {{ name?: unknown }} */ (err).name === 'AbortError'
+}
+
+/**
+ * @param {number} ms
+ * @returns {string}
+ */
+function formatTimeout(ms) {
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`
+  if (ms % 1000 === 0) return `${ms / 1000}s`
+  return `${ms}ms`
 }
 
 /**

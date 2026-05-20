@@ -160,6 +160,24 @@ describe('backfillCity', () => {
     expect(stderr.value()).toMatch(/backfill_session_failed.*hy-1.*HTTP 500/)
   })
 
+  it('logs transcript timeouts as explicit timeout failures', async () => {
+    await writeCursorFile('hyptown', 'hy-1', { last_uuid: 'u-0', retired: false })
+    const stderr = memoStream()
+    const abort = new Error('This operation was aborted')
+    abort.name = 'AbortError'
+    const fetchFn = vi.fn(async () => { throw abort })
+    const result = await backfillCity({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      dispatcher: new NormalizerDispatcher({ stderr: memoStream() }),
+      stderr,
+      fetchFn,
+    })
+    expect(result).toEqual({ sessionsAttempted: 1, framesDispatched: 0, sessionsFailed: 1 })
+    expect(stderr.value()).toMatch(/backfill_session_failed.*hy-1.*transcript fetch timed out after 2m/)
+    expect(stderr.value()).not.toMatch(/This operation was aborted/)
+  })
+
   it('treats HTTP 404 as a quiet skip (session retired upstream)', async () => {
     await writeCursorFile('hyptown', 'hy-1', { last_uuid: 'u-0', retired: false })
     const stderr = memoStream()

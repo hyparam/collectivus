@@ -39,6 +39,30 @@ export async function fetchLatestVersion(options = {}) {
 }
 
 /**
+ * Return whether `candidate` is newer than `current` using the package's
+ * semver-shaped versions. Invalid versions are treated as not newer so a
+ * malformed registry response cannot trigger a bogus update notice.
+ *
+ * @param {string} candidate
+ * @param {string} current
+ * @returns {boolean}
+ */
+export function isNewerVersion(candidate, current) {
+  const next = parseVersion(candidate)
+  const base = parseVersion(current)
+  if (!next || !base) return false
+  for (const key of ['major', 'minor', 'patch']) {
+    const k = /** @type {'major' | 'minor' | 'patch'} */ (key)
+    if (next[k] > base[k]) return true
+    if (next[k] < base[k]) return false
+  }
+  if (next.prerelease === base.prerelease) return false
+  if (!next.prerelease) return Boolean(base.prerelease)
+  if (!base.prerelease) return false
+  return comparePrerelease(next.prerelease, base.prerelease) > 0
+}
+
+/**
  * Whether the running script lives somewhere `npm install -g` can replace.
  *
  * Skipped when the bin path:
@@ -116,7 +140,7 @@ export async function selfUpdate(options = {}) {
 
     const currentVersion = readVersion()
     const latest = await fetchLatest()
-    if (!latest || latest === currentVersion) return
+    if (!latest || !isNewerVersion(latest, currentVersion)) return
 
     log.write(`[collectivus] update available: ${currentVersion} -> ${latest}; running npm install -g collectivus@${latest}\n`)
     const installed = await install(latest)
@@ -162,4 +186,46 @@ function defaultRun(command, args, opts) {
     child.once('error', reject)
     child.once('exit', (code) => resolve(code === null ? -1 : code))
   })
+}
+
+/**
+ * @param {string} value
+ * @returns {{ major: number, minor: number, patch: number, prerelease: string } | undefined}
+ */
+function parseVersion(value) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value)
+  if (!match) return undefined
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    prerelease: match[4] ?? '',
+  }
+}
+
+/**
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+function comparePrerelease(a, b) {
+  const aa = a.split('.')
+  const bb = b.split('.')
+  const len = Math.max(aa.length, bb.length)
+  for (let i = 0; i < len; i++) {
+    const av = aa[i]
+    const bv = bb[i]
+    if (av === undefined) return -1
+    if (bv === undefined) return 1
+    const an = /^\d+$/.test(av) ? Number(av) : undefined
+    const bn = /^\d+$/.test(bv) ? Number(bv) : undefined
+    if (an !== undefined && bn !== undefined) {
+      if (an !== bn) return an - bn
+      continue
+    }
+    if (an !== undefined) return -1
+    if (bn !== undefined) return 1
+    if (av !== bv) return av < bv ? -1 : 1
+  }
+  return 0
 }

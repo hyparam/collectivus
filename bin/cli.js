@@ -129,13 +129,13 @@ async function loadSubcommand(name) {
  */
 async function checkForUpdates() {
   try {
-    const [{ readPackageVersion }, { fetchLatestVersion }] = await Promise.all([
+    const [{ readPackageVersion }, { fetchLatestVersion, isNewerVersion }] = await Promise.all([
       import('../src/cli/common.js'),
       import('../src/update.js'),
     ])
     const currentVersion = readPackageVersion()
     const latest = await fetchLatestVersion()
-    if (latest && latest !== currentVersion) {
+    if (latest && isNewerVersion(latest, currentVersion)) {
       process.stderr.write(
         `\x1b[33mA newer version of collectivus is available: ${latest} (current: ${currentVersion})\x1b[0m\n` +
         '\x1b[33mRun \'npm install -g collectivus\' to update\x1b[0m\n'

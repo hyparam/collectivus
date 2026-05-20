@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canSelfUpdate, fetchLatestVersion, isSupervised, runNpmInstall, selfUpdate } from '../src/update.js'
+import { canSelfUpdate, fetchLatestVersion, isNewerVersion, isSupervised, runNpmInstall, selfUpdate } from '../src/update.js'
 
 /**
  * Minimal stdout/stderr collector.
@@ -73,6 +73,25 @@ describe('fetchLatestVersion', () => {
   })
 })
 
+describe('isNewerVersion', () => {
+  it('compares semver components numerically', () => {
+    expect(isNewerVersion('3.2.0', '3.2.1')).toBe(false)
+    expect(isNewerVersion('3.10.0', '3.2.9')).toBe(true)
+    expect(isNewerVersion('4.0.0', '3.99.99')).toBe(true)
+  })
+
+  it('handles prerelease precedence', () => {
+    expect(isNewerVersion('3.2.1', '3.2.1-beta.1')).toBe(true)
+    expect(isNewerVersion('3.2.1-beta.2', '3.2.1-beta.1')).toBe(true)
+    expect(isNewerVersion('3.2.1-beta.1', '3.2.1')).toBe(false)
+  })
+
+  it('treats invalid versions as not newer', () => {
+    expect(isNewerVersion('latest', '3.2.1')).toBe(false)
+    expect(isNewerVersion('3.2.2', 'current')).toBe(false)
+  })
+})
+
 describe('runNpmInstall', () => {
   it('returns true on exit code 0', async () => {
     /** @type {string[]} */
@@ -138,6 +157,21 @@ describe('selfUpdate', () => {
     })
     expect(result).toBeUndefined()
     expect(installCalls).toBe(0)
+  })
+
+  it('does not install when registry returns an older version', async () => {
+    let installCalls = 0
+    const log = memo()
+    const result = await selfUpdate({
+      binPath: installedBinPath,
+      readVersion: () => '3.2.1',
+      fetchLatest: () => Promise.resolve('3.2.0'),
+      install: () => { installCalls++; return Promise.resolve(true) },
+      log,
+    })
+    expect(result).toBeUndefined()
+    expect(installCalls).toBe(0)
+    expect(log.value()).toBe('')
   })
 
   it('installs and returns the new version when newer', async () => {

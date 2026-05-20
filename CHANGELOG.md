@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.2] — 2026-05-20
+
+### Fixed
+
+- The foreground CLI update notice and daemon self-update check now compare
+  versions numerically, so an unpublished local patch release no longer treats
+  an older npm version as newer.
+
 ## [3.2.1] — 2026-05-20
 
 ### Fixed

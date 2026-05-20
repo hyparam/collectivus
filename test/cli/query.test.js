@@ -65,6 +65,46 @@ function gascitySinkRoot() {
 }
 
 /**
+ * Resolve the gascity event sink root for the current test.
+ *
+ * @returns {string}
+ */
+function gascityEventsSinkRoot() {
+  return path.join(tmpDir, '.collectivus', 'sink', 'gascity_events')
+}
+
+/**
+ * @param {string} date
+ * @param {'supervisor' | 'city'} eventScope
+ * @param {string | undefined} city
+ * @param {Record<string, unknown>[]} rows
+ * @returns {string}
+ */
+function writeGascityEventFixtures(date, eventScope, city, rows) {
+  const citySegment = city ? encodeURIComponent(city) : '_supervisor'
+  const filePath = path.join(
+    gascityEventsSinkRoot(),
+    `date=${date}`,
+    `event_scope=${eventScope}`,
+    `city=${citySegment}`,
+    'events.jsonl'
+  )
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  fs.writeFileSync(
+    filePath,
+    rows.map((row) => JSON.stringify({
+      gateway_id: GASCITY_GATEWAY_ID,
+      date,
+      event_scope: eventScope,
+      city: city ?? null,
+      supervisor_url: 'http://127.0.0.1:8372',
+      ...row,
+    })).join('\n') + '\n'
+  )
+  return filePath
+}
+
+/**
  * Write one or more fixture sessions of gascity rows through the real
  * `ParquetWriter` so the resulting on-disk layout matches what the daemon
  * produces.
@@ -848,6 +888,108 @@ describe('ctvs query gascity_messages', function() {
     for (const required of ['city', 'gascity_session_id', 'gascity_template', 'gascity_rig', 'gateway_id', 'date', 'message_created_at', 'part_type']) {
       expect(names).toContain(required)
     }
+
+    writeGascityEventFixtures('2026-05-20', 'supervisor', undefined, [
+      {
+        seq: 1,
+        event_id: '1',
+        type: 'city.created',
+        ts: '2026-05-20T00:00:00.000Z',
+        actor: 'supervisor',
+        raw_event: { seq: 1, type: 'city.created' },
+      },
+    ])
+    const eventCatalogOut = memo()
+    const eventCatalogCode = await runQuery(['catalog', '--config', configPath, '--format', 'json'], { stdout: eventCatalogOut, stderr: memo() })
+    expect(eventCatalogCode).toBe(0)
+    /** @type {Array<{ dataset: string, source_signal: string, columns: number, source_partitions: number }>} */
+    const eventCatalog = JSON.parse(eventCatalogOut.value())
+    const gascityEvents = eventCatalog.find((row) => row.dataset === 'gascity_events')
+    expect(gascityEvents).toMatchObject({ source_signal: 'gascity', source_partitions: 1 })
+    expect(gascityEvents?.columns).toBeGreaterThan(10)
+
+    const eventSchemaOut = memo()
+    const eventSchemaCode = await runQuery(['schema', 'gascity_events', '--format', 'json'], { stdout: eventSchemaOut, stderr: memo() })
+    expect(eventSchemaCode).toBe(0)
+    /** @type {Array<{ name: string }>} */
+    const eventSchema = JSON.parse(eventSchemaOut.value())
+    const eventNames = eventSchema.map((column) => column.name)
+    for (const required of ['gateway_id', 'date', 'event_scope', 'city', 'seq', 'type', 'payload', 'raw_event']) {
+      expect(eventNames).toContain(required)
+    }
+  })
+
+  it('runs SELECT SQL against the gascity event bus sink', async function() {
+    writeGascityEventFixtures('2026-05-20', 'supervisor', undefined, [
+      {
+        seq: 10,
+        event_id: '10',
+        type: 'city.created',
+        ts: '2026-05-20T00:00:00.000Z',
+        actor: 'supervisor',
+        payload: { city: 'hyptown' },
+        raw_event: { seq: 10, type: 'city.created' },
+      },
+    ])
+    writeGascityEventFixtures('2026-05-20', 'city', 'hyptown', [
+      {
+        seq: 11,
+        event_id: '11',
+        type: 'session.woke',
+        ts: '2026-05-20T00:00:01.000Z',
+        subject: 'hy-a',
+        payload: { template: 'desktop/refinery' },
+        raw_event: { seq: 11, type: 'session.woke' },
+      },
+    ])
+
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(
+      [
+        'sql',
+        'select event_scope, count(*) as n from gascity_events group by event_scope order by event_scope',
+        '--config', configPath,
+        '--format', 'json',
+      ],
+      { stdout, stderr }
+    )
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    /** @type {Array<{ event_scope: string, n: number }>} */
+    const rows = JSON.parse(stdout.value())
+    expect(rows).toEqual([
+      { event_scope: 'city', n: 1 },
+      { event_scope: 'supervisor', n: 1 },
+    ])
+  })
+
+  it('queries gascity_events even when the query cache is disabled', async function() {
+    fs.writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      sink: { type: 'file', dir: sinkDir },
+      query: { cache: { enabled: false } },
+    }))
+    writeGascityEventFixtures('2026-05-20', 'city', 'hyptown', [
+      {
+        seq: 11,
+        event_id: '11',
+        type: 'session.woke',
+        ts: '2026-05-20T00:00:01.000Z',
+        raw_event: { seq: 11, type: 'session.woke' },
+      },
+    ])
+    const stdout = memo()
+    const stderr = memo()
+    const code = await runQuery(
+      ['sql', 'select count(*) as n from gascity_events', '--config', configPath, '--format', 'json'],
+      { stdout, stderr }
+    )
+    expect(code).toBe(0)
+    expect(stderr.value()).toBe('')
+    /** @type {Array<{ n: number }>} */
+    const rows = JSON.parse(stdout.value())
+    expect(rows[0].n).toBe(1)
   })
 
   it('runs SELECT count(*) and SELECT * SQL against the gascity parquet sink', async function() {

@@ -114,6 +114,39 @@ export type NormalizerFn = (
  */
 export interface LifecycleCursor {
   last_event_id?: string
+  /** Last event bus `seq` observed on the same city stream, when present. */
+  last_seq?: number
+}
+
+/**
+ * Persistent cursor state for event bus capture. `last_event_id` is used for
+ * SSE resume and `last_seq` lets GET snapshots skip rows already recorded.
+ */
+export interface EventCursor {
+  last_event_id?: string
+  last_seq?: number
+}
+
+export type GascityEventScope = 'supervisor' | 'city'
+
+/**
+ * Normalized event bus row written under the gascity event sink.
+ */
+export interface GascityEventRow {
+  gateway_id: string
+  date: string
+  event_scope: GascityEventScope
+  city?: string | null
+  supervisor_url: string
+  seq?: number | null
+  event_id?: string | null
+  type?: string | null
+  ts?: string | null
+  actor?: string | null
+  subject?: string | null
+  message?: string | null
+  payload?: unknown
+  raw_event: unknown
 }
 
 /**

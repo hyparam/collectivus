@@ -1,6 +1,6 @@
 import { columnsForSignal } from '../upload/schema.js'
 import { columnsForMessages } from '../cli/messages-parquet.js'
-import { GASCITY_MESSAGES_COLUMNS } from '../gascity/schema.js'
+import { GASCITY_EVENTS_COLUMNS, GASCITY_MESSAGES_COLUMNS } from '../gascity/schema.js'
 
 /**
  * @import { ColumnSpec } from '../upload/upload.d.ts'
@@ -26,6 +26,7 @@ export const QUERY_DATASETS = [
   'metrics',
   'proxy_messages',
   'gascity_messages',
+  'gascity_events',
 ]
 
 /** @type {ColumnSpec} */
@@ -70,6 +71,11 @@ const SCHEMAS = {
     dataset: 'gascity_messages',
     sourceSignal: 'gascity',
     columns: GASCITY_MESSAGES_COLUMNS,
+  },
+  gascity_events: {
+    dataset: 'gascity_events',
+    sourceSignal: 'gascity',
+    columns: GASCITY_EVENTS_COLUMNS,
   },
 }
 
@@ -125,6 +131,7 @@ export function primaryTimestampColumn(dataset) {
   case 'metrics': return 'timestamp'
   case 'proxy_messages': return 'message_created_at'
   case 'gascity_messages': return 'message_created_at'
+  case 'gascity_events': return 'ts'
   default: return undefined
   }
 }
@@ -140,6 +147,7 @@ export function fallbackTimestampColumns(dataset) {
   case 'metrics': return ['timestamp', 'startTimestamp']
   case 'proxy_messages': return ['message_created_at', 'conversation_started_at']
   case 'gascity_messages': return ['message_created_at', 'conversation_started_at']
+  case 'gascity_events': return ['ts']
   default: return []
   }
 }

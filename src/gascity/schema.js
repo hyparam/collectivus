@@ -112,6 +112,29 @@ export const GASCITY_MESSAGES_COLUMNS_BY_NAME = new Map(
 )
 
 /**
+ * Ordered column list for the JSONL `gascity_events` dataset. Grain is one
+ * supervisor or city event bus item.
+ *
+ * @type {ReadonlyArray<ColumnSpec>}
+ */
+export const GASCITY_EVENTS_COLUMNS = [
+  { name: 'gateway_id', type: 'STRING', nullable: false },
+  { name: 'date', type: 'STRING', nullable: false },
+  { name: 'event_scope', type: 'STRING', nullable: false },
+  { name: 'city', type: 'STRING', nullable: true },
+  { name: 'supervisor_url', type: 'STRING', nullable: false },
+  { name: 'seq', type: 'INT64', nullable: true },
+  { name: 'event_id', type: 'STRING', nullable: true },
+  { name: 'type', type: 'STRING', nullable: true },
+  { name: 'ts', type: 'STRING', nullable: true },
+  { name: 'actor', type: 'STRING', nullable: true },
+  { name: 'subject', type: 'STRING', nullable: true },
+  { name: 'message', type: 'STRING', nullable: true },
+  { name: 'payload', type: 'JSON', nullable: true },
+  { name: 'raw_event', type: 'JSON', nullable: false },
+]
+
+/**
  * Coerce one cell value to the on-disk type the column expects. Mirrors the
  * coercion done by `messageRowsToParquet` so the two datasets land with
  * identical type semantics.

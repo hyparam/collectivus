@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { defaultSinkDir as defaultServerIngestDir } from '../server/ingest.js'
-import { defaultGascityRoot } from '../gascity/paths.js'
+import { defaultGascityEventsRoot, defaultGascityRoot } from '../gascity/paths.js'
 import { GASCITY_GATEWAY_ID } from '../gascity/schema.js'
 import {
   QUERY_CACHE_SCHEMA_VERSION,
@@ -31,6 +31,7 @@ const GATEWAY_PARTITION_PATTERN = /^gateway_id=(.+)$/
 const DATE_PARTITION_PATTERN = /^date=(\d{4}-\d{2}-\d{2})$/
 const CITY_PARTITION_PATTERN = /^city=(.+)$/
 const GASCITY_PART_FILE_PATTERN = /^part-.+\.parquet$/
+const GASCITY_EVENT_FILE = 'events.jsonl'
 
 /**
  * @param {CollectivusConfig} config
@@ -208,8 +209,13 @@ export function expectedCachePartitions(paths, scope) {
   if (!datasets || datasets.includes('gascity_messages')) {
     partitions.push(...discoverGascityPartitions(scope))
   }
+  if (!datasets || datasets.includes('gascity_events')) {
+    partitions.push(...discoverGascityEventPartitions(scope))
+  }
 
-  const otherRequested = datasets ? datasets.filter((d) => d !== 'gascity_messages') : undefined
+  const otherRequested = datasets
+    ? datasets.filter((d) => d !== 'gascity_messages' && d !== 'gascity_events')
+    : undefined
   const wantsOther = !datasets || (otherRequested && otherRequested.length > 0)
   if (!wantsOther || !paths.cacheDir) return partitions
 
@@ -276,12 +282,61 @@ export function discoverGascityPartitions(scope) {
 }
 
 /**
+ * @param {QueryScope} scope
+ * @returns {CachePartition[]}
+ */
+export function discoverGascityEventPartitions(scope) {
+  if (scope.gatewayId && scope.gatewayId !== GASCITY_GATEWAY_ID) return []
+  const root = defaultGascityEventsRoot()
+  if (!isDirectory(root)) return []
+  /** @type {CachePartition[]} */
+  const out = []
+  for (const dateEntry of safeReadDir(root)) {
+    const dateMatch = DATE_PARTITION_PATTERN.exec(dateEntry)
+    if (!dateMatch) continue
+    const date = dateMatch[1]
+    if (!dateMatchesScope(date, scope)) continue
+    const dateDir = path.join(root, dateEntry)
+    if (!isDirectory(dateDir)) continue
+    for (const scopeEntry of safeReadDir(dateDir)) {
+      if (!scopeEntry.startsWith('event_scope=')) continue
+      const scopeDir = path.join(dateDir, scopeEntry)
+      if (!isDirectory(scopeDir)) continue
+      for (const cityEntry of safeReadDir(scopeDir)) {
+        const cityMatch = CITY_PARTITION_PATTERN.exec(cityEntry)
+        if (!cityMatch) continue
+        const eventsPath = path.join(scopeDir, cityEntry, GASCITY_EVENT_FILE)
+        const stat = safeStat(eventsPath)
+        if (!stat || !stat.isFile()) continue
+        out.push({
+          dataset: 'gascity_events',
+          gatewayId: GASCITY_GATEWAY_ID,
+          date,
+          jsonlPath: eventsPath,
+          sourceSize: stat.size,
+          sourceMtimeMs: stat.mtimeMs,
+          cachePath: eventsPath,
+          cursorPath: '',
+          tablePath: eventsPath,
+          tableUrl: '',
+        })
+      }
+    }
+  }
+  return out
+}
+
+/**
  * @param {CachePartition} partition
  * @returns {CachePartitionState}
  */
 export function inspectCachePartition(partition) {
   if (partition.dataset === 'gascity_messages') {
     if (!isFile(partition.cachePath)) return { partition, status: 'missing', reason: 'parquet part file is missing' }
+    return { partition, status: 'fresh' }
+  }
+  if (partition.dataset === 'gascity_events') {
+    if (!isFile(partition.cachePath)) return { partition, status: 'missing', reason: 'event JSONL file is missing' }
     return { partition, status: 'fresh' }
   }
 
@@ -332,7 +387,7 @@ export function listBuiltinCacheCursors(cacheDir, scope) {
   /** @type {BuiltinCacheCursor[]} */
   const out = []
   for (const dataset of datasets) {
-    if (dataset === 'gascity_messages') continue
+    if (dataset === 'gascity_messages' || dataset === 'gascity_events') continue
     const datasetDir = path.join(cacheDir, 'datasets', dataset)
     for (const gatewayEntry of safeReadDir(datasetDir)) {
       const gatewayMatch = GATEWAY_PARTITION_PATTERN.exec(gatewayEntry)

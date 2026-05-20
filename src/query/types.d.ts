@@ -9,6 +9,7 @@ export type QueryDataset =
   | 'metrics'
   | 'proxy_messages'
   | 'gascity_messages'
+  | 'gascity_events'
 
 export type QueryFormat = 'table' | 'json' | 'jsonl' | 'markdown'
 export type QueryRefreshMode = 'never' | 'always'
@@ -41,9 +42,9 @@ export interface SourceFile {
   gatewayId: string
   /**
    * Signal of the on-disk JSONL file. Gascity is intentionally absent —
-   * gascity skips the JSONL stage entirely and `discoverSourceFiles` never
-   * yields a `SourceFile` for it; query-time discovery for `gascity_messages`
-   * goes through {@link CachePartition} directly via `discoverGascityPartitions`.
+   * gascity skips the normal JSONL stage and `discoverSourceFiles` never
+   * yields a `SourceFile` for it; query-time discovery for gascity built-ins
+   * goes through {@link CachePartition} directly.
    */
   signal: Signal | 'proxy'
   date: string

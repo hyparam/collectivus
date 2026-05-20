@@ -99,7 +99,7 @@ export async function resolveQueryTables(paths, scope, tableNames) {
     if (table.kind === 'builtin') {
       const { dataset } = table
       const partitions = expectedCachePartitions(paths, { ...scope, datasets: [dataset] })
-      tables[name] = dataset === 'gascity_messages'
+      tables[name] = isDirectGascityDataset(dataset)
         ? gascityDataSource(dataset, partitions, scope)
         : buildCacheDataSource(dataset, partitions, scope, await getLocalIcebergIO())
     } else {
@@ -183,7 +183,7 @@ export async function buildTables(paths, scope) {
     return localIcebergIO
   }
   for (const dataset of builtinDatasets) {
-    tables[dataset] = dataset === 'gascity_messages'
+    tables[dataset] = isDirectGascityDataset(dataset)
       ? gascityDataSource(dataset, byDataset[dataset] ?? [], scope)
       : buildCacheDataSource(dataset, byDataset[dataset] ?? [], scope, await getLocalIcebergIO())
   }
@@ -207,7 +207,7 @@ export async function buildTables(paths, scope) {
  * @returns {Promise<AsyncDataSource>}
  */
 export async function cacheDataSource(dataset, partitions, scope) {
-  if (dataset === 'gascity_messages') return gascityDataSource(dataset, partitions, scope)
+  if (isDirectGascityDataset(dataset)) return gascityDataSource(dataset, partitions, scope)
   return buildCacheDataSource(dataset, partitions, scope, await createLocalIcebergIO())
 }
 
@@ -314,7 +314,9 @@ async function* scanGascityRows(dataset, partitions, scope, options) {
   const seenRowIds = new Set()
   for (const partition of partitions) {
     if (options.signal?.aborted) return
-    const rows = await readGascityParquetRows(partition)
+    const rows = dataset === 'gascity_events'
+      ? readGascityEventRows(partition)
+      : await readGascityParquetRows(partition)
     for (const row of rows) {
       if (options.signal?.aborted) return
       const rowId = row._ctvs_row_id
@@ -423,6 +425,32 @@ async function readGascityParquetRows(partition) {
   const buf = fs.readFileSync(partition.cachePath)
   const file = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
   return await parquetReadObjects({ file, compressors })
+}
+
+/**
+ * @param {CachePartition} partition
+ * @returns {Record<string, unknown>[]}
+ */
+function readGascityEventRows(partition) {
+  const body = fs.readFileSync(partition.cachePath, 'utf8')
+  /** @type {Record<string, unknown>[]} */
+  const rows = []
+  const lines = body.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (line.length === 0) continue
+    try {
+      const parsed = JSON.parse(line)
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+      const row = /** @type {Record<string, unknown>} */ (parsed)
+      row._ctvs_row_id = gascityEventRowId(row) ?? `${partition.cachePath}:${i + 1}`
+      rows.push(row)
+    } catch {
+      // Skip malformed tail lines; the writer appends complete JSON objects,
+      // but a query can race a local filesystem flush.
+    }
+  }
+  return rows
 }
 
 /**
@@ -737,6 +765,30 @@ function collectionColumns(partitions) {
     for (const column of meta.columns) columns.add(column.name)
   }
   return [...columns]
+}
+
+/**
+ * @param {QueryDataset} dataset
+ * @returns {boolean}
+ */
+function isDirectGascityDataset(dataset) {
+  return dataset === 'gascity_messages' || dataset === 'gascity_events'
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @returns {string | undefined}
+ */
+function gascityEventRowId(row) {
+  const scope = typeof row.event_scope === 'string' ? row.event_scope : undefined
+  const city = typeof row.city === 'string' ? row.city : ''
+  if (!scope) return undefined
+  if (typeof row.seq === 'number' && Number.isFinite(row.seq)) return `${scope}:${city}:seq:${row.seq}`
+  if (typeof row.seq === 'bigint') return `${scope}:${city}:seq:${row.seq}`
+  if (typeof row.seq === 'string' && row.seq.length > 0) return `${scope}:${city}:seq:${row.seq}`
+  return typeof row.event_id === 'string' && row.event_id.length > 0
+    ? `${scope}:${city}:id:${row.event_id}`
+    : undefined
 }
 
 /**

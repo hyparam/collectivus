@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { GascityEventWriter } from '../../src/gascity/event_writer.js'
 import { NormalizerDispatcher } from '../../src/gascity/normalizer_dispatcher.js'
 import { SupervisorSubscriber } from '../../src/gascity/supervisor_subscriber.js'
 import { blockingSleep, holdingSseResponse, memoStream, waitFor } from './helpers.js'
@@ -185,6 +186,75 @@ describe('SupervisorSubscriber', () => {
     }))
     expect(subscriber.workers.get(sessionId)?.template).toBe(sessionId)
     await subscriber.stop()
+  })
+
+  it('records city event bus snapshots and stream events', async () => {
+    const stderr = memoStream()
+    const dispatcher = new NormalizerDispatcher({ stderr })
+    const eventSinkRoot = path.join(sinkRoot, 'gascity_events')
+    const eventWriter = new GascityEventWriter({ root: eventSinkRoot, stderr })
+    const fetchFn = vi.fn().mockImplementation(async (
+      /** @type {string} */ url, /** @type {{ signal: AbortSignal }} */ opts
+    ) => {
+      if (url.endsWith('/v0/city/hyptown/events')) {
+        return jsonResponse({
+          items: [{
+            seq: 3,
+            type: 'city.boot',
+            ts: '2026-05-20T00:00:00.000Z',
+            actor: 'supervisor',
+            payload: { ok: true },
+          }],
+        })
+      }
+      if (url.includes('/sessions?state=active')) {
+        return jsonResponse({ items: [] }, { 'x-gc-index': '3' })
+      }
+      if (url.includes('/events/stream')) {
+        return holdingSseResponse(
+          [
+            'id: 4\nevent: event\ndata: {"seq":4,"type":"session.woke","ts":"2026-05-20T00:00:01.000Z","subject":"hy-a","payload":{"template":"desktop/refinery"}}\n\n',
+          ],
+          opts.signal
+        )
+      }
+      return holdingSseResponse([], opts.signal)
+    })
+    const subscriber = new SupervisorSubscriber({
+      city: { name: 'hyptown', api_url: 'http://h:8372' },
+      sinkRoot,
+      eventSinkRoot,
+      dispatcher,
+      eventWriter,
+      stderr,
+      fetchFn,
+      sleep: blockingSleep(),
+    })
+    subscriber.start()
+    const eventsPath = path.join(
+      eventSinkRoot,
+      'date=2026-05-20',
+      'event_scope=city',
+      'city=hyptown',
+      'events.jsonl'
+    )
+    await waitFor(async () => {
+      const rows = await readJsonlFile(eventsPath)
+      return rows.length === 2
+    })
+    await subscriber.stop()
+    await eventWriter.stop()
+    const rows = await readJsonlFile(eventsPath)
+    expect(rows.map((row) => row.type).sort()).toEqual(['city.boot', 'session.woke'])
+    expect(rows.find((row) => row.type === 'session.woke')).toMatchObject({
+      gateway_id: 'gascity-scribe',
+      event_scope: 'city',
+      city: 'hyptown',
+      supervisor_url: 'http://h:8372',
+      seq: 4,
+      event_id: '4',
+      subject: 'hy-a',
+    })
   })
 
   it('retires a session worker from the supervisor event-log envelope', async () => {
@@ -474,4 +544,20 @@ function jsonResponse(body, headers = {}) {
       ...headers,
     },
   })
+}
+
+/**
+ * @param {string} filePath
+ * @returns {Promise<Record<string, unknown>[]>}
+ */
+async function readJsonlFile(filePath) {
+  try {
+    const body = await fs.readFile(filePath, 'utf8')
+    return body.trim().split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+  } catch (err) {
+    if (err && typeof err === 'object' && /** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') return []
+    throw err
+  }
 }

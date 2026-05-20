@@ -1,5 +1,7 @@
 import { backfillSession } from './backfill.js'
 import { readCursor, writeCursor } from './cursor.js'
+import { backfillEventSnapshot, cityEventsCursorPath, readEventCursor, writeEventCursor } from './event_bus.js'
+import { normalizeGascityEvent } from './event_writer.js'
 import { lifecycleCursorPath } from './paths.js'
 import { SessionWorker } from './session_worker.js'
 import { streamSse } from './sse_client.js'
@@ -10,6 +12,7 @@ import { compileFilter } from './template_filter.js'
  * @import { NormalizerDispatcher } from './normalizer_dispatcher.js'
  * @import { ParquetWriter } from './parquet_writer.js'
  * @import { GascityRuntimeStateWriter } from './runtime_state.js'
+ * @import { GascityEventWriter } from './event_writer.js'
  */
 
 const SPAWN_EVENTS = new Set(['session.created', 'session.woke'])
@@ -36,6 +39,8 @@ export class SupervisorSubscriber {
    *   sinkRoot: string,
    *   dispatcher: NormalizerDispatcher,
    *   writer?: ParquetWriter,
+   *   eventWriter?: GascityEventWriter,
+   *   eventSinkRoot?: string,
    *   stateWriter?: GascityRuntimeStateWriter,
    *   stderr?: { write: (s: string) => void },
    *   debug?: boolean,
@@ -52,6 +57,10 @@ export class SupervisorSubscriber {
     this.dispatcher = opts.dispatcher
     /** @type {ParquetWriter | undefined} */
     this.writer = opts.writer
+    /** @type {GascityEventWriter | undefined} */
+    this.eventWriter = opts.eventWriter
+    /** @type {string | undefined} */
+    this.eventSinkRoot = opts.eventSinkRoot
     /** @type {GascityRuntimeStateWriter | undefined} */
     this.stateWriter = opts.stateWriter
     /** @type {{ write: (s: string) => void }} */
@@ -72,6 +81,10 @@ export class SupervisorSubscriber {
     this.templateMatches = compileFilter(this.city.include_templates, this.city.exclude_templates)
     /** @type {string} */
     this.apiUrl = this.city.api_url.replace(/\/+$/, '')
+    /** @type {string | undefined} */
+    this.eventCursorPath = this.eventSinkRoot === undefined
+      ? undefined
+      : cityEventsCursorPath(this.eventSinkRoot, this.city.name)
   }
 
   /**
@@ -156,6 +169,7 @@ export class SupervisorSubscriber {
     if (this.stateWriter !== undefined) {
       this.stateWriter.upsertCity({ name: this.city.name, api_url: this.apiUrl })
     }
+    this.scheduleEventBackfill()
     if (this.controller.signal.aborted) return
     const seed = await this.seedActiveSessions()
     if (this.controller.signal.aborted) return
@@ -303,6 +317,36 @@ export class SupervisorSubscriber {
   }
 
   /**
+   * Backfill city-scope event rows from the snapshot endpoint in the background.
+   *
+   * @returns {void}
+   * @private
+   */
+  scheduleEventBackfill() {
+    if (this.eventWriter === undefined || this.eventCursorPath === undefined || this.eventSinkRoot === undefined) return
+    readEventCursor(this.eventCursorPath, this.stderr)
+      .then((cursor) => {
+        if (this.controller.signal.aborted) return 0
+        return backfillEventSnapshot({
+          apiUrl: this.apiUrl,
+          eventSinkRoot: this.eventSinkRoot,
+          writer: this.eventWriter,
+          cursorPath: this.eventCursorPath,
+          cursor,
+          city: this.city.name,
+          fetchFn: this.fetchFn ?? globalThis.fetch,
+          signal: this.controller.signal,
+          stderr: this.stderr,
+          debug: this.debug,
+        })
+      })
+      .catch((err) => {
+        if (this.controller.signal.aborted) return
+        this.stderr.write(`[gascity] city_events_backfill_failed city=${this.city.name} err=${formatError(err)}\n`)
+      })
+  }
+
+  /**
    * @param {import('../types.js').SseEvent} ev
    * @param {string} cursorPath
    * @returns {Promise<void>}
@@ -327,6 +371,7 @@ export class SupervisorSubscriber {
         return
       }
     }
+    await this.recordCityEvent(ev, payload)
     if (ev.id !== undefined) {
       try {
         await writeCursor(cursorPath, { last_event_id: ev.id })
@@ -351,6 +396,26 @@ export class SupervisorSubscriber {
     } else if (RETIRE_EVENTS.has(lifecycle.type)) {
       await this.retireWorker(sessionId)
     }
+  }
+
+  /**
+   * @param {import('../types.js').SseEvent} ev
+   * @param {unknown} payload
+   * @returns {Promise<void>}
+   * @private
+   */
+  async recordCityEvent(ev, payload) {
+    if (this.eventWriter === undefined || this.eventCursorPath === undefined) return
+    const row = normalizeGascityEvent({
+      raw: payload,
+      eventScope: 'city',
+      supervisorUrl: this.apiUrl,
+      city: this.city.name,
+      eventId: ev.id,
+      eventName: ev.event,
+    })
+    await this.eventWriter.append(row)
+    await writeEventCursor(this.eventCursorPath, ev.id, row, this.stderr)
   }
 
   /**
